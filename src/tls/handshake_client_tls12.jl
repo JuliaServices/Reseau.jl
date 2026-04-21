@@ -467,7 +467,7 @@ function _tls12_prepare_client_identity!(state::_TLS12ClientHandshakeState, conf
     state.have_certificate_request || return nothing
     identity = _tls_local_identity(config; is_server = false)
     identity === nothing && return nothing
-    certificate_chain = (identity::_TLSLocalIdentity).certificate_chain
+    certificate_chain = copy((identity::_TLSLocalIdentity).certificate_chain)
     private_key = identity.private_key
     keep_identity = false
     try
@@ -510,6 +510,10 @@ function _tls12_write_client_certificate_verify!(state::_TLS12ClientHandshakeSta
         _securezero!(signature)
     end
     return nothing
+end
+
+@inline function _tls12_client_transcript_needs_buffer(config, resumed::Bool)::Bool
+    return !resumed && config.cert_file !== nothing && config.key_file !== nothing
 end
 
 function _tls12_read_new_session_ticket!(state::_TLS12ClientHandshakeState, io::_TLS12HandshakeRecordIO, transcript::_TLS12TranscriptState)::Nothing
@@ -688,6 +692,7 @@ function _client_handshake_tls12_for_suite!(
             _transcript_digest(transcript),
         )
         _tls12_write_client_certificate_verify!(state, io, transcript)
+        _discard_transcript_buffer!(transcript)
         key_block = _tls12_keys_from_master_secret(hash_kind, master_secret, state.client_hello.random, state.server_hello.random, 0, cipher_spec.key_length, cipher_spec.iv_length)
         isempty(key_block.client_mac) || _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
         isempty(key_block.server_mac) || _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
@@ -738,9 +743,10 @@ function _client_handshake_tls12_after_server_hello!(
     raw_server_hello::Vector{UInt8},
     cache_key::AbstractString,
 )::Nothing
+    resumed = state.resumption_session !== nothing && state.server_hello.session_id == state.client_hello.session_id
     if state.cipher_suite == _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID ||
        state.cipher_suite == _TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256_ID
-        transcript = _TranscriptHash(_HASH_SHA256)
+        transcript = _TranscriptHash(_HASH_SHA256; buffer_handshake = _tls12_client_transcript_needs_buffer(config, resumed))
         return _client_handshake_tls12_for_suite!(
             state,
             io,
@@ -754,7 +760,7 @@ function _client_handshake_tls12_after_server_hello!(
         )
     elseif state.cipher_suite == _TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384_ID ||
            state.cipher_suite == _TLS12_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384_ID
-        transcript = _TranscriptHash(_HASH_SHA384)
+        transcript = _TranscriptHash(_HASH_SHA384; buffer_handshake = _tls12_client_transcript_needs_buffer(config, resumed))
         return _client_handshake_tls12_for_suite!(
             state,
             io,

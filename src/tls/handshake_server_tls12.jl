@@ -604,6 +604,10 @@ function _tls12_read_client_certificate_verify!(
     return nothing
 end
 
+@inline function _tls12_server_transcript_needs_buffer(config, resumed::Bool)::Bool
+    return !resumed && config.client_auth != ClientAuthMode.NoClientCert
+end
+
 function _tls12_read_client_finished!(
     io::_TLS12HandshakeRecordIO,
     transcript::_TLS12TranscriptState,
@@ -763,6 +767,7 @@ function _server_handshake_tls12_for_suite!(
             _transcript_digest(transcript),
         )
         _tls12_read_client_certificate_verify!(state, io, transcript)
+        _discard_transcript_buffer!(transcript)
         key_block = _tls12_keys_from_master_secret(
             hash_kind,
             master_secret,
@@ -800,7 +805,7 @@ function _server_handshake_tls12_after_client_hello!(
     _tls12_select_server_parameters!(state, config)
     if state.cipher_suite == _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID ||
        state.cipher_suite == _TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256_ID
-        transcript = _TranscriptHash(_HASH_SHA256)
+        transcript = _TranscriptHash(_HASH_SHA256; buffer_handshake = _tls12_server_transcript_needs_buffer(config, state.using_resumption))
         return _server_handshake_tls12_for_suite!(
             state,
             io,
@@ -812,7 +817,7 @@ function _server_handshake_tls12_after_client_hello!(
         )
     elseif state.cipher_suite == _TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384_ID ||
            state.cipher_suite == _TLS12_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384_ID
-        transcript = _TranscriptHash(_HASH_SHA384)
+        transcript = _TranscriptHash(_HASH_SHA384; buffer_handshake = _tls12_server_transcript_needs_buffer(config, state.using_resumption))
         return _server_handshake_tls12_for_suite!(
             state,
             io,

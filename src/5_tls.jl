@@ -135,23 +135,114 @@ struct _TLSLocalIdentity
     private_key::Ptr{Cvoid}
 end
 
-mutable struct _TLSLocalIdentityState
-    lock::ReentrantLock
+struct _TLSLocalIdentityFingerprint
+    cert_mtime::Float64
+    cert_size::Int64
+    key_mtime::Float64
+    key_size::Int64
+end
+
+struct _TLSLocalIdentityCacheKey
+    cert_file::String
+    key_file::String
+end
+
+@inline Base.:(==)(a::_TLSLocalIdentityCacheKey, b::_TLSLocalIdentityCacheKey) =
+    a.cert_file == b.cert_file && a.key_file == b.key_file
+
+@inline Base.hash(key::_TLSLocalIdentityCacheKey, h::UInt) =
+    hash(key.key_file, hash(key.cert_file, h))
+
+struct _TLSLocalIdentityCacheEntry
+    fingerprint::_TLSLocalIdentityFingerprint
     certificate_chain::Vector{Vector{UInt8}}
     private_key::Ptr{Cvoid}
 end
 
+mutable struct _TLSLocalIdentityState
+    lock::ReentrantLock
+    certificate_chain::Vector{Vector{UInt8}}
+    private_key::Ptr{Cvoid}
+    shared_cache::Bool
+end
+
+const _TLS_LOCAL_IDENTITY_CACHE_LOCK = ReentrantLock()
+const _TLS_LOCAL_IDENTITY_CACHE = Dict{_TLSLocalIdentityCacheKey, _TLSLocalIdentityCacheEntry}()
+
 function _finalize_tls_local_identity_state!(state::_TLSLocalIdentityState)::Nothing
-    state.private_key == C_NULL || _free_evp_pkey!(state.private_key)
+    !state.shared_cache && state.private_key != C_NULL && _free_evp_pkey!(state.private_key)
     state.private_key = C_NULL
-    empty!(state.certificate_chain)
+    state.certificate_chain = Vector{Vector{UInt8}}()
+    state.shared_cache = false
     return nothing
 end
 
 function _TLSLocalIdentityState()::_TLSLocalIdentityState
-    state = _TLSLocalIdentityState(ReentrantLock(), Vector{Vector{UInt8}}(), C_NULL)
+    state = _TLSLocalIdentityState(ReentrantLock(), Vector{Vector{UInt8}}(), C_NULL, false)
     finalizer(_finalize_tls_local_identity_state!, state)
     return state
+end
+
+@inline function _tls_local_identity_cache_key(cert_file::String, key_file::String)::_TLSLocalIdentityCacheKey
+    return _TLSLocalIdentityCacheKey(cert_file, key_file)
+end
+
+function _tls_local_identity_fingerprint(cert_file::AbstractString, key_file::AbstractString)::_TLSLocalIdentityFingerprint
+    cert_stat = stat(cert_file)
+    key_stat = stat(key_file)
+    return _TLSLocalIdentityFingerprint(
+        cert_stat.mtime,
+        Int64(cert_stat.size),
+        key_stat.mtime,
+        Int64(key_stat.size),
+    )
+end
+
+function _tls_cached_local_identity(cert_file::AbstractString, key_file::AbstractString)::_TLSLocalIdentityCacheEntry
+    cache_key = _tls_local_identity_cache_key(cert_file, key_file)
+    fingerprint = _tls_local_identity_fingerprint(cert_file, key_file)
+    lock(_TLS_LOCAL_IDENTITY_CACHE_LOCK)
+    try
+        if haskey(_TLS_LOCAL_IDENTITY_CACHE, cache_key)
+            entry = _TLS_LOCAL_IDENTITY_CACHE[cache_key]
+            if entry.fingerprint == fingerprint
+                return entry
+            end
+        end
+    finally
+        unlock(_TLS_LOCAL_IDENTITY_CACHE_LOCK)
+    end
+
+    cert_pem = _read_tls_file_bytes(cert_file)
+    key_pem = _read_tls_file_bytes(key_file)
+    certificate_chain = Vector{Vector{UInt8}}()
+    private_key = Ptr{Cvoid}(C_NULL)
+    try
+        certificate_chain = _tls13_load_x509_pem_chain(cert_pem)
+        private_key = _tls13_load_private_key_pem(key_pem)
+    finally
+        _securezero!(key_pem)
+    end
+
+    new_entry = _TLSLocalIdentityCacheEntry(fingerprint, certificate_chain, private_key)
+    lock(_TLS_LOCAL_IDENTITY_CACHE_LOCK)
+    try
+        if haskey(_TLS_LOCAL_IDENTITY_CACHE, cache_key)
+            current = _TLS_LOCAL_IDENTITY_CACHE[cache_key]
+            if current.fingerprint == fingerprint
+                _free_evp_pkey!(private_key)
+                return current
+            else
+                _TLS_LOCAL_IDENTITY_CACHE[cache_key] = new_entry
+                return new_entry
+            end
+        else
+            _TLS_LOCAL_IDENTITY_CACHE[cache_key] = new_entry
+            return new_entry
+        end
+    finally
+        unlock(_TLS_LOCAL_IDENTITY_CACHE_LOCK)
+    end
 end
 
 function Base.showerror(io::IO, err::ConfigError)
@@ -264,8 +355,8 @@ function Config(;
     # Normalize to owned `String` storage so shared configs do not depend on caller-owned
     # string buffers or views.
     server_name_s = server_name === nothing ? nothing : String(server_name)
-    cert_file_s = cert_file === nothing ? nothing : String(cert_file)
-    key_file_s = key_file === nothing ? nothing : String(key_file)
+    cert_file_s = cert_file === nothing ? nothing : abspath(String(cert_file))
+    key_file_s = key_file === nothing ? nothing : abspath(String(key_file))
     ca_file_s = ca_file === nothing ? nothing : String(ca_file)
     client_ca_file_s = client_ca_file === nothing ? nothing : String(client_ca_file)
     has_cert = cert_file_s !== nothing
@@ -435,6 +526,7 @@ function __init__()
     # before any TLS handshake or record code reaches into EVP/X509 routines.
     global _LIBCRYPTO_PATH = OpenSSL_jll.libcrypto_path
     global _LIBSSL_PATH = OpenSSL_jll.libssl_path
+    empty!(_TLS_LOCAL_IDENTITY_CACHE)
     _ = @gcsafe_ccall _LIBSSL_PATH.OPENSSL_init_ssl(
         Culong(0)::Culong,
         C_NULL::Ptr{Cvoid},
@@ -525,21 +617,10 @@ function _tls_local_identity(config::Config; is_server::Bool)::Union{Nothing, _T
     lock(state.lock)
     try
         if state.private_key == C_NULL
-            cert_pem = _read_tls_file_bytes(cert_file::String)
-            key_pem = _read_tls_file_bytes(key_file)
-            certificate_chain = Vector{Vector{UInt8}}()
-            private_key = Ptr{Cvoid}(C_NULL)
-            try
-                certificate_chain = _tls13_load_x509_pem_chain(cert_pem)
-                private_key = _tls13_load_private_key_pem(key_pem)
-                state.certificate_chain = certificate_chain
-                state.private_key = private_key
-                certificate_chain = Vector{Vector{UInt8}}()
-                private_key = C_NULL
-            finally
-                _securezero!(key_pem)
-                private_key == C_NULL || _free_evp_pkey!(private_key)
-            end
+            entry = _tls_cached_local_identity(cert_file::String, key_file)
+            state.certificate_chain = entry.certificate_chain
+            state.private_key = entry.private_key
+            state.shared_cache = true
         end
         return _TLSLocalIdentity(state.certificate_chain, _up_ref_evp_pkey!(state.private_key))
     finally
@@ -1101,6 +1182,7 @@ end
 # the exact TLS 1.2 record/handshake code can continue from the same stream.
 function _tls12_copy_initial_state(state13::_TLS13NativeClientState)::_TLS12NativeState
     state12 = _TLS12NativeState()
+    state12.record_buffer = copy(state13.record_buffer)
     state12.handshake_buffer = copy(state13.handshake_buffer)
     state12.handshake_buffer_pos = state13.handshake_buffer_pos
     state12.plaintext_buffer = copy(state13.plaintext_buffer)
@@ -1131,7 +1213,7 @@ function _native_tls13_client_handshake!(conn::Conn)::Nothing
     try
         identity = _tls_local_identity(conn.config; is_server = false)
         if identity !== nothing
-            state.client_certificate_chain = (identity::_TLSLocalIdentity).certificate_chain
+            state.client_certificate_chain = copy((identity::_TLSLocalIdentity).certificate_chain)
             state.client_private_key = identity.private_key
         end
         _client_handshake_tls13!(state, io)
@@ -1928,8 +2010,7 @@ function _native_tls13_write_application!(conn::Conn, ptr::Ptr{UInt8}, nbytes::I
     total = 0
     while total < nbytes
         chunk_len = min(nbytes - total, _TLS13_MAX_PLAINTEXT)
-        chunk = unsafe_wrap(Vector{UInt8}, ptr + total, chunk_len; own = false)
-        _tls13_write_record!(conn.tcp, state.write_cipher, _TLS_RECORD_TYPE_APPLICATION_DATA, chunk)
+        _tls13_write_record!(conn.tcp, state.write_cipher, _TLS_RECORD_TYPE_APPLICATION_DATA, ptr + total, chunk_len)
         total += chunk_len
     end
     return total
@@ -1940,8 +2021,7 @@ function _native_tls12_write_application!(conn::Conn, ptr::Ptr{UInt8}, nbytes::I
     total = 0
     while total < nbytes
         chunk_len = min(nbytes - total, _TLS12_MAX_PLAINTEXT)
-        chunk = unsafe_wrap(Vector{UInt8}, ptr + total, chunk_len; own = false)
-        _tls12_write_record!(conn.tcp, state.write_cipher, _TLS_RECORD_TYPE_APPLICATION_DATA, chunk)
+        _tls12_write_record!(conn.tcp, state.write_cipher, _TLS_RECORD_TYPE_APPLICATION_DATA, ptr + total, chunk_len)
         total += chunk_len
     end
     return total

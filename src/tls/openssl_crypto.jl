@@ -111,6 +111,41 @@ end
     return nothing
 end
 
+@inline function _reset_evp_cipher_ctx!(ctx::Ptr{Cvoid})::Nothing
+    _openssl_require_ok(
+        ccall((:EVP_CIPHER_CTX_reset, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid},), ctx),
+        "EVP_CIPHER_CTX_reset",
+    )
+    return nothing
+end
+
+"""
+    _OpenSSLAEADState
+
+Persistent AEAD backend state for one record-protection direction.
+
+The native TLS record layer keeps one of these per read/write direction so we can
+reuse an `EVP_CIPHER_CTX` across records instead of allocating and freeing a
+fresh OpenSSL cipher context for every seal/open operation.
+"""
+mutable struct _OpenSSLAEADState
+    cipher::Ptr{Cvoid}
+    ctx::Ptr{Cvoid}
+    iv_len::Int
+end
+
+function _OpenSSLAEADState(cipher::Ptr{Cvoid}, iv_len::Int)
+    ctx = ccall((:EVP_CIPHER_CTX_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
+    _openssl_require_nonnull(ctx, "EVP_CIPHER_CTX_new")
+    return _OpenSSLAEADState(cipher, ctx, iv_len)
+end
+
+function _free_openssl_aead_state!(state::_OpenSSLAEADState)::Nothing
+    _free_evp_cipher_ctx!(state.ctx)
+    state.ctx = C_NULL
+    return nothing
+end
+
 @inline function _free_bio!(bio::Ptr{Cvoid})::Nothing
     bio == C_NULL || ccall((:BIO_free, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid},), bio)
     return nothing
@@ -382,24 +417,26 @@ function _tls13_load_private_key_pem(key_pem::AbstractVector{UInt8})::Ptr{Cvoid}
     key_bytes = Vector{UInt8}(key_pem)
     bio = Ptr{Cvoid}(C_NULL)
     try
-        bio = GC.@preserve key_bytes ccall(
-            (:BIO_new_mem_buf, _LIBCRYPTO_PATH),
-            Ptr{Cvoid},
-            (Ptr{UInt8}, Cint),
-            pointer(key_bytes),
-            Cint(length(key_bytes)),
-        )
-        _openssl_require_nonnull(bio, "BIO_new_mem_buf")
-        pkey = ccall(
-            (:PEM_read_bio_PrivateKey, _LIBCRYPTO_PATH),
-            Ptr{Cvoid},
-            (Ptr{Cvoid}, Ptr{Ptr{Cvoid}}, Ptr{Cvoid}, Ptr{Cvoid}),
-            bio,
-            C_NULL,
-            C_NULL,
-            C_NULL,
-        )
-        return _openssl_require_nonnull(pkey, "PEM_read_bio_PrivateKey")
+        return GC.@preserve key_bytes begin
+            bio = ccall(
+                (:BIO_new_mem_buf, _LIBCRYPTO_PATH),
+                Ptr{Cvoid},
+                (Ptr{UInt8}, Cint),
+                pointer(key_bytes),
+                Cint(length(key_bytes)),
+            )
+            _openssl_require_nonnull(bio, "BIO_new_mem_buf")
+            pkey = ccall(
+                (:PEM_read_bio_PrivateKey, _LIBCRYPTO_PATH),
+                Ptr{Cvoid},
+                (Ptr{Cvoid}, Ptr{Ptr{Cvoid}}, Ptr{Cvoid}, Ptr{Cvoid}),
+                bio,
+                C_NULL,
+                C_NULL,
+                C_NULL,
+            )
+            return _openssl_require_nonnull(pkey, "PEM_read_bio_PrivateKey")
+        end
     finally
         _free_bio!(bio)
         _securezero!(key_bytes)
@@ -1026,6 +1063,135 @@ end
     throw(ArgumentError("tls12 native record layer only supports AES-GCM cipher suites"))
 end
 
+function _openssl_prepare_encrypt_record_ctx!(
+    aead::_OpenSSLAEADState,
+    key_bytes::Vector{UInt8},
+    iv_bytes::Vector{UInt8},
+)::Nothing
+    length(iv_bytes) == aead.iv_len || throw(ArgumentError("unexpected AEAD IV length"))
+    ctx = aead.ctx
+    _reset_evp_cipher_ctx!(ctx)
+    ok = ccall((:EVP_EncryptInit_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Ptr{UInt8}), ctx, aead.cipher, C_NULL, Ptr{UInt8}(C_NULL), Ptr{UInt8}(C_NULL))
+    _openssl_require_ok(ok, "EVP_EncryptInit_ex")
+    ok = ccall((:EVP_CIPHER_CTX_ctrl, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Cint, Cint, Ptr{Cvoid}), ctx, _EVP_CTRL_AEAD_SET_IVLEN, Cint(aead.iv_len), C_NULL)
+    _openssl_require_ok(ok, "EVP_CIPHER_CTX_ctrl(SET_IVLEN)")
+    GC.@preserve key_bytes iv_bytes begin
+        ok = ccall((:EVP_EncryptInit_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Ptr{UInt8}), ctx, C_NULL, C_NULL, pointer(key_bytes), pointer(iv_bytes))
+        _openssl_require_ok(ok, "EVP_EncryptInit_ex(key/iv)")
+    end
+    return nothing
+end
+
+function _openssl_prepare_decrypt_record_ctx!(
+    aead::_OpenSSLAEADState,
+    key_bytes::Vector{UInt8},
+    iv_bytes::Vector{UInt8},
+)::Nothing
+    length(iv_bytes) == aead.iv_len || throw(ArgumentError("unexpected AEAD IV length"))
+    ctx = aead.ctx
+    _reset_evp_cipher_ctx!(ctx)
+    ok = ccall((:EVP_DecryptInit_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Ptr{UInt8}), ctx, aead.cipher, C_NULL, Ptr{UInt8}(C_NULL), Ptr{UInt8}(C_NULL))
+    _openssl_require_ok(ok, "EVP_DecryptInit_ex")
+    ok = ccall((:EVP_CIPHER_CTX_ctrl, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Cint, Cint, Ptr{Cvoid}), ctx, _EVP_CTRL_AEAD_SET_IVLEN, Cint(aead.iv_len), C_NULL)
+    _openssl_require_ok(ok, "EVP_CIPHER_CTX_ctrl(SET_IVLEN)")
+    GC.@preserve key_bytes iv_bytes begin
+        ok = ccall((:EVP_DecryptInit_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Ptr{UInt8}), ctx, C_NULL, C_NULL, pointer(key_bytes), pointer(iv_bytes))
+        _openssl_require_ok(ok, "EVP_DecryptInit_ex(key/iv)")
+    end
+    return nothing
+end
+
+function _openssl_encrypt_record_aead!(
+    aead::_OpenSSLAEADState,
+    out::Vector{UInt8},
+    io_pos::Int,
+    plaintext_len::Int,
+    key_bytes::Vector{UInt8},
+    iv_bytes::Vector{UInt8},
+    aad_ptr::Ptr{UInt8},
+    aad_len::Int,
+)::Int
+    _openssl_prepare_encrypt_record_ctx!(aead, key_bytes, iv_bytes)
+    ctx = aead.ctx
+    out_len = Ref{Cint}(0)
+    total = 0
+    if aad_len != 0
+        ok = ccall((:EVP_EncryptUpdate, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Cint}, Ptr{UInt8}, Cint), ctx, Ptr{UInt8}(C_NULL), out_len, aad_ptr, Cint(aad_len))
+        _openssl_require_ok(ok, "EVP_EncryptUpdate(aad)")
+    end
+    GC.@preserve out begin
+        if plaintext_len != 0
+            io_ptr = pointer(out, io_pos)
+            ok = ccall((:EVP_EncryptUpdate, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Cint}, Ptr{UInt8}, Cint), ctx, io_ptr, out_len, io_ptr, Cint(plaintext_len))
+            _openssl_require_ok(ok, "EVP_EncryptUpdate")
+            total += Int(out_len[])
+        end
+        ok = ccall((:EVP_EncryptFinal_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Cint}), ctx, pointer(out, io_pos + total), out_len)
+        _openssl_require_ok(ok, "EVP_EncryptFinal_ex")
+        total += Int(out_len[])
+        ok = ccall((:EVP_CIPHER_CTX_ctrl, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Cint, Cint, Ptr{Cvoid}), ctx, _EVP_CTRL_AEAD_GET_TAG, Cint(16), pointer(out, io_pos + total))
+        _openssl_require_ok(ok, "EVP_CIPHER_CTX_ctrl(GET_TAG)")
+    end
+    return total + 16
+end
+
+function _openssl_decrypt_record_aead!(
+    aead::_OpenSSLAEADState,
+    io::Vector{UInt8},
+    io_pos::Int,
+    ciphertext_len::Int,
+    tag_pos::Int,
+    key_bytes::Vector{UInt8},
+    iv_bytes::Vector{UInt8},
+    aad_ptr::Ptr{UInt8},
+    aad_len::Int,
+)::Union{Int, Nothing}
+    _openssl_prepare_decrypt_record_ctx!(aead, key_bytes, iv_bytes)
+    ctx = aead.ctx
+    out_len = Ref{Cint}(0)
+    total = 0
+    if aad_len != 0
+        ok = ccall((:EVP_DecryptUpdate, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Cint}, Ptr{UInt8}, Cint), ctx, Ptr{UInt8}(C_NULL), out_len, aad_ptr, Cint(aad_len))
+        _openssl_require_ok(ok, "EVP_DecryptUpdate(aad)")
+    end
+    GC.@preserve io begin
+        if ciphertext_len != 0
+            io_ptr = pointer(io, io_pos)
+            ok = ccall((:EVP_DecryptUpdate, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Cint}, Ptr{UInt8}, Cint), ctx, io_ptr, out_len, io_ptr, Cint(ciphertext_len))
+            _openssl_require_ok(ok, "EVP_DecryptUpdate")
+            total += Int(out_len[])
+        end
+        ok = ccall((:EVP_CIPHER_CTX_ctrl, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Cint, Cint, Ptr{Cvoid}), ctx, _EVP_CTRL_AEAD_SET_TAG, Cint(16), pointer(io, tag_pos))
+        _openssl_require_ok(ok, "EVP_CIPHER_CTX_ctrl(SET_TAG)")
+        final_ok = ccall((:EVP_DecryptFinal_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Cint}), ctx, pointer(io, io_pos + total), out_len)
+        final_ok == 1 || return nothing
+        total += Int(out_len[])
+    end
+    return total
+end
+
+function _tls12_encrypt_record_aead!(
+    aead::_OpenSSLAEADState,
+    out::Vector{UInt8},
+    io_pos::Int,
+    plaintext_len::Int,
+    key::Vector{UInt8},
+    iv::Vector{UInt8},
+    aad_ptr::Ptr{UInt8},
+    aad_len::Int,
+)::Int
+    return _openssl_encrypt_record_aead!(
+        aead,
+        out,
+        io_pos,
+        plaintext_len,
+        key,
+        iv,
+        aad_ptr,
+        aad_len,
+    )
+end
+
 function _tls12_encrypt_record_aead(
     spec::_TLS12CipherSpec,
     key::AbstractVector{UInt8},
@@ -1037,50 +1203,49 @@ function _tls12_encrypt_record_aead(
     iv_bytes = iv isa Vector{UInt8} ? iv : Vector{UInt8}(iv)
     aad_bytes = additional_data isa Vector{UInt8} ? additional_data : Vector{UInt8}(additional_data)
     plaintext_bytes = plaintext isa Vector{UInt8} ? plaintext : Vector{UInt8}(plaintext)
-    ctx = ccall((:EVP_CIPHER_CTX_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
-    _openssl_require_nonnull(ctx, "EVP_CIPHER_CTX_new")
-    ciphertext = Vector{UInt8}(undef, length(plaintext_bytes) + 16)
-    tag = Vector{UInt8}(undef, 16)
-    out_len = Ref{Cint}(0)
-    total = 0
-    try
-        cipher = _tls12_record_cipher(spec)
-        ok = ccall((:EVP_EncryptInit_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Ptr{UInt8}), ctx, cipher, C_NULL, Ptr{UInt8}(C_NULL), Ptr{UInt8}(C_NULL))
-        _openssl_require_ok(ok, "EVP_EncryptInit_ex")
-        ok = ccall((:EVP_CIPHER_CTX_ctrl, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Cint, Cint, Ptr{Cvoid}), ctx, _EVP_CTRL_AEAD_SET_IVLEN, Cint(length(iv_bytes)), C_NULL)
-        _openssl_require_ok(ok, "EVP_CIPHER_CTX_ctrl(SET_IVLEN)")
-        GC.@preserve key_bytes iv_bytes begin
-            ok = ccall((:EVP_EncryptInit_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Ptr{UInt8}), ctx, C_NULL, C_NULL, pointer(key_bytes), pointer(iv_bytes))
-            _openssl_require_ok(ok, "EVP_EncryptInit_ex(key/iv)")
-        end
-        if !isempty(aad_bytes)
-            GC.@preserve aad_bytes begin
-                ok = ccall((:EVP_EncryptUpdate, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Cint}, Ptr{UInt8}, Cint), ctx, Ptr{UInt8}(C_NULL), out_len, pointer(aad_bytes), Cint(length(aad_bytes)))
-                _openssl_require_ok(ok, "EVP_EncryptUpdate(aad)")
-            end
-        end
-        if !isempty(plaintext_bytes)
-            GC.@preserve plaintext_bytes ciphertext begin
-                ok = ccall((:EVP_EncryptUpdate, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Cint}, Ptr{UInt8}, Cint), ctx, pointer(ciphertext), out_len, pointer(plaintext_bytes), Cint(length(plaintext_bytes)))
-                _openssl_require_ok(ok, "EVP_EncryptUpdate")
-            end
-            total += Int(out_len[])
-        end
-        GC.@preserve ciphertext begin
-            ok = ccall((:EVP_EncryptFinal_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Cint}), ctx, pointer(ciphertext, total + 1), out_len)
-            _openssl_require_ok(ok, "EVP_EncryptFinal_ex")
-        end
-        total += Int(out_len[])
-        GC.@preserve tag begin
-            ok = ccall((:EVP_CIPHER_CTX_ctrl, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Cint, Cint, Ptr{Cvoid}), ctx, _EVP_CTRL_AEAD_GET_TAG, Cint(length(tag)), pointer(tag))
-            _openssl_require_ok(ok, "EVP_CIPHER_CTX_ctrl(GET_TAG)")
-        end
-        resize!(ciphertext, total)
-        append!(ciphertext, tag)
-        return ciphertext
+    ciphertext = Vector{UInt8}(plaintext_bytes)
+    resize!(ciphertext, length(plaintext_bytes) + 16)
+    aead = _OpenSSLAEADState(_tls12_record_cipher(spec), length(iv_bytes))
+    ciphertext_len = try
+        GC.@preserve ciphertext aad_bytes _tls12_encrypt_record_aead!(
+            aead,
+            ciphertext,
+            1,
+            length(plaintext_bytes),
+            key_bytes,
+            iv_bytes,
+            isempty(aad_bytes) ? Ptr{UInt8}(C_NULL) : pointer(aad_bytes),
+            length(aad_bytes),
+        )
     finally
-        _free_evp_cipher_ctx!(ctx)
+        _free_openssl_aead_state!(aead)
     end
+    resize!(ciphertext, ciphertext_len)
+    return ciphertext
+end
+
+function _tls12_decrypt_record_aead!(
+    aead::_OpenSSLAEADState,
+    io::Vector{UInt8},
+    io_pos::Int,
+    ciphertext_len::Int,
+    tag_pos::Int,
+    key::Vector{UInt8},
+    iv::Vector{UInt8},
+    aad_ptr::Ptr{UInt8},
+    aad_len::Int,
+)::Union{Int, Nothing}
+    return _openssl_decrypt_record_aead!(
+        aead,
+        io,
+        io_pos,
+        ciphertext_len,
+        tag_pos,
+        key,
+        iv,
+        aad_ptr,
+        aad_len,
+    )
 end
 
 function _tls12_decrypt_record_aead(
@@ -1094,62 +1259,29 @@ function _tls12_decrypt_record_aead(
     key_bytes = key isa Vector{UInt8} ? key : Vector{UInt8}(key)
     iv_bytes = iv isa Vector{UInt8} ? iv : Vector{UInt8}(iv)
     aad_bytes = additional_data isa Vector{UInt8} ? additional_data : Vector{UInt8}(additional_data)
-    ciphertext_len = length(ciphertext_and_tag) - 16
-    ciphertext = Vector{UInt8}(undef, ciphertext_len)
-    copyto!(ciphertext, 1, ciphertext_and_tag, 1, ciphertext_len)
-    tag = Vector{UInt8}(undef, 16)
-    copyto!(tag, 1, ciphertext_and_tag, ciphertext_len + 1, 16)
-    plaintext = Vector{UInt8}(undef, ciphertext_len)
-    ctx = ccall((:EVP_CIPHER_CTX_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
-    _openssl_require_nonnull(ctx, "EVP_CIPHER_CTX_new")
-    out_len = Ref{Cint}(0)
-    total = 0
+    ciphertext = Vector{UInt8}(ciphertext_and_tag)
+    ciphertext_len = length(ciphertext) - 16
+    aead = _OpenSSLAEADState(_tls12_record_cipher(spec), length(iv_bytes))
     try
-        cipher = _tls12_record_cipher(spec)
-        ok = ccall((:EVP_DecryptInit_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Ptr{UInt8}), ctx, cipher, C_NULL, Ptr{UInt8}(C_NULL), Ptr{UInt8}(C_NULL))
-        _openssl_require_ok(ok, "EVP_DecryptInit_ex")
-        ok = ccall((:EVP_CIPHER_CTX_ctrl, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Cint, Cint, Ptr{Cvoid}), ctx, _EVP_CTRL_AEAD_SET_IVLEN, Cint(length(iv_bytes)), C_NULL)
-        _openssl_require_ok(ok, "EVP_CIPHER_CTX_ctrl(SET_IVLEN)")
-        GC.@preserve key_bytes iv_bytes begin
-            ok = ccall((:EVP_DecryptInit_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Ptr{UInt8}), ctx, C_NULL, C_NULL, pointer(key_bytes), pointer(iv_bytes))
-            _openssl_require_ok(ok, "EVP_DecryptInit_ex(key/iv)")
-        end
-        if !isempty(aad_bytes)
-            GC.@preserve aad_bytes begin
-                ok = ccall((:EVP_DecryptUpdate, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Cint}, Ptr{UInt8}, Cint), ctx, Ptr{UInt8}(C_NULL), out_len, pointer(aad_bytes), Cint(length(aad_bytes)))
-                _openssl_require_ok(ok, "EVP_DecryptUpdate(aad)")
-            end
-        end
-        if !isempty(ciphertext)
-            GC.@preserve ciphertext plaintext begin
-                ok = ccall((:EVP_DecryptUpdate, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Cint}, Ptr{UInt8}, Cint), ctx, pointer(plaintext), out_len, pointer(ciphertext), Cint(length(ciphertext)))
-                _openssl_require_ok(ok, "EVP_DecryptUpdate")
-            end
-            total += Int(out_len[])
-        end
-        GC.@preserve tag begin
-            ok = ccall((:EVP_CIPHER_CTX_ctrl, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Cint, Cint, Ptr{Cvoid}), ctx, _EVP_CTRL_AEAD_SET_TAG, Cint(length(tag)), pointer(tag))
-            _openssl_require_ok(ok, "EVP_CIPHER_CTX_ctrl(SET_TAG)")
-        end
-        final_ok = GC.@preserve plaintext ccall(
-            (:EVP_DecryptFinal_ex, _LIBCRYPTO_PATH),
-            Cint,
-            (Ptr{Cvoid}, Ptr{UInt8}, Ref{Cint}),
-            ctx,
-            pointer(plaintext, total + 1),
-            out_len,
+        plaintext_len = GC.@preserve ciphertext aad_bytes _tls12_decrypt_record_aead!(
+            aead,
+            ciphertext,
+            1,
+            ciphertext_len,
+            ciphertext_len + 1,
+            key_bytes,
+            iv_bytes,
+            isempty(aad_bytes) ? Ptr{UInt8}(C_NULL) : pointer(aad_bytes),
+            length(aad_bytes),
         )
-        if final_ok != 1
-            _securezero!(plaintext)
+        if plaintext_len === nothing
+            _securezero!(ciphertext)
             return nothing
         end
-        total += Int(out_len[])
-        resize!(plaintext, total)
-        return plaintext
+        resize!(ciphertext, plaintext_len::Int)
+        return ciphertext
     finally
-        _free_evp_cipher_ctx!(ctx)
-        _securezero!(ciphertext)
-        _securezero!(tag)
+        _free_openssl_aead_state!(aead)
     end
 end
 
@@ -1158,6 +1290,28 @@ end
     spec == _TLS13_AES_256_GCM_SHA384 && return ccall((:EVP_aes_256_gcm, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
     spec == _TLS13_CHACHA20_POLY1305_SHA256 && return ccall((:EVP_chacha20_poly1305, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
     throw(ArgumentError("tls13 native record layer only supports AES-GCM and ChaCha20-Poly1305 cipher suites"))
+end
+
+function _tls13_encrypt_record_aead!(
+    aead::_OpenSSLAEADState,
+    out::Vector{UInt8},
+    io_pos::Int,
+    plaintext_len::Int,
+    key::Vector{UInt8},
+    iv::Vector{UInt8},
+    aad_ptr::Ptr{UInt8},
+    aad_len::Int,
+)::Int
+    return _openssl_encrypt_record_aead!(
+        aead,
+        out,
+        io_pos,
+        plaintext_len,
+        key,
+        iv,
+        aad_ptr,
+        aad_len,
+    )
 end
 
 function _tls13_encrypt_record_aead(
@@ -1171,50 +1325,49 @@ function _tls13_encrypt_record_aead(
     iv_bytes = iv isa Vector{UInt8} ? iv : Vector{UInt8}(iv)
     aad_bytes = additional_data isa Vector{UInt8} ? additional_data : Vector{UInt8}(additional_data)
     plaintext_bytes = plaintext isa Vector{UInt8} ? plaintext : Vector{UInt8}(plaintext)
-    ctx = ccall((:EVP_CIPHER_CTX_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
-    _openssl_require_nonnull(ctx, "EVP_CIPHER_CTX_new")
-    ciphertext = Vector{UInt8}(undef, length(plaintext_bytes) + 16)
-    tag = Vector{UInt8}(undef, 16)
-    out_len = Ref{Cint}(0)
-    total = 0
-    try
-        cipher = _tls13_record_cipher(spec)
-        ok = ccall((:EVP_EncryptInit_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Ptr{UInt8}), ctx, cipher, C_NULL, Ptr{UInt8}(C_NULL), Ptr{UInt8}(C_NULL))
-        _openssl_require_ok(ok, "EVP_EncryptInit_ex")
-        ok = ccall((:EVP_CIPHER_CTX_ctrl, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Cint, Cint, Ptr{Cvoid}), ctx, _EVP_CTRL_AEAD_SET_IVLEN, Cint(length(iv_bytes)), C_NULL)
-        _openssl_require_ok(ok, "EVP_CIPHER_CTX_ctrl(SET_IVLEN)")
-        GC.@preserve key_bytes iv_bytes begin
-            ok = ccall((:EVP_EncryptInit_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Ptr{UInt8}), ctx, C_NULL, C_NULL, pointer(key_bytes), pointer(iv_bytes))
-            _openssl_require_ok(ok, "EVP_EncryptInit_ex(key/iv)")
-        end
-        if !isempty(aad_bytes)
-            GC.@preserve aad_bytes begin
-                ok = ccall((:EVP_EncryptUpdate, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Cint}, Ptr{UInt8}, Cint), ctx, Ptr{UInt8}(C_NULL), out_len, pointer(aad_bytes), Cint(length(aad_bytes)))
-                _openssl_require_ok(ok, "EVP_EncryptUpdate(aad)")
-            end
-        end
-        if !isempty(plaintext_bytes)
-            GC.@preserve plaintext_bytes ciphertext begin
-                ok = ccall((:EVP_EncryptUpdate, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Cint}, Ptr{UInt8}, Cint), ctx, pointer(ciphertext), out_len, pointer(plaintext_bytes), Cint(length(plaintext_bytes)))
-                _openssl_require_ok(ok, "EVP_EncryptUpdate")
-            end
-            total += Int(out_len[])
-        end
-        GC.@preserve ciphertext begin
-            ok = ccall((:EVP_EncryptFinal_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Cint}), ctx, pointer(ciphertext, total + 1), out_len)
-            _openssl_require_ok(ok, "EVP_EncryptFinal_ex")
-        end
-        total += Int(out_len[])
-        GC.@preserve tag begin
-            ok = ccall((:EVP_CIPHER_CTX_ctrl, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Cint, Cint, Ptr{Cvoid}), ctx, _EVP_CTRL_AEAD_GET_TAG, Cint(length(tag)), pointer(tag))
-            _openssl_require_ok(ok, "EVP_CIPHER_CTX_ctrl(GET_TAG)")
-        end
-        resize!(ciphertext, total)
-        append!(ciphertext, tag)
-        return ciphertext
+    ciphertext = Vector{UInt8}(plaintext_bytes)
+    resize!(ciphertext, length(plaintext_bytes) + 16)
+    aead = _OpenSSLAEADState(_tls13_record_cipher(spec), length(iv_bytes))
+    ciphertext_len = try
+        GC.@preserve ciphertext aad_bytes _tls13_encrypt_record_aead!(
+            aead,
+            ciphertext,
+            1,
+            length(plaintext_bytes),
+            key_bytes,
+            iv_bytes,
+            isempty(aad_bytes) ? Ptr{UInt8}(C_NULL) : pointer(aad_bytes),
+            length(aad_bytes),
+        )
     finally
-        _free_evp_cipher_ctx!(ctx)
+        _free_openssl_aead_state!(aead)
     end
+    resize!(ciphertext, ciphertext_len)
+    return ciphertext
+end
+
+function _tls13_decrypt_record_aead!(
+    aead::_OpenSSLAEADState,
+    io::Vector{UInt8},
+    io_pos::Int,
+    ciphertext_len::Int,
+    tag_pos::Int,
+    key::Vector{UInt8},
+    iv::Vector{UInt8},
+    aad_ptr::Ptr{UInt8},
+    aad_len::Int,
+)::Union{Int, Nothing}
+    return _openssl_decrypt_record_aead!(
+        aead,
+        io,
+        io_pos,
+        ciphertext_len,
+        tag_pos,
+        key,
+        iv,
+        aad_ptr,
+        aad_len,
+    )
 end
 
 function _tls13_decrypt_record_aead(
@@ -1228,59 +1381,28 @@ function _tls13_decrypt_record_aead(
     key_bytes = key isa Vector{UInt8} ? key : Vector{UInt8}(key)
     iv_bytes = iv isa Vector{UInt8} ? iv : Vector{UInt8}(iv)
     aad_bytes = additional_data isa Vector{UInt8} ? additional_data : Vector{UInt8}(additional_data)
-    ciphertext_len = length(ciphertext_and_tag) - 16
-    ciphertext = Vector{UInt8}(undef, ciphertext_len)
-    copyto!(ciphertext, 1, ciphertext_and_tag, 1, ciphertext_len)
-    tag = Vector{UInt8}(undef, 16)
-    copyto!(tag, 1, ciphertext_and_tag, ciphertext_len + 1, 16)
-    plaintext = Vector{UInt8}(undef, ciphertext_len)
-    ctx = ccall((:EVP_CIPHER_CTX_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
-    _openssl_require_nonnull(ctx, "EVP_CIPHER_CTX_new")
-    out_len = Ref{Cint}(0)
-    total = 0
+    ciphertext = Vector{UInt8}(ciphertext_and_tag)
+    ciphertext_len = length(ciphertext) - 16
+    aead = _OpenSSLAEADState(_tls13_record_cipher(spec), length(iv_bytes))
     try
-        cipher = _tls13_record_cipher(spec)
-        ok = ccall((:EVP_DecryptInit_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Ptr{UInt8}), ctx, cipher, C_NULL, Ptr{UInt8}(C_NULL), Ptr{UInt8}(C_NULL))
-        _openssl_require_ok(ok, "EVP_DecryptInit_ex")
-        ok = ccall((:EVP_CIPHER_CTX_ctrl, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Cint, Cint, Ptr{Cvoid}), ctx, _EVP_CTRL_AEAD_SET_IVLEN, Cint(length(iv_bytes)), C_NULL)
-        _openssl_require_ok(ok, "EVP_CIPHER_CTX_ctrl(SET_IVLEN)")
-        GC.@preserve key_bytes iv_bytes begin
-            ok = ccall((:EVP_DecryptInit_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Ptr{UInt8}), ctx, C_NULL, C_NULL, pointer(key_bytes), pointer(iv_bytes))
-            _openssl_require_ok(ok, "EVP_DecryptInit_ex(key/iv)")
-        end
-        if !isempty(aad_bytes)
-            GC.@preserve aad_bytes begin
-                ok = ccall((:EVP_DecryptUpdate, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Cint}, Ptr{UInt8}, Cint), ctx, Ptr{UInt8}(C_NULL), out_len, pointer(aad_bytes), Cint(length(aad_bytes)))
-                _openssl_require_ok(ok, "EVP_DecryptUpdate(aad)")
-            end
-        end
-        if !isempty(ciphertext)
-            GC.@preserve ciphertext plaintext begin
-                ok = ccall((:EVP_DecryptUpdate, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Cint}, Ptr{UInt8}, Cint), ctx, pointer(plaintext), out_len, pointer(ciphertext), Cint(length(ciphertext)))
-                _openssl_require_ok(ok, "EVP_DecryptUpdate")
-            end
-            total += Int(out_len[])
-        end
-        GC.@preserve tag begin
-            ok = ccall((:EVP_CIPHER_CTX_ctrl, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Cint, Cint, Ptr{Cvoid}), ctx, _EVP_CTRL_AEAD_SET_TAG, Cint(length(tag)), pointer(tag))
-            _openssl_require_ok(ok, "EVP_CIPHER_CTX_ctrl(SET_TAG)")
-        end
-        final_ok = GC.@preserve plaintext ccall(
-            (:EVP_DecryptFinal_ex, _LIBCRYPTO_PATH),
-            Cint,
-            (Ptr{Cvoid}, Ptr{UInt8}, Ref{Cint}),
-            ctx,
-            pointer(plaintext, total + 1),
-            out_len,
+        plaintext_len = GC.@preserve ciphertext aad_bytes _tls13_decrypt_record_aead!(
+            aead,
+            ciphertext,
+            1,
+            ciphertext_len,
+            ciphertext_len + 1,
+            key_bytes,
+            iv_bytes,
+            isempty(aad_bytes) ? Ptr{UInt8}(C_NULL) : pointer(aad_bytes),
+            length(aad_bytes),
         )
-        if final_ok != 1
-            _securezero!(plaintext)
+        if plaintext_len === nothing
+            _securezero!(ciphertext)
             return nothing
         end
-        total += Int(out_len[])
-        resize!(plaintext, total)
-        return plaintext
+        resize!(ciphertext, plaintext_len::Int)
+        return ciphertext
     finally
-        _free_evp_cipher_ctx!(ctx)
+        _free_openssl_aead_state!(aead)
     end
 end

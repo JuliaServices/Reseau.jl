@@ -91,3 +91,15 @@ function _tls_write_tls_plaintext!(tcp::TCP.Conn, content_type::UInt8, payload::
     end
     return nothing
 end
+
+function _tls_read_wire_record!(tcp::TCP.Conn, record_buffer::Vector{UInt8}, max_ciphertext::Int)::Int
+    resize!(record_buffer, 5)
+    GC.@preserve record_buffer Base.unsafe_read(tcp, pointer(record_buffer), UInt(5))
+    payload_len = (Int(record_buffer[4]) << 8) | Int(record_buffer[5])
+    payload_len <= max_ciphertext || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received oversized TLS record")
+    resize!(record_buffer, 5 + payload_len)
+    if payload_len != 0
+        GC.@preserve record_buffer Base.unsafe_read(tcp, pointer(record_buffer, 6), UInt(payload_len))
+    end
+    return payload_len
+end

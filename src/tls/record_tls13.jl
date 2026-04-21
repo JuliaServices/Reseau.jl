@@ -23,6 +23,9 @@ mutable struct _TLS13RecordCipherState
     iv::Vector{UInt8}
     seq::UInt64
     exhausted::Bool
+    aead::_OpenSSLAEADState
+    nonce_buf::Vector{UInt8}
+    outbuf::Vector{UInt8}
 end
 
 function _TLS13RecordCipherState(spec::_TLS13CipherSpec, traffic_secret::AbstractVector{UInt8})
@@ -34,6 +37,9 @@ function _TLS13RecordCipherState(spec::_TLS13CipherSpec, traffic_secret::Abstrac
         traffic_key.iv,
         UInt64(0),
         false,
+        _OpenSSLAEADState(_tls13_record_cipher(spec), length(traffic_key.iv)),
+        Vector{UInt8}(undef, length(traffic_key.iv)),
+        UInt8[],
     )
 end
 
@@ -49,6 +55,7 @@ material, and negotiated metadata exposed through `connection_state`.
 mutable struct _TLS13NativeClientState
     read_cipher::Union{Nothing, _TLS13RecordCipherState}
     write_cipher::Union{Nothing, _TLS13RecordCipherState}
+    record_buffer::Vector{UInt8}
     handshake_buffer::Vector{UInt8}
     handshake_buffer_pos::Int
     plaintext_buffer::Vector{UInt8}
@@ -70,6 +77,7 @@ end
 _TLS13NativeClientState() = _TLS13NativeClientState(
     nothing,
     nothing,
+    UInt8[],
     UInt8[],
     1,
     UInt8[],
@@ -103,6 +111,10 @@ function _securezero_tls13_record_cipher!(cipher::_TLS13RecordCipherState)::Noth
     _securezero!(cipher.traffic_secret)
     _securezero!(cipher.key)
     _securezero!(cipher.iv)
+    _free_openssl_aead_state!(cipher.aead)
+    _securezero!(cipher.nonce_buf)
+    _securezero!(cipher.outbuf)
+    empty!(cipher.outbuf)
     cipher.seq = UInt64(0)
     cipher.exhausted = false
     return nothing
@@ -117,12 +129,14 @@ function _securezero_tls13_native_client_state!(state::_TLS13NativeClientState):
         _securezero_tls13_record_cipher!(state.write_cipher::_TLS13RecordCipherState)
         state.write_cipher = nothing
     end
+    _securezero!(state.record_buffer)
     _securezero!(state.handshake_buffer)
     _securezero!(state.plaintext_buffer)
     _securezero!(state.resumption_secret)
     for cert in state.session_certificates
         _securezero!(cert)
     end
+    empty!(state.record_buffer)
     empty!(state.handshake_buffer)
     empty!(state.plaintext_buffer)
     empty!(state.resumption_secret)
@@ -184,67 +198,105 @@ function _tls13_advance_write_cipher!(state::_TLS13NativeClientState)::Nothing
     return nothing
 end
 
+function _tls13_fill_nonce!(dest::Vector{UInt8}, iv::Vector{UInt8}, seq::UInt64)::Nothing
+    copyto!(dest, 1, iv, 1, length(iv))
+    @inbounds for i in 0:7
+        dest[end - i] = xor(dest[end - i], UInt8((seq >> (8 * i)) & 0xff))
+    end
+    return nothing
+end
+
 function _tls13_nonce(iv::AbstractVector{UInt8}, seq::UInt64)::Vector{UInt8}
-    nonce = Vector{UInt8}(iv)
+    nonce = iv isa Vector{UInt8} ? copy(iv) : Vector{UInt8}(iv)
     @inbounds for i in 0:7
         nonce[end - i] = xor(nonce[end - i], UInt8((seq >> (8 * i)) & 0xff))
     end
     return nonce
 end
 
-@inline function _tls13_record_header(content_type::UInt8, payload_len::Int)::Vector{UInt8}
+@inline function _tls13_fill_record_header!(dest::Vector{UInt8}, content_type::UInt8, payload_len::Int)::Nothing
     payload_len <= 0xffff || throw(ArgumentError("tls: record payload too large"))
-    return UInt8[
-        content_type,
-        UInt8(TLS1_2_VERSION >> 8),
-        UInt8(TLS1_2_VERSION & 0xff),
-        UInt8(payload_len >> 8),
-        UInt8(payload_len & 0xff),
-    ]
+    @inbounds begin
+        dest[1] = content_type
+        dest[2] = UInt8(TLS1_2_VERSION >> 8)
+        dest[3] = UInt8(TLS1_2_VERSION & 0xff)
+        dest[4] = UInt8(payload_len >> 8)
+        dest[5] = UInt8(payload_len & 0xff)
+    end
+    return nothing
 end
 
 # TLS 1.3 record writes emit plaintext only before handshake keys are installed.
 # After that they always produce application-data outer records that carry an
 # encrypted inner content type, mirroring Go's TLS 1.3 record layer.
-function _tls13_write_record!(tcp::TCP.Conn, cipher::Union{Nothing, _TLS13RecordCipherState}, inner_type::UInt8, payload::AbstractVector{UInt8})::Nothing
-    length(payload) <= _TLS13_MAX_PLAINTEXT || throw(ArgumentError("tls: TLS 1.3 record plaintext exceeds the maximum record size"))
+function _tls13_write_record!(
+    tcp::TCP.Conn,
+    cipher::Union{Nothing, _TLS13RecordCipherState},
+    inner_type::UInt8,
+    payload_ptr::Ptr{UInt8},
+    payload_len::Int,
+)::Nothing
+    payload_len <= _TLS13_MAX_PLAINTEXT || throw(ArgumentError("tls: TLS 1.3 record plaintext exceeds the maximum record size"))
     if cipher === nothing
+        payload = unsafe_wrap(Vector{UInt8}, payload_ptr, payload_len; own = false)
         _tls_write_tls_plaintext!(tcp, inner_type, payload)
         return nothing
     end
     cipher_state = cipher::_TLS13RecordCipherState
     cipher_state.exhausted && throw(ArgumentError("tls: TLS 1.3 write traffic secret exhausted"))
-    inner = Vector{UInt8}(undef, length(payload) + 1)
-    if !isempty(payload)
-        copyto!(inner, 1, payload, 1, length(payload))
-    end
-    inner[end] = inner_type
-    nonce = _tls13_nonce(cipher_state.iv, cipher_state.seq)
-    header = UInt8[]
-    ciphertext = UInt8[]
+    inner_len = payload_len + 1
+    record_payload_len = inner_len + _TLS13_AEAD_TAG_SIZE
+    total_record_len = 5 + record_payload_len
+    resize!(cipher_state.outbuf, total_record_len)
+    outbuf = cipher_state.outbuf
     try
-        ciphertext = _tls13_encrypt_record_aead(
-            cipher_state.spec,
+        @inbounds begin
+            outbuf[1] = _TLS_RECORD_TYPE_APPLICATION_DATA
+            outbuf[2] = UInt8(TLS1_2_VERSION >> 8)
+            outbuf[3] = UInt8(TLS1_2_VERSION & 0xff)
+            outbuf[4] = UInt8(record_payload_len >> 8)
+            outbuf[5] = UInt8(record_payload_len & 0xff)
+        end
+        if payload_len != 0
+            GC.@preserve outbuf begin
+                unsafe_copyto!(pointer(outbuf, 6), payload_ptr, payload_len)
+            end
+        end
+        outbuf[6 + payload_len] = inner_type
+        _tls13_fill_nonce!(cipher_state.nonce_buf, cipher_state.iv, cipher_state.seq)
+        ciphertext_len = _tls13_encrypt_record_aead!(
+            cipher_state.aead,
+            outbuf,
+            6,
+            inner_len,
             cipher_state.key,
-            nonce,
-            _tls13_record_header(_TLS_RECORD_TYPE_APPLICATION_DATA, length(inner) + _TLS13_AEAD_TAG_SIZE),
-            inner,
+            cipher_state.nonce_buf,
+            pointer(outbuf, 1),
+            5,
         )
-        header = _tls13_record_header(_TLS_RECORD_TYPE_APPLICATION_DATA, length(ciphertext))
-        write(tcp, header)
-        write(tcp, ciphertext)
+        ciphertext_len == record_payload_len ||
+            throw(ArgumentError("tls: TLS 1.3 AEAD produced an unexpected ciphertext length"))
+        write(tcp, outbuf)
         if cipher_state.seq == typemax(UInt64)
             cipher_state.exhausted = true
         else
             cipher_state.seq += UInt64(1)
         end
     finally
-        _securezero!(inner)
-        _securezero!(nonce)
-        _securezero!(header)
-        _securezero!(ciphertext)
+        _securezero!(cipher_state.nonce_buf)
     end
     return nothing
+end
+
+function _tls13_write_record!(
+    tcp::TCP.Conn,
+    cipher::Union{Nothing, _TLS13RecordCipherState},
+    inner_type::UInt8,
+    payload::AbstractVector{UInt8},
+)::Nothing
+    GC.@preserve payload begin
+        return _tls13_write_record!(tcp, cipher, inner_type, pointer(payload), length(payload))
+    end
 end
 
 function _tls13_process_alert!(state::_TLS13NativeClientState, alert::AbstractVector{UInt8})::Nothing
@@ -268,7 +320,7 @@ end
 # TLS 1.3 inner plaintext parsing strips padding, recovers the true content
 # type, then routes the payload into the handshake/plaintext/post-handshake
 # machinery owned by the connection.
-function _tls13_process_inner_plaintext!(state::_TLS13NativeClientState, inner::Vector{UInt8})::Bool
+function _tls13_process_inner_plaintext!(state::_TLS13NativeClientState, inner::AbstractVector{UInt8})::Bool
     idx = length(inner)
     while idx >= 1 && inner[idx] == 0x00
         idx -= 1
@@ -289,12 +341,7 @@ function _tls13_process_inner_plaintext!(state::_TLS13NativeClientState, inner::
         return payload_len != 0
     end
     if content_type == _TLS_RECORD_TYPE_ALERT
-        payload = payload_len == 0 ? UInt8[] : Vector{UInt8}(@view(inner[1:payload_len]))
-        try
-            _tls13_process_alert!(state, payload)
-        finally
-            _securezero!(payload)
-        end
+        _tls13_process_alert!(state, @view(inner[1:payload_len]))
         return false
     end
     _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected TLS 1.3 inner record type $(Int(content_type))")
@@ -304,60 +351,61 @@ end
 # then feeding any recovered handshake, alert, application, or post-handshake
 # bytes into the appropriate connection-owned buffers.
 function _tls13_read_record!(tcp::TCP.Conn, state::_TLS13NativeClientState)::Nothing
-    header = Vector{UInt8}(undef, 5)
-    read!(tcp, header)
-    payload_len = (Int(header[4]) << 8) | Int(header[5])
-    payload_len <= _TLS13_MAX_CIPHERTEXT || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received oversized TLS 1.3 record")
-    payload = Vector{UInt8}(undef, payload_len)
-    try
-        payload_len == 0 || read!(tcp, payload)
-        content_type = header[1]
-        if content_type == _TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC
-            payload_len == 1 && payload[1] == 0x01 || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed ChangeCipherSpec record")
-            _tls_note_useless_record!(state, "tls: too many ignored TLS records")
+    payload_len = _tls_read_wire_record!(tcp, state.record_buffer, _TLS13_MAX_CIPHERTEXT)
+    record = state.record_buffer
+    content_type = record[1]
+    payload_start = 6
+    payload_end = 5 + payload_len
+    payload = @view(record[payload_start:payload_end])
+    if content_type == _TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC
+        payload_len == 1 && payload[1] == 0x01 || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed ChangeCipherSpec record")
+        _tls_note_useless_record!(state, "tls: too many ignored TLS records")
+        return nothing
+    end
+    if state.read_cipher === nothing
+        if content_type == _TLS_RECORD_TYPE_HANDSHAKE
+            if payload_len != 0
+                append!(state.handshake_buffer, payload)
+                length(state.handshake_buffer) <= _TLS13_MAX_HANDSHAKE_BUFFER ||
+                    _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received too much buffered TLS 1.3 handshake data")
+                _tls_reset_useless_record_count!(state)
+            end
             return nothing
         end
-        if state.read_cipher === nothing
-            if content_type == _TLS_RECORD_TYPE_HANDSHAKE
-                if payload_len != 0
-                    append!(state.handshake_buffer, payload)
-                    length(state.handshake_buffer) <= _TLS13_MAX_HANDSHAKE_BUFFER ||
-                        _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received too much buffered TLS 1.3 handshake data")
-                    _tls_reset_useless_record_count!(state)
-                end
-                return nothing
-            end
-            if content_type == _TLS_RECORD_TYPE_ALERT
-                _tls13_process_alert!(state, payload)
-                return nothing
-            end
-            _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected plaintext TLS 1.3 record type $(Int(content_type))")
+        if content_type == _TLS_RECORD_TYPE_ALERT
+            _tls13_process_alert!(state, payload)
+            return nothing
         end
-        content_type == _TLS_RECORD_TYPE_APPLICATION_DATA ||
-            _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected TLS 1.3 record type $(Int(content_type))")
-        cipher = state.read_cipher::_TLS13RecordCipherState
-        cipher.exhausted && _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: TLS 1.3 read traffic secret exhausted")
-        nonce = _tls13_nonce(cipher.iv, cipher.seq)
-        plaintext = try
-            _tls13_decrypt_record_aead(cipher.spec, cipher.key, nonce, header, payload)
-        finally
-            _securezero!(nonce)
-        end
-        plaintext === nothing && _tls_fail(_TLS_ALERT_BAD_RECORD_MAC, "tls: invalid TLS 1.3 record authentication tag")
-        advanced = try
-            _tls13_process_inner_plaintext!(state, plaintext::Vector{UInt8})
-        finally
-            _securezero!(plaintext::Vector{UInt8})
-        end
-        advanced && _tls_reset_useless_record_count!(state)
-        if cipher.seq == typemax(UInt64)
-            cipher.exhausted = true
-        else
-            cipher.seq += UInt64(1)
-        end
-    finally
-        _securezero!(header)
-        _securezero!(payload)
+        _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected plaintext TLS 1.3 record type $(Int(content_type))")
+    end
+    content_type == _TLS_RECORD_TYPE_APPLICATION_DATA ||
+        _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected TLS 1.3 record type $(Int(content_type))")
+    cipher = state.read_cipher::_TLS13RecordCipherState
+    cipher.exhausted && _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: TLS 1.3 read traffic secret exhausted")
+    payload_len >= _TLS13_AEAD_TAG_SIZE ||
+        _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.3 AEAD record")
+    ciphertext_len = payload_len - _TLS13_AEAD_TAG_SIZE
+    _tls13_fill_nonce!(cipher.nonce_buf, cipher.iv, cipher.seq)
+    plaintext_len_or_nothing = _tls13_decrypt_record_aead!(
+        cipher.aead,
+        record,
+        payload_start,
+        ciphertext_len,
+        payload_start + ciphertext_len,
+        cipher.key,
+        cipher.nonce_buf,
+        pointer(record, 1),
+        5,
+    )
+    _securezero!(cipher.nonce_buf)
+    plaintext_len_or_nothing === nothing && _tls_fail(_TLS_ALERT_BAD_RECORD_MAC, "tls: invalid TLS 1.3 record authentication tag")
+    plaintext = @view(record[payload_start:payload_start + (plaintext_len_or_nothing::Int) - 1])
+    advanced = _tls13_process_inner_plaintext!(state, plaintext)
+    advanced && _tls_reset_useless_record_count!(state)
+    if cipher.seq == typemax(UInt64)
+        cipher.exhausted = true
+    else
+        cipher.seq += UInt64(1)
     end
     return nothing
 end

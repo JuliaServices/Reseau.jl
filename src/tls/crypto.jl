@@ -217,13 +217,46 @@ end
     throw(ArgumentError("unsupported TLS hash kind: $(hash_kind)"))
 end
 
-@inline function _new_hmac_context(hash_kind::_TLSHashKind, key::AbstractVector{UInt8})
+@inline function _hash_block_len(hash_kind::_TLSHashKind)::Int
+    hash_kind == _HASH_SHA256 && return 64
+    hash_kind == _HASH_SHA384 && return 128
+    throw(ArgumentError("unsupported TLS hash kind: $(hash_kind)"))
+end
+
+struct _TLSHMACTemplate{CTX<:SHA.SHA_CTX}
+    hash_kind::_TLSHashKind
+    inner::CTX
+    outer::CTX
+end
+
+function _new_hmac_template(hash_kind::_TLSHashKind, key::AbstractVector{UInt8})
     key_bytes = key isa Vector{UInt8} ? copy(key) : Vector{UInt8}(key)
+    padded_key = UInt8[]
+    inner_pad = UInt8[]
+    outer_pad = UInt8[]
     try
-        hash_kind == _HASH_SHA256 && return SHA.HMAC_CTX(SHA.SHA256_CTX(), key_bytes)
-        hash_kind == _HASH_SHA384 && return SHA.HMAC_CTX(SHA.SHA384_CTX(), key_bytes)
-        throw(ArgumentError("unsupported TLS hash kind: $(hash_kind)"))
+        if length(key_bytes) > _hash_block_len(hash_kind)
+            hashed_key = _hash_data(hash_kind, key_bytes)
+            _securezero!(key_bytes)
+            key_bytes = hashed_key
+        end
+        padded_key = zeros(UInt8, _hash_block_len(hash_kind))
+        copyto!(padded_key, 1, key_bytes, 1, length(key_bytes))
+        inner_pad = copy(padded_key)
+        outer_pad = copy(padded_key)
+        @inbounds for i in eachindex(inner_pad, outer_pad)
+            inner_pad[i] ⊻= 0x36
+            outer_pad[i] ⊻= 0x5c
+        end
+        inner_ctx = _new_hash_context(hash_kind)
+        outer_ctx = _new_hash_context(hash_kind)
+        SHA.update!(inner_ctx, inner_pad)
+        SHA.update!(outer_ctx, outer_pad)
+        return _TLSHMACTemplate(hash_kind, inner_ctx, outer_ctx)
     finally
+        _securezero!(outer_pad)
+        _securezero!(inner_pad)
+        _securezero!(padded_key)
         _securezero!(key_bytes)
     end
 end
@@ -254,15 +287,45 @@ end
     return SHA.digest!(_copy_hash_context(ctx))
 end
 
+function _hmac_template_digest(template::_TLSHMACTemplate, data_parts...)::Vector{UInt8}
+    inner_ctx = _copy_hash_context(template.inner)
+    for part in data_parts
+        if part isa UInt8
+            SHA.update!(inner_ctx, (part,))
+        else
+            isempty(part) || SHA.update!(inner_ctx, part)
+        end
+    end
+    inner_digest = SHA.digest!(inner_ctx)
+    try
+        outer_ctx = _copy_hash_context(template.outer)
+        SHA.update!(outer_ctx, inner_digest)
+        return SHA.digest!(outer_ctx)
+    finally
+        _securezero!(inner_digest)
+    end
+end
+
 @inline function _hmac_data(hash_kind::_TLSHashKind, key::AbstractVector{UInt8}, data::AbstractVector{UInt8})::Vector{UInt8}
-    ctx = _new_hmac_context(hash_kind, key)
-    SHA.update!(ctx, data)
-    return SHA.digest!(ctx)
+    template = _new_hmac_template(hash_kind, key)
+    return _hmac_template_digest(template, data)
 end
 
 function _TranscriptHash(hash_kind::_TLSHashKind; buffer_handshake::Bool = true)
-    ctx = _new_hash_context(hash_kind)
-    return _TranscriptHash{typeof(ctx)}(hash_kind, ctx, buffer_handshake ? UInt8[] : nothing)
+    if hash_kind == _HASH_SHA256
+        return _TranscriptHash{SHA.SHA2_256_CTX}(
+            _HASH_SHA256,
+            SHA.SHA256_CTX(),
+            buffer_handshake ? UInt8[] : nothing,
+        )
+    elseif hash_kind == _HASH_SHA384
+        return _TranscriptHash{SHA.SHA2_384_CTX}(
+            _HASH_SHA384,
+            SHA.SHA384_CTX(),
+            buffer_handshake ? UInt8[] : nothing,
+        )
+    end
+    throw(ArgumentError("unsupported TLS hash kind: $(hash_kind)"))
 end
 
 # Transcript updates intentionally own buffered handshake bytes. The handshake
@@ -308,23 +371,21 @@ function _p_hash(hash_kind::_TLSHashKind, secret::AbstractVector{UInt8}, seed::A
     out_len == 0 && return UInt8[]
     secret_bytes = Vector{UInt8}(secret)
     seed_bytes = Vector{UInt8}(seed)
+    template = _new_hmac_template(hash_kind, secret_bytes)
     a = UInt8[]
     out = UInt8[]
     success = false
     try
-        a = _hmac_data(hash_kind, secret_bytes, seed_bytes)
+        a = _hmac_template_digest(template, seed_bytes)
         sizehint!(out, out_len)
         while length(out) < out_len
-            ctx = _new_hmac_context(hash_kind, secret_bytes)
-            SHA.update!(ctx, a)
-            isempty(seed_bytes) || SHA.update!(ctx, seed_bytes)
-            block = SHA.digest!(ctx)
+            block = _hmac_template_digest(template, a, seed_bytes)
             try
                 append!(out, block)
             finally
                 _securezero!(block)
             end
-            next_a = _hmac_data(hash_kind, secret_bytes, a)
+            next_a = _hmac_template_digest(template, a)
             _securezero!(a)
             a = next_a
         end
@@ -434,17 +495,14 @@ function _hkdf_expand(hash_kind::_TLSHashKind, prk::AbstractVector{UInt8}, info:
     hash_size = _hash_len(hash_kind)
     nblocks = cld(out_len, hash_size)
     nblocks <= 255 || throw(ArgumentError("requested HKDF output too large"))
+    template = _new_hmac_template(hash_kind, prk)
     out = UInt8[]
     sizehint!(out, out_len)
     prev = UInt8[]
     success = false
     try
         for counter in 1:nblocks
-            ctx = _new_hmac_context(hash_kind, prk)
-            isempty(prev) || SHA.update!(ctx, prev)
-            isempty(info) || SHA.update!(ctx, info)
-            SHA.update!(ctx, UInt8[counter])
-            next_prev = SHA.digest!(ctx)
+            next_prev = _hmac_template_digest(template, prev, info, UInt8[counter])
             _securezero!(prev)
             prev = next_prev
             append!(out, prev)
