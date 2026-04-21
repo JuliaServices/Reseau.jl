@@ -83,6 +83,7 @@ CurrentModule = Reseau.TLS
 ### Configuration, State, and Errors
 
 ```@docs
+ClientAuthMode
 Config
 ConnectionState
 Conn
