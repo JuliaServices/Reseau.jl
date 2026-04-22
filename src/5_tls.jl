@@ -1245,7 +1245,13 @@ function _finish_native_tls13_client_handshake!(conn::Conn, state::_TLS13ClientH
     if state.using_psk
         _tls_session_cache_put!(conn.config._client_session_cache, cache_key, nothing, _securezero_tls13_client_session!)
     end
-    negotiated_alpn = isempty(state.client_protocol) ? nothing : state.client_protocol
+    negotiated_alpn = if !isempty(state.client_protocol)
+        state.client_protocol
+    elseif !isempty(state.client_hello.alpn_protocols)
+        ""
+    else
+        nothing
+    end
     _securezero!(native_state.resumption_secret)
     for cert in native_state.session_certificates
         _securezero!(cert)
@@ -1278,7 +1284,14 @@ function _finish_native_tls12_client_handshake!(conn::Conn, state::_TLS12ClientH
     native_state.did_resume = state.did_resume
     native_state.curve_id = state.curve_id
     native_state.cipher_suite = state.cipher_suite
-    _set_handshake_complete!(conn, TLS1_2_VERSION, "TLSv1.2", isempty(state.client_protocol) ? nothing : state.client_protocol)
+    negotiated_alpn = if !isempty(state.client_protocol)
+        state.client_protocol
+    elseif !isempty(state.client_hello.alpn_protocols)
+        ""
+    else
+        nothing
+    end
+    _set_handshake_complete!(conn, TLS1_2_VERSION, "TLSv1.2", negotiated_alpn)
     return nothing
 end
 
@@ -1289,7 +1302,14 @@ function _finish_native_tls13_server_handshake!(conn::Conn, state::_TLS13ServerH
     native_state.did_resume = state.using_psk
     native_state.did_hello_retry_request = state.did_hello_retry_request
     native_state.curve_id = state.selected_group
-    _set_handshake_complete!(conn, TLS1_3_VERSION, "TLSv1.3", isempty(state.selected_alpn) ? nothing : state.selected_alpn)
+    negotiated_alpn = if !isempty(state.selected_alpn)
+        state.selected_alpn
+    elseif !isempty(state.client_hello.alpn_protocols) && !isempty(conn.config.alpn_protocols)
+        ""
+    else
+        nothing
+    end
+    _set_handshake_complete!(conn, TLS1_3_VERSION, "TLSv1.3", negotiated_alpn)
     return nothing
 end
 
@@ -1298,7 +1318,14 @@ function _finish_native_tls12_server_handshake!(conn::Conn, state::_TLS12ServerH
     native_state.did_resume = state.using_resumption
     native_state.curve_id = state.curve_id
     native_state.cipher_suite = state.cipher_suite
-    _set_handshake_complete!(conn, TLS1_2_VERSION, "TLSv1.2", isempty(state.selected_alpn) ? nothing : state.selected_alpn)
+    negotiated_alpn = if !isempty(state.selected_alpn)
+        state.selected_alpn
+    elseif !isempty(state.client_hello.alpn_protocols) && !isempty(conn.config.alpn_protocols)
+        ""
+    else
+        nothing
+    end
+    _set_handshake_complete!(conn, TLS1_2_VERSION, "TLSv1.2", negotiated_alpn)
     return nothing
 end
 
@@ -2010,6 +2037,7 @@ function _native_tls13_write_application!(conn::Conn, ptr::Ptr{UInt8}, nbytes::I
     total = 0
     while total < nbytes
         chunk_len = min(nbytes - total, _TLS13_MAX_PLAINTEXT)
+        _tls13_maybe_rekey_write!(conn.tcp, state)
         _tls13_write_record!(conn.tcp, state.write_cipher, _TLS_RECORD_TYPE_APPLICATION_DATA, ptr + total, chunk_len)
         total += chunk_len
     end

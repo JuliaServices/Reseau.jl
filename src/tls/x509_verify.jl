@@ -197,7 +197,18 @@ end
     return !isempty(cert.permitted_dns_domains) ||
            !isempty(cert.excluded_dns_domains) ||
            !isempty(cert.permitted_ip_ranges) ||
-           !isempty(cert.excluded_ip_ranges)
+           !isempty(cert.excluded_ip_ranges) ||
+           !isempty(cert.permitted_uri_domains) ||
+           !isempty(cert.excluded_uri_domains) ||
+           !isempty(cert.permitted_email_addresses) ||
+           !isempty(cert.excluded_email_addresses)
+end
+
+@inline function _tls_certificate_has_permitted_name_constraints(cert::_TLSCertificateInfo)::Bool
+    return !isempty(cert.permitted_dns_domains) ||
+           !isempty(cert.permitted_ip_ranges) ||
+           !isempty(cert.permitted_uri_domains) ||
+           !isempty(cert.permitted_email_addresses)
 end
 
 @inline function _tls_dns_constraint_matches(constraint::AbstractString, dns_name::AbstractString)::Bool
@@ -224,10 +235,93 @@ end
     return join(string.(ip), '.')
 end
 
+struct _TLSParsedMailbox
+    local_part::String
+    domain::String
+end
+
+@inline function _tls_parse_rfc2821_mailbox(value::AbstractString)::Union{Nothing, _TLSParsedMailbox}
+    text = String(value)
+    at = findfirst(==('@'), text)
+    at === nothing && return nothing
+    local_end = at - 1
+    domain_start = at + 1
+    local_end >= 1 || return nothing
+    domain_start <= ncodeunits(text) || return nothing
+    findnext(==('@'), text, domain_start) === nothing || return nothing
+    local_part = text[1:local_end]
+    domain = text[domain_start:end]
+    isempty(local_part) && return nothing
+    _tls_valid_hostname_value(domain, false) || return nothing
+    return _TLSParsedMailbox(local_part, _tls_ascii_lowercase(domain))
+end
+
+function _tls_parse_uri_host_domain(uri::AbstractString)::Union{Nothing, String}
+    text = String(uri)
+    scheme_end = findfirst(==(':'), text)
+    scheme_end === nothing && return nothing
+    authority_start = scheme_end + 1
+    authority_start + 1 <= ncodeunits(text) || return nothing
+    text[authority_start:(authority_start + 1)] == "//" || return nothing
+    authority_start += 2
+    authority_end = ncodeunits(text)
+    for idx in authority_start:ncodeunits(text)
+        c = text[idx]
+        if c == '/' || c == '?' || c == '#'
+            authority_end = idx - 1
+            break
+        end
+    end
+    authority_end >= authority_start || return nothing
+    authority = text[authority_start:authority_end]
+    userinfo_end = findlast(==('@'), authority)
+    hostport = userinfo_end === nothing ? authority : authority[(userinfo_end + 1):end]
+    isempty(hostport) && return nothing
+    host = if startswith(hostport, "[")
+        bracket_end = findfirst(==(']'), hostport)
+        bracket_end === nothing && return nothing
+        bracket_end == lastindex(hostport) || startswith(hostport[(bracket_end + 1):end], ":") || return nothing
+        hostport[2:(bracket_end - 1)]
+    else
+        colon = findlast(==(':'), hostport)
+        colon === nothing ? hostport : hostport[1:(colon - 1)]
+    end
+    isempty(host) && return nothing
+    _is_ip_literal_name(host) && return nothing
+    normalized_host = _tls_ascii_lowercase(host)
+    _tls_valid_hostname_value(normalized_host, false) || return nothing
+    return normalized_host
+end
+
+@inline function _tls_email_constraint_matches(constraint::AbstractString, mailbox::_TLSParsedMailbox)::Bool
+    if occursin('@', constraint)
+        parsed = _tls_parse_rfc2821_mailbox(constraint)
+        parsed === nothing && return false
+        return parsed.local_part == mailbox.local_part && parsed.domain == mailbox.domain
+    end
+    return _tls_dns_constraint_matches(constraint, mailbox.domain)
+end
+
+@inline function _tls_chain_extended_key_usage_permitted(chain::Vector{_TLSCertificateInfo}, purpose::AbstractString)::Bool
+    required_usage = _tls_verify_purpose_usage_mask(purpose)
+    for cert in chain
+        cert.extended_key_usage == 0x00 && continue
+        (cert.extended_key_usage & _TLS_EXT_KEY_USAGE_ANY) != 0x00 && continue
+        (cert.extended_key_usage & required_usage) != 0x00 || return false
+    end
+    return true
+end
+
 function _tls_verify_certificate_name_constraints!(
     cert::_TLSCertificateInfo,
     issuer::_TLSCertificateInfo,
 )::Nothing
+    if cert.has_unhandled_san_names && _tls_certificate_has_permitted_name_constraints(issuer)
+        _tls_fail(
+            _TLS_ALERT_BAD_CERTIFICATE,
+            "tls: certificate chain contains unsupported subjectAltName forms under a constrained issuer",
+        )
+    end
     if !isempty(issuer.permitted_dns_domains)
         for dns_name in cert.dns_names
             permitted = false
@@ -273,6 +367,66 @@ function _tls_verify_certificate_name_constraints!(
             _tls_fail(
                 _TLS_ALERT_BAD_CERTIFICATE,
                 "tls: certificate chain violates excluded IP name constraint for $(_tls_constraint_ip_string(ip))",
+            )
+        end
+    end
+    if !isempty(issuer.permitted_uri_domains)
+        for uri_name in cert.uri_names
+            uri_domain = _tls_parse_uri_host_domain(uri_name)
+            uri_domain === nothing &&
+                _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: cannot apply URI name constraints to $(repr(uri_name))")
+            permitted = false
+            for constraint in issuer.permitted_uri_domains
+                if _tls_dns_constraint_matches(constraint, uri_domain::String)
+                    permitted = true
+                    break
+                end
+            end
+            permitted || _tls_fail(
+                _TLS_ALERT_BAD_CERTIFICATE,
+                "tls: certificate chain violates URI name constraints for $(repr(uri_name))",
+            )
+        end
+    end
+    for uri_name in cert.uri_names
+        uri_domain = _tls_parse_uri_host_domain(uri_name)
+        uri_domain === nothing &&
+            _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: cannot apply URI name constraints to $(repr(uri_name))")
+        for constraint in issuer.excluded_uri_domains
+            _tls_dns_constraint_matches(constraint, uri_domain::String) || continue
+            _tls_fail(
+                _TLS_ALERT_BAD_CERTIFICATE,
+                "tls: certificate chain violates excluded URI name constraint for $(repr(uri_name))",
+            )
+        end
+    end
+    if !isempty(issuer.permitted_email_addresses)
+        for email in cert.email_addresses
+            mailbox = _tls_parse_rfc2821_mailbox(email)
+            mailbox === nothing &&
+                _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: cannot apply email name constraints to $(repr(email))")
+            permitted = false
+            for constraint in issuer.permitted_email_addresses
+                if _tls_email_constraint_matches(constraint, mailbox::_TLSParsedMailbox)
+                    permitted = true
+                    break
+                end
+            end
+            permitted || _tls_fail(
+                _TLS_ALERT_BAD_CERTIFICATE,
+                "tls: certificate chain violates email name constraints for $(repr(email))",
+            )
+        end
+    end
+    for email in cert.email_addresses
+        mailbox = _tls_parse_rfc2821_mailbox(email)
+        mailbox === nothing &&
+            _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: cannot apply email name constraints to $(repr(email))")
+        for constraint in issuer.excluded_email_addresses
+            _tls_email_constraint_matches(constraint, mailbox::_TLSParsedMailbox) || continue
+            _tls_fail(
+                _TLS_ALERT_BAD_CERTIFICATE,
+                "tls: certificate chain violates excluded email name constraint for $(repr(email))",
             )
         end
     end
@@ -366,14 +520,20 @@ function _tls_verify_peer_certificate_chain!(
         _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, purpose == "ssl_server" ?
             "tls: certificate is not authorized for server authentication" :
             "tls: certificate is not authorized for client authentication")
-    if _tls_trust_anchor_matches(leaf, store)
-        return leaf
+    verified_chain = if _tls_trust_anchor_matches(leaf, store)
+        _TLSCertificateInfo[leaf]
+    else
+        intermediates = length(parsed) > 1 ? parsed[2:end] : _TLSCertificateInfo[]
+        remaining_candidates = Ref(_TLS_MAX_CHAIN_CANDIDATES)
+        chain = _tls_build_chain_to_trust_anchor!(leaf, intermediates, store, _TLSCertificateInfo[leaf], now_s, remaining_candidates)
+        chain === nothing &&
+            _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: certificate signed by unknown authority")
+        chain
     end
-    intermediates = length(parsed) > 1 ? parsed[2:end] : _TLSCertificateInfo[]
-    remaining_candidates = Ref(_TLS_MAX_CHAIN_CANDIDATES)
-    verified_chain = _tls_build_chain_to_trust_anchor!(leaf, intermediates, store, _TLSCertificateInfo[leaf], now_s, remaining_candidates)
-    verified_chain === nothing &&
-        _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: certificate signed by unknown authority")
+    _tls_chain_extended_key_usage_permitted(verified_chain::Vector{_TLSCertificateInfo}, purpose) ||
+        _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, purpose == "ssl_server" ?
+            "tls: certificate chain is not authorized for server authentication" :
+            "tls: certificate chain is not authorized for client authentication")
     _tls_verify_chain_name_constraints!(verified_chain)
     return leaf
 end

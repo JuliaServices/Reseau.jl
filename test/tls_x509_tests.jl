@@ -34,7 +34,10 @@ function _tls_copy_cert(
     common_name = cert.common_name,
     dns_names = cert.dns_names,
     ip_addresses = cert.ip_addresses,
+    email_addresses = cert.email_addresses,
+    uri_names = cert.uri_names,
     has_san_extension = cert.has_san_extension,
+    has_unhandled_san_names = cert.has_unhandled_san_names,
     not_before_s = cert.not_before_s,
     not_after_s = cert.not_after_s,
     is_ca = cert.is_ca,
@@ -48,6 +51,10 @@ function _tls_copy_cert(
     excluded_dns_domains = cert.excluded_dns_domains,
     permitted_ip_ranges = cert.permitted_ip_ranges,
     excluded_ip_ranges = cert.excluded_ip_ranges,
+    permitted_uri_domains = cert.permitted_uri_domains,
+    excluded_uri_domains = cert.excluded_uri_domains,
+    permitted_email_addresses = cert.permitted_email_addresses,
+    excluded_email_addresses = cert.excluded_email_addresses,
     tbs_der = cert.tbs_der,
     public_key = cert.public_key,
     signature_verify_spec = cert.signature_verify_spec,
@@ -60,7 +67,10 @@ function _tls_copy_cert(
         common_name,
         copy(dns_names),
         [copy(ip) for ip in ip_addresses],
+        copy(email_addresses),
+        copy(uri_names),
         has_san_extension,
+        has_unhandled_san_names,
         not_before_s,
         not_after_s,
         is_ca,
@@ -74,6 +84,10 @@ function _tls_copy_cert(
         copy(excluded_dns_domains),
         [TLX._TLSIPRangeConstraint(copy(range.network), copy(range.mask)) for range in permitted_ip_ranges],
         [TLX._TLSIPRangeConstraint(copy(range.network), copy(range.mask)) for range in excluded_ip_ranges],
+        copy(permitted_uri_domains),
+        copy(excluded_uri_domains),
+        copy(permitted_email_addresses),
+        copy(excluded_email_addresses),
         copy(tbs_der),
         TLX._tls_copy_public_key(public_key),
         signature_verify_spec,
@@ -105,7 +119,10 @@ end
         cert = _tls_cert_info(_TLS_CERT_PATH)
         @test cert.common_name == "localhost"
         @test cert.has_san_extension
+        @test !cert.has_unhandled_san_names
         @test cert.dns_names == ["localhost"]
+        @test isempty(cert.email_addresses)
+        @test isempty(cert.uri_names)
         @test cert.subject_raw != cert.issuer_raw
         @test cert.not_before_s < cert.not_after_s
         @test !cert.is_ca
@@ -128,6 +145,20 @@ end
             0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x01,
         ] in cert.ip_addresses
+    end
+
+    @testset "SHA-1 X.509 certificate signatures are rejected during parsing" begin
+        sha1_rsa = UInt8[
+            0x06, 0x09,
+            0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x05,
+            0x05, 0x00,
+        ]
+        sha1_ecdsa = UInt8[
+            0x06, 0x07,
+            0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x01,
+        ]
+        @test_throws ArgumentError TLX._tls_parse_certificate_signature_spec(sha1_rsa, 1, length(sha1_rsa))
+        @test_throws ArgumentError TLX._tls_parse_certificate_signature_spec(sha1_ecdsa, 1, length(sha1_ecdsa))
     end
 
     @testset "Go-style hostname matching helpers" begin
@@ -370,6 +401,95 @@ end
         if ip_err isa TLX._TLSAlertError
             @test ip_err.alert == TLX._TLS_ALERT_BAD_CERTIFICATE
             @test occursin("excluded IP name constraint", ip_err.message)
+        end
+    end
+
+    @testset "native trust verifier enforces nested EKU and broader name constraints" begin
+        server_leaf = _tls_cert_info(_TLS_CERT_PATH)
+        client_leaf = _tls_cert_info(_TLS_CLIENT_CERT_PATH)
+        root = _tls_cert_info(_TLS_CA_PATH)
+
+        client_only_root = _tls_copy_cert(root; extended_key_usage = TLX._TLS_EXT_KEY_USAGE_CLIENT)
+        server_only_root = _tls_copy_cert(root; extended_key_usage = TLX._TLS_EXT_KEY_USAGE_SERVER)
+
+        server_chain_err = try
+            TLX._tls_verify_peer_certificate_chain!(
+                TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CERT_PATH)),
+                TLX._TLSTrustStore([client_only_root]),
+                "ssl_server",
+            )
+            nothing
+        catch ex
+            ex
+        end
+        @test server_chain_err isa TLX._TLSAlertError
+        if server_chain_err isa TLX._TLSAlertError
+            @test occursin("certificate chain is not authorized for server authentication", server_chain_err.message)
+        end
+
+        client_chain_err = try
+            TLX._tls_verify_peer_certificate_chain!(
+                TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CLIENT_CERT_PATH)),
+                TLX._TLSTrustStore([server_only_root]),
+                "ssl_client",
+            )
+            nothing
+        catch ex
+            ex
+        end
+        @test client_chain_err isa TLX._TLSAlertError
+        if client_chain_err isa TLX._TLSAlertError
+            @test occursin("certificate chain is not authorized for client authentication", client_chain_err.message)
+        end
+
+        email_leaf = _tls_copy_cert(server_leaf; email_addresses = ["ops@localhost"])
+        email_ok_chain = TLX._TLSCertificateInfo[email_leaf, _tls_copy_cert(root; permitted_email_addresses = ["localhost"])]
+        @test TLX._tls_verify_chain_name_constraints!(email_ok_chain) === nothing
+
+        email_err = try
+            TLX._tls_verify_chain_name_constraints!(
+                TLX._TLSCertificateInfo[email_leaf, _tls_copy_cert(root; excluded_email_addresses = ["ops@localhost"])],
+            )
+            nothing
+        catch ex
+            ex
+        end
+        @test email_err isa TLX._TLSAlertError
+        if email_err isa TLX._TLSAlertError
+            @test occursin("excluded email name constraint", email_err.message)
+        end
+
+        uri_leaf = _tls_copy_cert(server_leaf; uri_names = ["spiffe://service.local/ns/default"])
+        uri_ok_chain = TLX._TLSCertificateInfo[uri_leaf, _tls_copy_cert(root; permitted_uri_domains = ["service.local"])]
+        @test TLX._tls_verify_chain_name_constraints!(uri_ok_chain) === nothing
+
+        uri_err = try
+            TLX._tls_verify_chain_name_constraints!(
+                TLX._TLSCertificateInfo[uri_leaf, _tls_copy_cert(root; excluded_uri_domains = ["service.local"])],
+            )
+            nothing
+        catch ex
+            ex
+        end
+        @test uri_err isa TLX._TLSAlertError
+        if uri_err isa TLX._TLSAlertError
+            @test occursin("excluded URI name constraint", uri_err.message)
+        end
+
+        unsupported_name_err = try
+            TLX._tls_verify_chain_name_constraints!(
+                TLX._TLSCertificateInfo[
+                    _tls_copy_cert(server_leaf; has_unhandled_san_names = true),
+                    _tls_copy_cert(root; permitted_dns_domains = ["localhost"]),
+                ],
+            )
+            nothing
+        catch ex
+            ex
+        end
+        @test unsupported_name_err isa TLX._TLSAlertError
+        if unsupported_name_err isa TLX._TLSAlertError
+            @test occursin("unsupported subjectAltName forms", unsupported_name_err.message)
         end
     end
 

@@ -156,6 +156,42 @@ isdefined(@__MODULE__, :_RESEAU_TLS_TEST_UTILS_LOADED) || include("tls_test_util
                 IP.shutdown!()
             end
         end
+        @testset "ALPN h2 servers still accept http/1.1 clients without ALPN overlap" begin
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            try
+                server_cfg = TL.Config(
+                    verify_peer = false,
+                    cert_file = _TLS_CERT_PATH,
+                    key_file = _TLS_KEY_PATH,
+                    alpn_protocols = ["h2"],
+                )
+                listener = TL.listen("tcp", "127.0.0.1:0", server_cfg; backlog = 8)
+                laddr = TL.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn begin
+                    conn = TL.accept(listener)
+                    TL.handshake!(conn)
+                    return conn
+                end)
+                client_cfg = TL.Config(
+                    verify_peer = false,
+                    server_name = "localhost",
+                    alpn_protocols = ["http/1.1"],
+                )
+                client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                server = fetch(accept_task)
+                @test TL.connection_state(client).alpn_protocol == ""
+                @test TL.connection_state(server).alpn_protocol == ""
+            finally
+                _tls_close_quiet!(server)
+                _tls_close_quiet!(client)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
         @testset "ALPN no-overlap fails the handshake" begin
             IP.shutdown!()
             listener = nothing
@@ -180,7 +216,7 @@ isdefined(@__MODULE__, :_RESEAU_TLS_TEST_UTILS_LOADED) || include("tls_test_util
                 client_cfg = TL.Config(
                     verify_peer = false,
                     server_name = "localhost",
-                    alpn_protocols = ["http/1.1"],
+                    alpn_protocols = ["spdy/3"],
                 )
                 err = try
                     _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)

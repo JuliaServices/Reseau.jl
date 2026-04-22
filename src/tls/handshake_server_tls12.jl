@@ -262,7 +262,7 @@ end
 
 function _tls12_select_server_cipher_suite(client_hello::_ClientHelloMsg, private_key::Ptr{Cvoid})::UInt16
     pkey_type = _tls13_pkey_type_name(private_key)
-    if pkey_type == "EC"
+    if pkey_type == "EC" || pkey_type == "ED25519"
         for cipher_suite in (
                 _TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256_ID,
                 _TLS12_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384_ID,

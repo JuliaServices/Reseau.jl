@@ -11,6 +11,9 @@ end
 struct _TLSParsedGeneralNames
     dns_names::Vector{String}
     ip_addresses::Vector{Vector{UInt8}}
+    email_addresses::Vector{String}
+    uri_names::Vector{String}
+    has_unhandled_name_types::Bool
 end
 
 struct _TLSParsedNameConstraints
@@ -18,6 +21,10 @@ struct _TLSParsedNameConstraints
     excluded_dns_domains::Vector{String}
     permitted_ip_ranges::Vector{_TLSIPRangeConstraint}
     excluded_ip_ranges::Vector{_TLSIPRangeConstraint}
+    permitted_uri_domains::Vector{String}
+    excluded_uri_domains::Vector{String}
+    permitted_email_addresses::Vector{String}
+    excluded_email_addresses::Vector{String}
 end
 
 struct _TLSBasicConstraints
@@ -43,7 +50,10 @@ struct _TLSCertificateInfo
     common_name::String
     dns_names::Vector{String}
     ip_addresses::Vector{Vector{UInt8}}
+    email_addresses::Vector{String}
+    uri_names::Vector{String}
     has_san_extension::Bool
+    has_unhandled_san_names::Bool
     not_before_s::Int64
     not_after_s::Int64
     is_ca::Bool
@@ -57,6 +67,10 @@ struct _TLSCertificateInfo
     excluded_dns_domains::Vector{String}
     permitted_ip_ranges::Vector{_TLSIPRangeConstraint}
     excluded_ip_ranges::Vector{_TLSIPRangeConstraint}
+    permitted_uri_domains::Vector{String}
+    excluded_uri_domains::Vector{String}
+    permitted_email_addresses::Vector{String}
+    excluded_email_addresses::Vector{String}
     tbs_der::Vector{UInt8}
     public_key::_TLSPublicKey
     signature_verify_spec::_TLSSignatureVerifySpec
@@ -89,7 +103,9 @@ const _ASN1_BMP_STRING = UInt8(0x1e)
 const _ASN1_CONTEXT_EXPLICIT_VERSION = UInt8(0xa0)
 const _ASN1_CONTEXT_EXPLICIT_EXTENSIONS = UInt8(0xa3)
 const _ASN1_CONTEXT_KEY_IDENTIFIER = UInt8(0x80)
+const _ASN1_GENERAL_NAME_RFC822 = UInt8(0x81)
 const _ASN1_GENERAL_NAME_DNS = UInt8(0x82)
+const _ASN1_GENERAL_NAME_URI = UInt8(0x86)
 const _ASN1_GENERAL_NAME_IP = UInt8(0x87)
 const _ASN1_OID_COMMON_NAME = (UInt8(0x55), UInt8(0x04), UInt8(0x03))
 const _ASN1_OID_KEY_USAGE = (UInt8(0x55), UInt8(0x1d), UInt8(0x0f))
@@ -472,8 +488,7 @@ end
 function _tls_parse_certificate_signature_spec(bytes::AbstractVector{UInt8}, value_start::Int, value_end::Int)::_TLSSignatureVerifySpec
     oid_start, oid_end, pos = _asn1_expect_tlv(bytes, value_start, _ASN1_OBJECT_IDENTIFIER)
     if _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_SHA1_WITH_RSA_ENCRYPTION)
-        _tls_require_algorithm_identifier_null_or_absent(bytes, pos, value_end)
-        return _TLSSignatureVerifySpec(UInt16(160), false, false)
+        throw(ArgumentError("tls: SHA-1 X.509 certificate signatures are not supported"))
     elseif _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_SHA224_WITH_RSA_ENCRYPTION)
         _tls_require_algorithm_identifier_null_or_absent(bytes, pos, value_end)
         return _TLSSignatureVerifySpec(UInt16(224), false, false)
@@ -487,8 +502,7 @@ function _tls_parse_certificate_signature_spec(bytes::AbstractVector{UInt8}, val
         _tls_require_algorithm_identifier_null_or_absent(bytes, pos, value_end)
         return _TLSSignatureVerifySpec(UInt16(512), false, false)
     elseif _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_ECDSA_WITH_SHA1)
-        pos > value_end || throw(ArgumentError("tls: malformed X.509 ECDSA signature parameters"))
-        return _TLSSignatureVerifySpec(UInt16(160), false, false)
+        throw(ArgumentError("tls: SHA-1 X.509 certificate signatures are not supported"))
     elseif _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_ECDSA_WITH_SHA224)
         pos > value_end || throw(ArgumentError("tls: malformed X.509 ECDSA signature parameters"))
         return _TLSSignatureVerifySpec(UInt16(224), false, false)
@@ -703,16 +717,25 @@ function _tls_parse_general_names(
     seq_next == value_end + 1 || throw(ArgumentError("tls: malformed subjectAltName extension"))
     dns_names = String[]
     ip_addresses = Vector{Vector{UInt8}}()
+    email_addresses = String[]
+    uri_names = String[]
+    has_unhandled_name_types = false
     pos = seq_start
     while pos <= seq_end
         tag, name_start, name_end, pos = _asn1_read_tlv(bytes, pos)
-        if tag == _ASN1_GENERAL_NAME_DNS
+        if tag == _ASN1_GENERAL_NAME_RFC822
+            push!(email_addresses, _asn1_ascii_string(bytes, name_start, name_end))
+        elseif tag == _ASN1_GENERAL_NAME_DNS
             push!(dns_names, _asn1_ascii_string(bytes, name_start, name_end))
+        elseif tag == _ASN1_GENERAL_NAME_URI
+            push!(uri_names, _asn1_ascii_string(bytes, name_start, name_end))
         elseif tag == _ASN1_GENERAL_NAME_IP
             push!(ip_addresses, copy(@view bytes[name_start:name_end]))
+        else
+            has_unhandled_name_types = true
         end
     end
-    return _TLSParsedGeneralNames(dns_names, ip_addresses)
+    return _TLSParsedGeneralNames(dns_names, ip_addresses, email_addresses, uri_names, has_unhandled_name_types)
 end
 
 @inline function _tls_valid_name_constraint_domain(domain::AbstractString)::Bool
@@ -722,6 +745,17 @@ end
         return _tls_valid_hostname_value(SubString(domain, 2:lastindex(domain)), false)
     end
     return _tls_valid_hostname_value(domain, false)
+end
+
+@inline function _tls_valid_email_constraint(value::AbstractString)::Bool
+    at = findfirst(==('@'), value)
+    at === nothing && return _tls_valid_name_constraint_domain(value)
+    local_end = prevind(value, at)
+    domain_start = nextind(value, at)
+    local_end >= firstindex(value) || return false
+    domain_start <= lastindex(value) || return false
+    findnext(==('@'), value, domain_start) === nothing || return false
+    return _tls_valid_hostname_value(SubString(value, domain_start:lastindex(value)), false)
 end
 
 @inline function _tls_valid_ip_mask(mask::AbstractVector{UInt8})::Bool
@@ -760,6 +794,8 @@ function _tls_parse_name_constraints_subtrees!(
     value_end::Int,
     dns_out::Vector{String},
     ip_out::Vector{_TLSIPRangeConstraint},
+    uri_out::Vector{String},
+    email_out::Vector{String},
 )::Nothing
     seq_start, seq_end, seq_next = _asn1_expect_tlv(bytes, value_start, _ASN1_SEQUENCE)
     seq_next == value_end + 1 || throw(ArgumentError("tls: malformed NameConstraints extension"))
@@ -772,6 +808,16 @@ function _tls_parse_name_constraints_subtrees!(
             _tls_valid_name_constraint_domain(domain) ||
                 throw(ArgumentError("tls: failed to parse dNSName constraint $(repr(domain))"))
             push!(dns_out, String(domain))
+        elseif tag == _ASN1_GENERAL_NAME_RFC822
+            mailbox = _asn1_ascii_string(bytes, base_start, base_end)
+            _tls_valid_email_constraint(mailbox) ||
+                throw(ArgumentError("tls: failed to parse rfc822Name constraint $(repr(mailbox))"))
+            push!(email_out, mailbox)
+        elseif tag == _ASN1_GENERAL_NAME_URI
+            domain = _asn1_ascii_string(bytes, base_start, base_end)
+            _tls_valid_name_constraint_domain(domain) ||
+                throw(ArgumentError("tls: failed to parse URI name constraint $(repr(domain))"))
+            push!(uri_out, String(domain))
         elseif tag == _ASN1_GENERAL_NAME_IP
             push!(ip_out, _tls_parse_ip_range_constraint(bytes, base_start, base_end))
         else
@@ -801,22 +847,35 @@ function _tls_parse_name_constraints(
     excluded_dns = String[]
     permitted_ip = _TLSIPRangeConstraint[]
     excluded_ip = _TLSIPRangeConstraint[]
+    permitted_uri = String[]
+    excluded_uri = String[]
+    permitted_email = String[]
+    excluded_email = String[]
     saw_subtrees = false
     pos = seq_start
     while pos <= seq_end
         tag, field_start, field_end, pos = _asn1_read_tlv(bytes, pos)
         if tag == 0xa0
-            _tls_parse_name_constraints_subtrees!(bytes, field_start, field_end, permitted_dns, permitted_ip)
+            _tls_parse_name_constraints_subtrees!(bytes, field_start, field_end, permitted_dns, permitted_ip, permitted_uri, permitted_email)
             saw_subtrees = true
         elseif tag == 0xa1
-            _tls_parse_name_constraints_subtrees!(bytes, field_start, field_end, excluded_dns, excluded_ip)
+            _tls_parse_name_constraints_subtrees!(bytes, field_start, field_end, excluded_dns, excluded_ip, excluded_uri, excluded_email)
             saw_subtrees = true
         else
             throw(ArgumentError("tls: malformed NameConstraints extension"))
         end
     end
     saw_subtrees || throw(ArgumentError("tls: empty name constraints extension"))
-    return _TLSParsedNameConstraints(permitted_dns, excluded_dns, permitted_ip, excluded_ip)
+    return _TLSParsedNameConstraints(
+        permitted_dns,
+        excluded_dns,
+        permitted_ip,
+        excluded_ip,
+        permitted_uri,
+        excluded_uri,
+        permitted_email,
+        excluded_email,
+    )
 end
 
 function _tls_parse_subject_common_name(
@@ -931,7 +990,10 @@ function _tls_parse_der_certificate_info(cert_der::AbstractVector{UInt8})::_TLSC
     public_key = _tls_parse_subject_public_key_info(cert_der, spki_start, spki_end)
     dns_names = String[]
     ip_addresses = Vector{Vector{UInt8}}()
+    email_addresses = String[]
+    uri_names = String[]
     has_san_extension = false
+    has_unhandled_san_names = false
     valid_from_s = Int64(0)
     valid_until_s = Int64(0)
     begin
@@ -953,6 +1015,10 @@ function _tls_parse_der_certificate_info(cert_der::AbstractVector{UInt8})::_TLSC
     excluded_dns_domains = String[]
     permitted_ip_ranges = _TLSIPRangeConstraint[]
     excluded_ip_ranges = _TLSIPRangeConstraint[]
+    permitted_uri_domains = String[]
+    excluded_uri_domains = String[]
+    permitted_email_addresses = String[]
+    excluded_email_addresses = String[]
     while tbs_pos <= tbs_end
         tag, field_start, field_end, tbs_pos = _asn1_read_tlv(cert_der, tbs_pos)
         if tag == _ASN1_CONTEXT_EXPLICIT_EXTENSIONS
@@ -974,6 +1040,9 @@ function _tls_parse_der_certificate_info(cert_der::AbstractVector{UInt8})::_TLSC
                     general_names = _tls_parse_general_names(cert_der, octet_start, octet_end)
                     dns_names = general_names.dns_names
                     ip_addresses = general_names.ip_addresses
+                    email_addresses = general_names.email_addresses
+                    uri_names = general_names.uri_names
+                    has_unhandled_san_names = general_names.has_unhandled_name_types
                 elseif _asn1_oid_equals(cert_der, oid_start, oid_end, _ASN1_OID_BASIC_CONSTRAINTS)
                     basic_constraints = _tls_parse_basic_constraints(cert_der, octet_start, octet_end)
                     is_ca = basic_constraints.is_ca
@@ -993,6 +1062,10 @@ function _tls_parse_der_certificate_info(cert_der::AbstractVector{UInt8})::_TLSC
                     excluded_dns_domains = name_constraints.excluded_dns_domains
                     permitted_ip_ranges = name_constraints.permitted_ip_ranges
                     excluded_ip_ranges = name_constraints.excluded_ip_ranges
+                    permitted_uri_domains = name_constraints.permitted_uri_domains
+                    excluded_uri_domains = name_constraints.excluded_uri_domains
+                    permitted_email_addresses = name_constraints.permitted_email_addresses
+                    excluded_email_addresses = name_constraints.excluded_email_addresses
                 elseif critical
                     throw(ArgumentError("tls: unsupported critical X.509 extension"))
                 end
@@ -1006,7 +1079,10 @@ function _tls_parse_der_certificate_info(cert_der::AbstractVector{UInt8})::_TLSC
         common_name,
         dns_names,
         ip_addresses,
+        email_addresses,
+        uri_names,
         has_san_extension,
+        has_unhandled_san_names,
         valid_from_s,
         valid_until_s,
         is_ca,
@@ -1020,6 +1096,10 @@ function _tls_parse_der_certificate_info(cert_der::AbstractVector{UInt8})::_TLSC
         excluded_dns_domains,
         permitted_ip_ranges,
         excluded_ip_ranges,
+        permitted_uri_domains,
+        excluded_uri_domains,
+        permitted_email_addresses,
+        excluded_email_addresses,
         tbs_der,
         public_key,
         outer_sig_spec,

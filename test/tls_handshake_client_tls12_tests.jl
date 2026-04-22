@@ -18,6 +18,26 @@ const _TLS12_SERVER_X25519_PRIVATE_KEY = UInt8[
     0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
     0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
 ]
+const _TLS12_TEST_ED25519_PRIVATE_KEY = UInt8[
+    0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48,
+    0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50,
+    0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58,
+    0x59, 0x5a, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66,
+]
+
+function _tls12_generate_test_ed25519_pkey()::Ptr{Cvoid}
+    key_bytes = copy(_TLS12_TEST_ED25519_PRIVATE_KEY)
+    pkey = GC.@preserve key_bytes ccall(
+        (:EVP_PKEY_new_raw_private_key, TL12H._LIBCRYPTO_PATH),
+        Ptr{Cvoid},
+        (Cint, Ptr{Cvoid}, Ptr{UInt8}, Csize_t),
+        TL12H._init_ed25519_pkey_id!(),
+        C_NULL,
+        pointer(key_bytes),
+        Csize_t(length(key_bytes)),
+    )
+    return TL12H._openssl_require_nonnull(pkey, "EVP_PKEY_new_raw_private_key(Ed25519)")
+end
 
 function _tls12_make_server_key_exchange(client_random::Vector{UInt8}, server_random::Vector{UInt8})
     pkey = TL12H._tls13_p256_private_key_from_bytes(_TLS12_SERVER_P256_PRIVATE_KEY)
@@ -57,8 +77,10 @@ end
         @test hello.supported_points == UInt8[0x00]
         @test hello.extended_master_secret
         @test !hello.ocsp_stapling
-        @test !hello.secure_renegotiation_supported
+        @test hello.secure_renegotiation_supported
         @test hello.alpn_protocols == ["h2"]
+        @test TL12H._TLS_SIGNATURE_ED25519 in hello.supported_signature_algorithms
+        @test TL12H._TLS_SIGNATURE_ED25519 in hello.supported_signature_algorithms_cert
 
         reordered = TL12H._tls12_client_hello(TL12H.Config(
             server_name = "localhost",
@@ -148,7 +170,20 @@ end
         end
     end
 
-    @testset "TLS 1.2 rejects Ed25519 certificates for ECDHE cipher suites with a clean alert" begin
+    @testset "TLS 1.2 treats Ed25519 certificates like ECDSA signing certificates" begin
+        pkey = _tls12_generate_test_ed25519_pkey()
+        try
+            @test TL12H._tls12_select_signature_algorithm(pkey, UInt16[TL12H._TLS_SIGNATURE_ED25519]) == TL12H._TLS_SIGNATURE_ED25519
+            @test TL12H._tls12_certificate_type_for_pkey(pkey) == TL12H._TLS12_CERT_TYPE_ECDSA_SIGN
+        finally
+            TL12H._free_evp_pkey!(pkey)
+        end
+
+        @test TL12H._tls12_server_certificate_matches_suite!(
+            TL12H._TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256_ID,
+            TL12H._TLSEd25519PublicKey(fill(UInt8(0x22), 32)),
+        ) === nothing
+
         err = try
             TL12H._tls12_server_certificate_matches_suite!(
                 TL12H._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID,

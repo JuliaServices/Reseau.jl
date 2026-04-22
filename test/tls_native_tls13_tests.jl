@@ -268,6 +268,40 @@ end
         end
     end
 
+    @testset "write-side key updates refresh long-lived TLS 1.3 traffic secrets" begin
+        IPN.shutdown!()
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        client_state = nothing
+        server_state = nothing
+        try
+            listener, client_tcp, server_tcp = _open_tcp_pair()
+            client_state, server_state, _, client_to_server_secret = _tls13_record_state_pair()
+            write_cipher = client_state.write_cipher::TLN._TLS13RecordCipherState
+            read_cipher = server_state.read_cipher::TLN._TLS13RecordCipherState
+            write_cipher.seq = TLN._TLS13_WRITE_KEY_UPDATE_INTERVAL
+            read_cipher.seq = TLN._TLS13_WRITE_KEY_UPDATE_INTERVAL
+            expected_next_write = TLN._tls13_next_traffic_secret(TLN._TLS13_AES_128_GCM_SHA256, client_to_server_secret)
+            try
+                TLN._tls13_maybe_rekey_write!(client_tcp, client_state)
+                TLN._tls13_read_record!(server_tcp, server_state)
+                TLN._tls13_handle_post_handshake_messages!(server_tcp, server_state)
+                @test (client_state.write_cipher::TLN._TLS13RecordCipherState).traffic_secret == expected_next_write
+                @test (server_state.read_cipher::TLN._TLS13RecordCipherState).traffic_secret == expected_next_write
+            finally
+                TLN._securezero!(expected_next_write)
+            end
+        finally
+            client_state isa TLN._TLS13NativeClientState && TLN._securezero_tls13_native_client_state!(client_state)
+            server_state isa TLN._TLS13NativeClientState && TLN._securezero_tls13_native_client_state!(server_state)
+            _tls_native_close_quiet!(server_tcp)
+            _tls_native_close_quiet!(client_tcp)
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+    end
+
     @testset "record layer rejects oversized plaintext and exhausted write sequence numbers" begin
         IPN.shutdown!()
         listener = nothing
@@ -348,6 +382,36 @@ end
         end
     end
 
+    @testset "native client accepts h2/http1.1 ALPN fallback with an empty negotiated protocol" begin
+        IPN.shutdown!()
+        listener = nothing
+        client = nothing
+        server = nothing
+        server_task = nothing
+        try
+            listener, addr, server_task, _ = _start_tls13_native_server(_tls13_native_server_config(alpn_protocols = ["h2"]))
+            client = TLN.connect(
+                addr;
+                server_name = "localhost",
+                verify_peer = false,
+                alpn_protocols = ["http/1.1"],
+                min_version = TLN.TLS1_3_VERSION,
+                max_version = TLN.TLS1_3_VERSION,
+                handshake_timeout_ns = 10_000_000_000,
+            )
+            server = fetch(server_task::Task)
+            @test TLN.connection_state(client).alpn_protocol == ""
+            @test TLN.connection_state(server).alpn_protocol == ""
+            status = _tls_native_wait_task(server_task::Task, 5.0)
+            @test status != :timed_out
+        finally
+            _tls_native_close_quiet!(server)
+            _tls_native_close_quiet!(client)
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+    end
+
     @testset "native client rejects ALPN no-overlap with no_application_protocol" begin
         IPN.shutdown!()
         listener = nothing
@@ -361,7 +425,7 @@ end
                     addr;
                     server_name = "localhost",
                     verify_peer = false,
-                    alpn_protocols = ["http/1.1"],
+                    alpn_protocols = ["spdy/3"],
                     min_version = TLN.TLS1_3_VERSION,
                     max_version = TLN.TLS1_3_VERSION,
                     handshake_timeout_ns = 10_000_000_000,

@@ -249,6 +249,7 @@ end
     signature_algorithm == _TLS_SIGNATURE_RSA_PSS_PSS_SHA256 && return _TLSSignatureVerifySpec(256, false, true)
     signature_algorithm == _TLS_SIGNATURE_RSA_PSS_PSS_SHA384 && return _TLSSignatureVerifySpec(384, false, true)
     signature_algorithm == _TLS_SIGNATURE_RSA_PSS_PSS_SHA512 && return _TLSSignatureVerifySpec(512, false, true)
+    signature_algorithm == _TLS_SIGNATURE_ED25519 && return _TLSSignatureVerifySpec(0, true, false)
     throw(ArgumentError("unsupported TLS 1.2 signature algorithm: $(string(signature_algorithm, base = 16))"))
 end
 
@@ -745,6 +746,14 @@ function _tls13_p256_shared_secret(private_key::Ptr{Cvoid}, peer_public_key::Abs
             _openssl_require_ok(ccall((:EVP_PKEY_derive, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Csize_t}), ctx, pointer(out), out_len), "EVP_PKEY_derive(P-256)")
         end
         resize!(out, Int(out_len[]))
+        all_zero = UInt8(0)
+        @inbounds for byte in out
+            all_zero |= byte
+        end
+        if iszero(all_zero)
+            _securezero!(out)
+            _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: invalid P-256 shared secret")
+        end
         return out
     finally
         _free_evp_pkey_ctx!(ctx)

@@ -6,9 +6,14 @@
 function _tls_select_server_alpn(config, client_hello::_ClientHelloMsg)::String
     isempty(config.alpn_protocols) && return ""
     isempty(client_hello.alpn_protocols) && return ""
+    http11_fallback = false
     for proto in config.alpn_protocols
-        in(proto, client_hello.alpn_protocols) && return proto
+        for client_proto in client_hello.alpn_protocols
+            proto == client_proto && return proto
+            proto == "h2" && client_proto == "http/1.1" && (http11_fallback = true)
+        end
     end
+    http11_fallback && return ""
     _tls_fail(_TLS_ALERT_NO_APPLICATION_PROTOCOL, "tls: client and server do not support a common ALPN protocol")
 end
 

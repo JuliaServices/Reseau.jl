@@ -8,6 +8,7 @@ const _TLS12_SUPPORTED_SIGNATURE_ALGORITHMS = UInt16[
     _TLS_SIGNATURE_ECDSA_SECP256R1_SHA256,
     _TLS_SIGNATURE_ECDSA_SECP384R1_SHA384,
     _TLS_SIGNATURE_ECDSA_SECP521R1_SHA512,
+    _TLS_SIGNATURE_ED25519,
 ]
 
 const _TLS12_MAX_SESSION_TICKET_LIFETIME = UInt32(7 * 24 * 60 * 60)
@@ -227,6 +228,9 @@ function _tls12_client_hello(config)::_ClientHelloMsg
     ]
     hello.compression_methods = UInt8[_TLS_COMPRESSION_NONE]
     hello.server_name = config.server_name === nothing ? "" : String(config.server_name)
+    # TLS 1.2 status_request is only safe to advertise once the client flight
+    # handles a CertificateStatus message. Keep it disabled until that state
+    # machine support exists.
     hello.ocsp_stapling = false
     hello.ticket_supported = !config.session_tickets_disabled
     hello.alpn_protocols = copy(config.alpn_protocols)
@@ -234,7 +238,7 @@ function _tls12_client_hello(config)::_ClientHelloMsg
     hello.supported_points = UInt8[0x00]
     hello.supported_signature_algorithms = copy(_TLS12_SUPPORTED_SIGNATURE_ALGORITHMS)
     hello.supported_signature_algorithms_cert = copy(_TLS12_SUPPORTED_SIGNATURE_ALGORITHMS)
-    hello.secure_renegotiation_supported = false
+    hello.secure_renegotiation_supported = true
     hello.extended_master_secret = true
     hello.scts = true
     return hello
@@ -265,6 +269,10 @@ function _tls12_select_signature_algorithm(pkey::Ptr{Cvoid}, supported_signature
         end
         return nothing
     end
+    if pkey_type == "ED25519"
+        in(_TLS_SIGNATURE_ED25519, supported_signature_algorithms) && return _TLS_SIGNATURE_ED25519
+        return nothing
+    end
     throw(ArgumentError("tls: unsupported TLS 1.2 certificate key type $(pkey_type)"))
 end
 
@@ -272,6 +280,7 @@ function _tls12_certificate_type_for_pkey(pkey::Ptr{Cvoid})::UInt8
     pkey_type = _tls13_pkey_type_name(pkey)
     pkey_type == "RSA" && return _TLS12_CERT_TYPE_RSA_SIGN
     pkey_type == "EC" && return _TLS12_CERT_TYPE_ECDSA_SIGN
+    pkey_type == "ED25519" && return _TLS12_CERT_TYPE_ECDSA_SIGN
     throw(ArgumentError("tls: unsupported TLS 1.2 certificate key type $(pkey_type)"))
 end
 
@@ -342,8 +351,12 @@ function _tls12_server_certificate_matches_suite!(cipher_suite::UInt16, pubkey::
     return nothing
 end
 
-@inline function _tls12_server_certificate_matches_suite!(cipher_suite::UInt16, pubkey::_TLSEd25519PublicKey)::Nothing
-    _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: TLS 1.2 server certificate is incompatible with the selected cipher suite")
+function _tls12_server_certificate_matches_suite!(cipher_suite::UInt16, pubkey::_TLSEd25519PublicKey)::Nothing
+    cipher_suite in (
+        _TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256_ID,
+        _TLS12_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384_ID,
+    ) || _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: TLS 1.2 server certificate is incompatible with the selected cipher suite")
+    return nothing
 end
 
 function _tls12_verify_server_key_exchange!(

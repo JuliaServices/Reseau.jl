@@ -5,6 +5,7 @@ const _TLS13_MAX_HANDSHAKE_BUFFER = _MAX_CERTIFICATE_HANDSHAKE_SIZE + _TLS13_MAX
 const _TLS13_HANDSHAKE_TYPE_KEY_UPDATE = UInt8(24)
 const _TLS13_KEY_UPDATE_NOT_REQUESTED = UInt8(0)
 const _TLS13_KEY_UPDATE_REQUESTED = UInt8(1)
+const _TLS13_WRITE_KEY_UPDATE_INTERVAL = UInt64(1) << 24
 const _TLS13_DUMMY_CHANGE_CIPHER_SPEC = UInt8[0x01]
 
 """
@@ -463,6 +464,23 @@ function _tls13_handle_key_update!(tcp::TCP.Conn, state::_TLS13NativeClientState
         end
     end
     _tls13_advance_read_cipher!(state)
+    return nothing
+end
+
+function _tls13_maybe_rekey_write!(tcp::TCP.Conn, state::_TLS13NativeClientState)::Nothing
+    cipher = state.write_cipher
+    cipher === nothing && return nothing
+    cipher_state = cipher::_TLS13RecordCipherState
+    cipher_state.exhausted && return nothing
+    cipher_state.seq == UInt64(0) && return nothing
+    rem(cipher_state.seq, _TLS13_WRITE_KEY_UPDATE_INTERVAL) == UInt64(0) || return nothing
+    raw = _tls13_key_update_message(false)
+    try
+        _tls13_write_record!(tcp, state.write_cipher, _TLS_RECORD_TYPE_HANDSHAKE, raw)
+        _tls13_advance_write_cipher!(state)
+    finally
+        _securezero!(raw)
+    end
     return nothing
 end
 
