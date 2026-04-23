@@ -215,6 +215,8 @@ const _ASN1_OID_CURVE_P521 = (
     UInt8(0x2b), UInt8(0x81), UInt8(0x04), UInt8(0x00), UInt8(0x23),
 )
 
+const _TLS_MAX_RSA_CERT_KEY_BITS = 8192
+
 const _TLS_KEY_USAGE_DIGITAL_SIGNATURE = UInt16(1) << 0
 const _TLS_KEY_USAGE_KEY_ENCIPHERMENT = UInt16(1) << 2
 const _TLS_KEY_USAGE_KEY_CERT_SIGN = UInt16(1) << 5
@@ -403,6 +405,20 @@ function _asn1_integer_bytes(bytes::AbstractVector{UInt8}, value_start::Int, val
     return copy(@view bytes[start:value_end])
 end
 
+function _tls_rsa_modulus_bit_length(modulus::AbstractVector{UInt8})::Int
+    isempty(modulus) && throw(ArgumentError("tls: malformed RSA public key"))
+    first = modulus[1]
+    first == 0x00 && throw(ArgumentError("tls: malformed RSA public key"))
+    return ((length(modulus) - 1) << 3) + (8 - leading_zeros(first))
+end
+
+function _tls_check_rsa_certificate_key_size!(modulus::AbstractVector{UInt8})::Nothing
+    bits = _tls_rsa_modulus_bit_length(modulus)
+    bits <= _TLS_MAX_RSA_CERT_KEY_BITS ||
+        throw(ArgumentError("tls: RSA certificate public key is larger than $(_TLS_MAX_RSA_CERT_KEY_BITS) bits"))
+    return nothing
+end
+
 function _asn1_bit_string_bytes(bytes::AbstractVector{UInt8}, value_start::Int, value_end::Int)::Vector{UInt8}
     value_start <= value_end || throw(ArgumentError("tls: malformed ASN.1 BIT STRING value"))
     unused_bits = Int(bytes[value_start])
@@ -539,10 +555,10 @@ function _tls_parse_subject_public_key_info(bytes::AbstractVector{UInt8}, value_
         modulus_start, modulus_end, key_pos = _asn1_expect_tlv(key_bytes, key_start, _ASN1_INTEGER)
         exponent_start, exponent_end, key_pos = _asn1_expect_tlv(key_bytes, key_pos, _ASN1_INTEGER)
         key_pos == key_end + 1 || throw(ArgumentError("tls: malformed RSA public key"))
-        return _TLSRSAPublicKey(
-            _asn1_integer_bytes(key_bytes, modulus_start, modulus_end),
-            _asn1_integer_bytes(key_bytes, exponent_start, exponent_end),
-        )
+        modulus = _asn1_integer_bytes(key_bytes, modulus_start, modulus_end)
+        _tls_check_rsa_certificate_key_size!(modulus)
+        exponent = _asn1_integer_bytes(key_bytes, exponent_start, exponent_end)
+        return _TLSRSAPublicKey(modulus, exponent)
     elseif _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_ID_EC_PUBLIC_KEY)
         curve_oid_start, curve_oid_end, alg_pos = _asn1_expect_tlv(bytes, alg_pos, _ASN1_OBJECT_IDENTIFIER)
         alg_pos == alg_end + 1 || throw(ArgumentError("tls: malformed EC public key parameters"))

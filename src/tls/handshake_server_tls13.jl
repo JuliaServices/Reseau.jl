@@ -480,7 +480,8 @@ function _check_for_resumption!(state::_TLS13ServerHandshakeState, config)::Noth
                 end
                 _transcript_update!(binder_transcript, _marshal_client_hello_without_binders(state.client_hello))
                 binder = _tls13_finished_verify_data(state.cipher_spec.hash_kind, binder_key, binder_transcript)
-                _constant_time_equals(state.client_hello.psk_binders[i], binder) || continue
+                _constant_time_equals(state.client_hello.psk_binders[i], binder) ||
+                    _tls_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid PSK binder")
                 _tls_server_session_client_auth_ok(session.client_certificates, config) do client_certificates
                     _tls13_verify_client_certificate_chain(
                         client_certificates;

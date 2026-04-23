@@ -11,6 +11,44 @@ const _TLS_UNITTEST_CERT_PATH = joinpath(@__DIR__, "resources", "unittests.crt")
 
 _read_bytes(path::AbstractString) = read(path)
 
+function _der_length_bytes(len::Int)
+    len < 0 && throw(ArgumentError("negative DER length"))
+    len < 0x80 && return UInt8[UInt8(len)]
+    bytes = UInt8[]
+    value = len
+    while value > 0
+        pushfirst!(bytes, UInt8(value & 0xff))
+        value >>= 8
+    end
+    return vcat(UInt8[0x80 | UInt8(length(bytes))], bytes)
+end
+
+function _der_tlv(tag::UInt8, value::AbstractVector{UInt8})
+    out = UInt8[tag]
+    append!(out, _der_length_bytes(length(value)))
+    append!(out, value)
+    return out
+end
+
+function _der_integer(value::AbstractVector{UInt8})
+    bytes = Vector{UInt8}(value)
+    isempty(bytes) && throw(ArgumentError("empty DER integer"))
+    if bytes[1] >= 0x80
+        pushfirst!(bytes, 0x00)
+    end
+    return _der_tlv(TLX._ASN1_INTEGER, bytes)
+end
+
+function _rsa_spki_der(modulus::AbstractVector{UInt8}, exponent::AbstractVector{UInt8} = UInt8[0x01, 0x00, 0x01])
+    alg = _der_tlv(
+        TLX._ASN1_SEQUENCE,
+        vcat(_der_tlv(TLX._ASN1_OBJECT_IDENTIFIER, collect(TLX._ASN1_OID_RSA_ENCRYPTION)), _der_tlv(TLX._ASN1_NULL, UInt8[])),
+    )
+    rsa_key = _der_tlv(TLX._ASN1_SEQUENCE, vcat(_der_integer(modulus), _der_integer(exponent)))
+    bit_string = _der_tlv(TLX._ASN1_BIT_STRING, vcat(UInt8[0x00], rsa_key))
+    return _der_tlv(TLX._ASN1_SEQUENCE, vcat(alg, bit_string))
+end
+
 function _find_subsequence_x509(haystack::AbstractVector{UInt8}, needle::AbstractVector{UInt8})
     last_start = length(haystack) - length(needle) + 1
     last_start < 1 && return nothing
@@ -170,7 +208,7 @@ end
         @test TLX._tls_match_exactly("LOCALHOST", "localhost")
     end
 
-    @testset "purpose usage checks enforce TLS key usage and prefer AKI/SKI issuer links" begin
+    @testset "purpose usage checks enforce TLS key usage and Go-style issuer links" begin
         server_cert = _tls_cert_info(_TLS_CERT_PATH)
         key_encipherment_only = _tls_copy_cert(
             server_cert;
@@ -187,10 +225,13 @@ end
         @test !TLX._tls_certificate_usage_permitted(no_key_usage, "ssl_server")
 
         ca_cert = _tls_cert_info(_TLS_CA_PATH)
+        @test TLX._tls_cert_subject_matches_issuer(server_cert, ca_cert)
         mismatched_parent = _tls_copy_cert(ca_cert; subject_raw = UInt8[0x30, 0x00])
-        @test TLX._tls_cert_subject_matches_issuer(server_cert, mismatched_parent)
-        missing_ski_parent = _tls_copy_cert(ca_cert; subject_raw = UInt8[0x30, 0x00], subject_key_id = UInt8[])
-        @test !TLX._tls_cert_subject_matches_issuer(server_cert, missing_ski_parent)
+        @test !TLX._tls_cert_subject_matches_issuer(server_cert, mismatched_parent)
+        missing_ski_parent = _tls_copy_cert(ca_cert; subject_key_id = UInt8[])
+        @test TLX._tls_cert_subject_matches_issuer(server_cert, missing_ski_parent)
+        wrong_ski_parent = _tls_copy_cert(ca_cert; subject_key_id = UInt8[0xff])
+        @test !TLX._tls_cert_subject_matches_issuer(server_cert, wrong_ski_parent)
     end
 
     @testset "certificate peer-name verification uses SANs and rejects legacy CN fallback" begin
@@ -261,6 +302,13 @@ end
         @test TLX._tls_verify_certificate_signature(rsa_cert, rsa_ca)
         @test TLX._tls_verify_certificate_signature(ecdsa_cert, ecdsa_cert)
         @test TLX._tls_verify_certificate_signature(rsa_ca, rsa_ca)
+
+        max_modulus = vcat(UInt8[0x80], zeros(UInt8, 1023))
+        oversized_modulus = vcat(UInt8[0x01], zeros(UInt8, 1024))
+        @test TLX._tls_rsa_modulus_bit_length(max_modulus) == TLX._TLS_MAX_RSA_CERT_KEY_BITS
+        @test TLX._tls_rsa_modulus_bit_length(oversized_modulus) == TLX._TLS_MAX_RSA_CERT_KEY_BITS + 1
+        oversized_spki = _rsa_spki_der(oversized_modulus)
+        @test_throws ArgumentError TLX._tls_parse_subject_public_key_info(oversized_spki, 1, length(oversized_spki))
     end
 
     @testset "native trust verifier accepts valid server and client chains" begin
@@ -292,6 +340,57 @@ end
             dir_store1 = TLX._tls_load_trust_store(dir)
             dir_store2 = TLX._tls_load_trust_store(dir)
             @test dir_store1 === dir_store2
+        end
+    end
+
+    @testset "local identity cache replacement keeps owner references valid" begin
+        mktempdir() do dir
+            cert_path = joinpath(dir, "identity.crt")
+            key_path = joinpath(dir, "identity.key")
+            write(cert_path, _read_bytes(_TLS_UNITTEST_CERT_PATH))
+            write(key_path, _read_bytes(joinpath(@__DIR__, "resources", "unittests.key")))
+            config = TLX.Config(cert_file = cert_path, key_file = key_path)
+            signed = UInt8[0x72, 0x65, 0x73, 0x65, 0x61, 0x75]
+            first_cert = _tls_cert_info(_TLS_UNITTEST_CERT_PATH)
+            second_cert = _tls_cert_info(_TLS_CERT_PATH)
+            first_identity = nothing
+            second_entry = nothing
+            second_identity = nothing
+            try
+                first_identity = TLX._tls_local_identity(config; is_server = true)
+                first_signature = TLX._tls13_openssl_sign_signature(
+                    (first_identity::TLX._TLSLocalIdentity).private_key,
+                    TLX._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256,
+                    signed,
+                )
+                @test TLX._tls13_openssl_verify_signature(first_cert.public_key, TLX._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256, signed, first_signature)
+                TLX._free_evp_pkey!((first_identity::TLX._TLSLocalIdentity).private_key)
+                first_identity = nothing
+
+                write(cert_path, _read_bytes(_TLS_CERT_PATH))
+                write(key_path, _read_bytes(joinpath(@__DIR__, "resources", "native_tls_server.key")))
+                second_entry = TLX._tls_cached_local_identity(cert_path, key_path)
+
+                second_identity = TLX._tls_local_identity(config; is_server = true)
+                old_signature = TLX._tls13_openssl_sign_signature(
+                    (second_identity::TLX._TLSLocalIdentity).private_key,
+                    TLX._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256,
+                    signed,
+                )
+                @test TLX._tls13_openssl_verify_signature(first_cert.public_key, TLX._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256, signed, old_signature)
+
+                new_signature = TLX._tls13_openssl_sign_signature(
+                    (second_entry::TLX._TLSLocalIdentityCacheEntry).private_key,
+                    TLX._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256,
+                    signed,
+                )
+                @test TLX._tls13_openssl_verify_signature(second_cert.public_key, TLX._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256, signed, new_signature)
+            finally
+                first_identity isa TLX._TLSLocalIdentity && TLX._free_evp_pkey!(first_identity.private_key)
+                second_identity isa TLX._TLSLocalIdentity && TLX._free_evp_pkey!(second_identity.private_key)
+                second_entry isa TLX._TLSLocalIdentityCacheEntry && TLX._free_evp_pkey!(second_entry.private_key)
+                TLX._finalize_tls_local_identity_state!(config._server_identity)
+            end
         end
     end
 

@@ -183,6 +183,10 @@ function _TLSLocalIdentityState()::_TLSLocalIdentityState
     return state
 end
 
+@inline function _tls_local_identity_entry_for_owner(entry::_TLSLocalIdentityCacheEntry)::_TLSLocalIdentityCacheEntry
+    return _TLSLocalIdentityCacheEntry(entry.fingerprint, entry.certificate_chain, _up_ref_evp_pkey!(entry.private_key))
+end
+
 @inline function _tls_local_identity_cache_key(cert_file::String, key_file::String)::_TLSLocalIdentityCacheKey
     return _TLSLocalIdentityCacheKey(cert_file, key_file)
 end
@@ -206,7 +210,7 @@ function _tls_cached_local_identity(cert_file::AbstractString, key_file::Abstrac
         if haskey(_TLS_LOCAL_IDENTITY_CACHE, cache_key)
             entry = _TLS_LOCAL_IDENTITY_CACHE[cache_key]
             if entry.fingerprint == fingerprint
-                return entry
+                return _tls_local_identity_entry_for_owner(entry)
             end
         end
     finally
@@ -231,14 +235,15 @@ function _tls_cached_local_identity(cert_file::AbstractString, key_file::Abstrac
             current = _TLS_LOCAL_IDENTITY_CACHE[cache_key]
             if current.fingerprint == fingerprint
                 _free_evp_pkey!(private_key)
-                return current
+                return _tls_local_identity_entry_for_owner(current)
             else
                 _TLS_LOCAL_IDENTITY_CACHE[cache_key] = new_entry
-                return new_entry
+                _free_evp_pkey!(current.private_key)
+                return _tls_local_identity_entry_for_owner(new_entry)
             end
         else
             _TLS_LOCAL_IDENTITY_CACHE[cache_key] = new_entry
-            return new_entry
+            return _tls_local_identity_entry_for_owner(new_entry)
         end
     finally
         unlock(_TLS_LOCAL_IDENTITY_CACHE_LOCK)
@@ -503,6 +508,7 @@ mutable struct Conn <: IO
     @atomic handshake_complete::Bool
     @atomic closed::Bool
     @atomic active_version::UInt16
+    handshake_error::Union{Nothing, TLSError, TLSHandshakeTimeoutError}
     write_permanent_error::Union{Nothing, TLSError}
     negotiated_version::String
     negotiated_alpn::Union{Nothing, String}
@@ -620,7 +626,7 @@ function _tls_local_identity(config::Config; is_server::Bool)::Union{Nothing, _T
             entry = _tls_cached_local_identity(cert_file::String, key_file)
             state.certificate_chain = entry.certificate_chain
             state.private_key = entry.private_key
-            state.shared_cache = true
+            state.shared_cache = false
         end
         return _TLSLocalIdentity(state.certificate_chain, _up_ref_evp_pkey!(state.private_key))
     finally
@@ -1018,6 +1024,7 @@ function _new_native_conn(tcp::TCP.Conn, config::Config, policy::UInt8, native_s
         false,
         false,
         UInt16(0),
+        nothing,
         nothing,
         "",
         nothing,
@@ -1515,6 +1522,9 @@ function handshake!(conn::Conn)
     try
         _ensure_open!(conn, "handshake")
         _handshake_complete(conn) && return nothing
+        if conn.handshake_error !== nothing
+            throw(conn.handshake_error)
+        end
         try
             _with_handshake_deadline(conn) do
                 if _is_tls13_policy(conn.policy)
@@ -1547,13 +1557,22 @@ function handshake!(conn::Conn)
             ex = _as_exception(err)
             if ex isa IOPoll.DeadlineExceededError
                 if conn.config.handshake_timeout_ns > 0
-                    throw(TLSHandshakeTimeoutError(conn.config.handshake_timeout_ns))
+                    handshake_error = TLSHandshakeTimeoutError(conn.config.handshake_timeout_ns)
+                    conn.handshake_error = handshake_error
+                    throw(handshake_error)
                 end
-                throw(TLSError("handshake", Int32(0), "i/o timeout", ex))
+                handshake_error = TLSError("handshake", Int32(0), "i/o timeout", ex)
+                conn.handshake_error = handshake_error
+                throw(handshake_error)
             end
-            ex isa TLSError && rethrow()
+            if ex isa TLSError
+                conn.handshake_error = ex
+                throw(ex)
+            end
             if ex isa IOPoll.NetClosingError || _is_closed(conn)
-                throw(_closed_error("handshake", ex))
+                handshake_error = _closed_error("handshake", ex)
+                conn.handshake_error = handshake_error
+                throw(handshake_error)
             end
             if ex isa _TLSAlertError
                 tls13_err = ex::_TLSAlertError
@@ -1564,7 +1583,9 @@ function handshake!(conn::Conn)
                 elseif _is_tls_auto_policy(conn.policy) && !tls13_err.from_peer
                     _native_auto_try_write_fatal_alert!(conn, tls13_err.alert)
                 end
-                throw(TLSError("handshake", Int32(0), tls13_err.message, tls13_err))
+                handshake_error = TLSError("handshake", Int32(0), tls13_err.message, tls13_err)
+                conn.handshake_error = handshake_error
+                throw(handshake_error)
             end
             if ex isa ArgumentError
                 if _is_tls13_policy(conn.policy)
@@ -1574,9 +1595,13 @@ function handshake!(conn::Conn)
                 elseif _is_tls_auto_policy(conn.policy)
                     _native_auto_try_write_fatal_alert!(conn, _TLS_ALERT_INTERNAL_ERROR)
                 end
-                throw(TLSError("handshake", Int32(0), (ex::ArgumentError).msg::String, ex))
+                handshake_error = TLSError("handshake", Int32(0), (ex::ArgumentError).msg::String, ex)
+                conn.handshake_error = handshake_error
+                throw(handshake_error)
             end
-            throw(TLSError("handshake", Int32(0), "unexpected TLS failure", ex))
+            handshake_error = TLSError("handshake", Int32(0), "unexpected TLS failure", ex)
+            conn.handshake_error = handshake_error
+            throw(handshake_error)
         end
     finally
         unlock(conn.handshake_lock)

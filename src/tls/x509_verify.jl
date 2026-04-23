@@ -68,11 +68,11 @@ end
 end
 
 @inline function _tls_cert_subject_matches_issuer(child::_TLSCertificateInfo, parent::_TLSCertificateInfo)::Bool
+    child.issuer_raw == parent.subject_raw || return false
     if !isempty(child.authority_key_id) && !isempty(parent.subject_key_id)
-        child.authority_key_id == parent.subject_key_id && return true
-        return false
+        return child.authority_key_id == parent.subject_key_id
     end
-    return child.issuer_raw == parent.subject_raw
+    return true
 end
 
 # Trust-store loading stays in native Julia too, including the trim-safe file

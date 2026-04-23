@@ -338,8 +338,12 @@ function _tls13_process_inner_plaintext!(state::_TLS13NativeClientState, inner::
         return payload_len != 0
     end
     if content_type == _TLS_RECORD_TYPE_APPLICATION_DATA
-        payload_len == 0 || append!(state.plaintext_buffer, @view(inner[1:payload_len]))
-        return payload_len != 0
+        if payload_len == 0
+            _tls_note_useless_record!(state, "tls: too many ignored TLS records")
+            return false
+        end
+        append!(state.plaintext_buffer, @view(inner[1:payload_len]))
+        return true
     end
     if content_type == _TLS_RECORD_TYPE_ALERT
         _tls13_process_alert!(state, @view(inner[1:payload_len]))

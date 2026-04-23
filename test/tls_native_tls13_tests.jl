@@ -302,6 +302,28 @@ end
         end
     end
 
+    @testset "empty TLS 1.3 application records are bounded" begin
+        state = TLN._TLS13NativeClientState()
+        try
+            for _ in 1:TLN._TLS_MAX_USELESS_RECORDS
+                @test !TLN._tls13_process_inner_plaintext!(state, UInt8[TLN._TLS_RECORD_TYPE_APPLICATION_DATA])
+            end
+            err = try
+                TLN._tls13_process_inner_plaintext!(state, UInt8[TLN._TLS_RECORD_TYPE_APPLICATION_DATA])
+                nothing
+            catch ex
+                ex
+            end
+            @test err isa TLN._TLSAlertError
+            if err isa TLN._TLSAlertError
+                @test err.alert == TLN._TLS_ALERT_UNEXPECTED_MESSAGE
+                @test occursin("too many ignored TLS records", err.message)
+            end
+        finally
+            TLN._securezero_tls13_native_client_state!(state)
+        end
+    end
+
     @testset "record layer rejects oversized plaintext and exhausted write sequence numbers" begin
         IPN.shutdown!()
         listener = nothing
@@ -335,6 +357,57 @@ end
             _tls_native_close_quiet!(client_tcp)
             _tls_native_close_quiet!(listener)
             IPN.shutdown!()
+        end
+    end
+
+    @testset "server aborts resumption when a valid ticket has an invalid binder" begin
+        config = _tls13_native_server_config()
+        state = TLN._TLS13ServerHandshakeState(config)
+        keys = TLN._tls_active_session_ticket_keys(config)
+        plaintext = UInt8[]
+        label = UInt8[]
+        try
+            now_s = UInt64(floor(time()))
+            session = TLN._TLS13ServerSession(
+                TLN.TLS1_3_VERSION,
+                TLN._TLS13_AES_128_GCM_SHA256_ID,
+                now_s,
+                now_s + UInt64(60),
+                UInt32(0),
+                UInt8[],
+                fill(UInt8(0x42), 32),
+                Vector{Vector{UInt8}}(),
+                "",
+            )
+            plaintext = TLN._serialize_tls13_server_session(session)
+            label = TLN._tls_encrypt_server_session_ticket(keys[1], plaintext)
+            hello = TLN._ClientHelloMsg()
+            hello.psk_modes = UInt8[TLN._TLS_PSK_MODE_DHE]
+            hello.psk_identities = [TLN._TLSPSKIdentity(copy(label), UInt32(0))]
+            hello.psk_binders = [fill(UInt8(0xa5), TLN._hash_len(TLN._HASH_SHA256))]
+            state.client_hello = hello
+            state.cipher_suite = TLN._TLS13_AES_128_GCM_SHA256_ID
+            state.cipher_spec = TLN._TLS13_AES_128_GCM_SHA256
+            state.selected_alpn = ""
+            state.transcript = TLN._new_tls13_handshake_transcript(TLN._HASH_SHA256)
+
+            err = try
+                TLN._check_for_resumption!(state, config)
+                nothing
+            catch ex
+                ex
+            end
+            @test err isa TLN._TLSAlertError
+            if err isa TLN._TLSAlertError
+                @test err.alert == TLN._TLS_ALERT_DECRYPT_ERROR
+                @test occursin("invalid PSK binder", err.message)
+            end
+            @test !state.using_psk
+        finally
+            TLN._securezero_tls13_server_handshake_state!(state)
+            TLN._securezero_tls_session_ticket_keys!(keys)
+            TLN._securezero!(plaintext)
+            TLN._securezero!(label)
         end
     end
 
@@ -967,6 +1040,44 @@ end
                 handshake_timeout_ns = 10_000_000_000,
             )
         finally
+            server_task isa Task && _finish_tls13_native_server!(server_task)
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+    end
+
+    @testset "handshake failures are sticky" begin
+        IPN.shutdown!()
+        listener = nothing
+        client = nothing
+        server_task = nothing
+        try
+            listener, addr, server_task, _ = _start_tls13_native_server(_tls13_native_server_config())
+            tcp = NCN.connect(addr)
+            client = TLN.client(tcp, _tls13_native_client_config(
+                server_name = "example.com",
+                verify_peer = true,
+                ca_file = _TLS_NATIVE_CERT_PATH,
+            ))
+            first_err = try
+                TLN.handshake!(client)
+                nothing
+            catch ex
+                ex
+            end
+            second_err = try
+                TLN.handshake!(client)
+                nothing
+            catch ex
+                ex
+            end
+            @test first_err isa TLN.TLSError
+            @test second_err === first_err
+            if first_err isa TLN.TLSError
+                @test occursin("certificate is not valid for host example.com", first_err.message)
+            end
+        finally
+            _tls_native_close_quiet!(client)
             server_task isa Task && _finish_tls13_native_server!(server_task)
             _tls_native_close_quiet!(listener)
             IPN.shutdown!()
