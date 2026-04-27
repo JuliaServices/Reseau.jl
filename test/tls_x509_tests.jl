@@ -343,6 +343,19 @@ end
         end
     end
 
+    @testset "native trust store skips unsupported root entries" begin
+        mktempdir() do dir
+            write(joinpath(dir, "bad.pem"), """
+-----BEGIN CERTIFICATE-----
+////
+-----END CERTIFICATE-----
+""")
+            write(joinpath(dir, "root.pem"), _read_bytes(_TLS_CA_PATH))
+            store = TLX._tls_load_trust_store(dir)
+            @test !isempty(store.roots)
+        end
+    end
+
     @testset "local identity cache replacement keeps owner references valid" begin
         mktempdir() do dir
             cert_path = joinpath(dir, "identity.crt")

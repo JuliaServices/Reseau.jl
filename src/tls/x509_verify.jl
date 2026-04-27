@@ -166,7 +166,12 @@ function _tls_load_trust_store(ca_path::AbstractString)::_TLSTrustStore
             end
         end
         duplicate && continue
-        push!(roots, _tls_parse_der_certificate_info(cert_der))
+        try
+            push!(roots, _tls_parse_der_certificate_info(cert_der))
+        catch err
+            err isa ArgumentError || rethrow()
+            continue
+        end
     end
     isempty(roots) && throw(ArgumentError("tls: CA roots path does not contain any certificates"))
     store = _TLSTrustStore(roots)
