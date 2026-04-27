@@ -23,7 +23,7 @@ Pkg.add("Reseau")
 
 ## Main Entry Points
 
-The supported 1.0-facing entry points are the exported `TCP` and `TLS` modules:
+The supported public entry points are the exported `TCP` and `TLS` modules:
 
 - `TCP` for TCP connections, listeners, deadlines, and string-address dialing
 - `TLS` for TLS clients and listeners
@@ -182,7 +182,7 @@ config = TLS.Config(
 `TCP` and `TLS` are the intended public surfaces. Reseau also contains internal
 support layers such as `Reseau.SocketOps`, `Reseau.IOPoll`, and
 `Reseau.HostResolvers` that power the transport stack but are not the primary
-1.0 API entrypoints.
+API entrypoints.
 
 ## Documentation
 

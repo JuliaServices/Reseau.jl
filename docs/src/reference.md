@@ -131,7 +131,7 @@ addr
 ## Internal Support Layers
 
 These modules power the public transport surface and are documented here for
-completeness, but they are not the primary 1.0 entrypoints.
+completeness, but they are not the primary public entrypoints.
 
 ```@meta
 CurrentModule = Main

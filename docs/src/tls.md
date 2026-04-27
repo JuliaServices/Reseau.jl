@@ -5,8 +5,9 @@ Description = "TLS clients, listeners, configuration, and handshake behavior in 
 
 # [TLS](@id tls-manual)
 
-`TLS` wraps `TCP` connections and listeners with OpenSSL-backed TLS state while
-keeping deadlines and socket lifecycle aligned with the underlying transport.
+`TLS` wraps `TCP` connections and listeners with native TLS 1.2/1.3 state while
+using OpenSSL only for low-level cryptographic primitives. Deadlines and socket
+lifecycle stay aligned with the underlying transport.
 Concrete-address dialing and listening use the same `connect` and `listen`
 entrypoints as the string-address surface. String-address client dialing uses the resolver/policy layer as
 [`Reseau.TCP.connect`](@ref Reseau.TCP.connect); see [Name Resolution](@ref name-resolution-manual)
@@ -69,8 +70,8 @@ Important behaviors to keep in mind:
 
 ## I/O, Lifecycle, Deadlines, and Inspection
 
-TLS connections still behave like Julia streams, but now read and write operate
-on plaintext application data while OpenSSL handles record framing underneath:
+TLS connections still behave like Julia streams, but read and write operate on
+plaintext application data while Reseau handles TLS record framing underneath:
 
 ```@docs; canonical=false
 Base.read!(::Conn, ::Vector{UInt8})
