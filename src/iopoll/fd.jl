@@ -63,7 +63,7 @@ Close and deadline state are consulted before and after parking so callers can
 distinguish "ready" from "woken because the descriptor was closed or timed
 out".
 """
-function _check_error(pd::PollState, mode::PollMode.T)::Int32
+function _check_error(pd::PollState, mode::PollMode.T, refresh_event_err::Bool = true)::Int32
     (@atomic :acquire pd.closing) && return _POLL_ERR_CLOSING
     if _mode_has_read(mode)
         (@atomic :acquire pd.rd_ns) < 0 && return _POLL_ERR_TIMEOUT
@@ -72,7 +72,7 @@ function _check_error(pd::PollState, mode::PollMode.T)::Int32
         (@atomic :acquire pd.wd_ns) < 0 && return _POLL_ERR_TIMEOUT
     end
     if _mode_has_read(mode)
-        _refresh_event_err!(pd)
+        refresh_event_err && _refresh_event_err!(pd)
         (@atomic :acquire pd.event_err) && return _POLL_ERR_NOT_POLLABLE
     end
     return _POLL_NO_ERROR
@@ -323,13 +323,16 @@ end
 """
 Validate read path state before issuing a read syscall.
 
+Set `refresh_event_err=false` on hot nonblocking read loops that will either
+observe OS read errors directly or refresh backend event state before parking.
+
 Returns `nothing`.
 
 Throws the same exceptions as `_convert_poll_error!` if close, timeout, or
-backend error state is already visible.
+cached backend error state is already visible.
 """
-function prepareread(pd::PollState, is_file::Bool = false)
-    _convert_poll_error!(_check_error(pd, PollMode.READ), is_file)
+function prepareread(pd::PollState, is_file::Bool = false, refresh_event_err::Bool = true)
+    _convert_poll_error!(_check_error(pd, PollMode.READ, refresh_event_err), is_file)
     return nothing
 end
 
@@ -663,7 +666,10 @@ function _read_ptr_some!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
     _fd_read_lock!(fd)
     try
         nbytes == 0 && return 0
-        prepareread(fd.pd, fd.is_file)
+        # Avoid taking the global poller lock before every successful read.
+        # If the read would block, `waitread` refreshes backend event state
+        # before parking.
+        prepareread(fd.pd, fd.is_file, false)
         while true
             n = SocketOps.read_once!(fd.sysfd, p, Csize_t(nbytes))
             if n >= 0

@@ -1,0 +1,202 @@
+using Test
+using Reseau
+
+const TL12H = Reseau.TLS
+const _TLS12_CERT_PATH = joinpath(@__DIR__, "resources", "unittests.crt")
+const _TLS12_KEY_PATH = joinpath(@__DIR__, "resources", "unittests.key")
+const _TLS12_CERT_PEM = read(_TLS12_CERT_PATH)
+const _TLS12_KEY_PEM = read(_TLS12_KEY_PATH)
+const _TLS12_SERVER_P256_PRIVATE_KEY = UInt8[
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x09,
+]
+const _TLS12_SERVER_X25519_PRIVATE_KEY = UInt8[
+    0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+    0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+    0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+    0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+]
+const _TLS12_TEST_ED25519_PRIVATE_KEY = UInt8[
+    0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48,
+    0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50,
+    0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58,
+    0x59, 0x5a, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66,
+]
+
+function _tls12_generate_test_ed25519_pkey()::Ptr{Cvoid}
+    key_bytes = copy(_TLS12_TEST_ED25519_PRIVATE_KEY)
+    pkey = GC.@preserve key_bytes ccall(
+        (:EVP_PKEY_new_raw_private_key, TL12H._LIBCRYPTO_PATH),
+        Ptr{Cvoid},
+        (Cint, Ptr{Cvoid}, Ptr{UInt8}, Csize_t),
+        TL12H._init_ed25519_pkey_id!(),
+        C_NULL,
+        pointer(key_bytes),
+        Csize_t(length(key_bytes)),
+    )
+    return TL12H._openssl_require_nonnull(pkey, "EVP_PKEY_new_raw_private_key(Ed25519)")
+end
+
+function _tls12_make_server_key_exchange(client_random::Vector{UInt8}, server_random::Vector{UInt8})
+    pkey = TL12H._tls13_p256_private_key_from_bytes(_TLS12_SERVER_P256_PRIVATE_KEY)
+    try
+        public_key = TL12H._tls13_p256_public_key(pkey)
+        params = UInt8[0x03, UInt8(TL12H.P256 >> 8), UInt8(TL12H.P256 & 0xff), UInt8(length(public_key))]
+        append!(params, public_key)
+        signed = vcat(client_random, server_random, params)
+        signature = TL12H._tls12_openssl_sign_from_pem(TL12H._TLS_SIGNATURE_RSA_PKCS1_SHA256, signed, _TLS12_KEY_PEM)
+        key = copy(params)
+        append!(key, UInt8[UInt8(TL12H._TLS_SIGNATURE_RSA_PKCS1_SHA256 >> 8), UInt8(TL12H._TLS_SIGNATURE_RSA_PKCS1_SHA256 & 0xff)])
+        append!(key, UInt8[UInt8(length(signature) >> 8), UInt8(length(signature) & 0xff)])
+        append!(key, signature)
+        return TL12H._ServerKeyExchangeMsgTLS12(key), public_key, signature
+    finally
+        TL12H._free_evp_pkey!(pkey)
+    end
+end
+
+@testset "TLS 1.2 native client handshake helpers" begin
+    @testset "client hello offers exact TLS 1.2 ECDHE suites" begin
+        hello = TL12H._tls12_client_hello(TL12H.Config(
+            server_name = "localhost",
+            verify_peer = false,
+            min_version = TL12H.TLS1_2_VERSION,
+            max_version = TL12H.TLS1_2_VERSION,
+            alpn_protocols = ["h2"],
+        ))
+        @test hello.vers == TL12H.TLS1_2_VERSION
+        @test hello.cipher_suites == UInt16[
+            TL12H._TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256_ID,
+            TL12H._TLS12_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384_ID,
+            TL12H._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID,
+            TL12H._TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384_ID,
+        ]
+        @test hello.supported_curves == UInt16[TL12H.P256]
+        @test hello.supported_points == UInt8[0x00]
+        @test hello.extended_master_secret
+        @test !hello.ocsp_stapling
+        @test !hello.scts
+        @test hello.secure_renegotiation_supported
+        @test hello.alpn_protocols == ["h2"]
+        @test TL12H._TLS_SIGNATURE_ED25519 in hello.supported_signature_algorithms
+        @test TL12H._TLS_SIGNATURE_ED25519 in hello.supported_signature_algorithms_cert
+
+        reordered = TL12H._tls12_client_hello(TL12H.Config(
+            server_name = "localhost",
+            verify_peer = false,
+            min_version = TL12H.TLS1_2_VERSION,
+            max_version = TL12H.TLS1_2_VERSION,
+            curve_preferences = UInt16[TL12H.X25519, TL12H.P256],
+        ))
+        @test reordered.supported_curves == UInt16[TL12H.X25519, TL12H.P256]
+    end
+
+    @testset "server key exchange parsing and verification follow TLS 1.2 ECDHE-RSA semantics" begin
+        state = TL12H._TLS12ClientHandshakeState(TL12H._ClientHelloMsg())
+        state.client_hello.random = collect(UInt8(0x10):UInt8(0x2f))
+        state.server_hello.random = collect(UInt8(0x80):UInt8(0x9f))
+        msg, public_key, signature = _tls12_make_server_key_exchange(state.client_hello.random, state.server_hello.random)
+        parsed = TL12H._tls12_parse_server_key_exchange(msg)
+        @test parsed.group == TL12H.P256
+        @test parsed.public_key == public_key
+        @test parsed.signature_algorithm == TL12H._TLS_SIGNATURE_RSA_PKCS1_SHA256
+        @test parsed.signature == signature
+
+        pubkey = TL12H._tls_parse_der_certificate_info(TL12H._tls13_openssl_certificate_der(_TLS12_CERT_PEM)).public_key
+        verified = TL12H._tls12_verify_server_key_exchange!(state, pubkey, msg)
+        @test verified.group == TL12H.P256
+        @test verified.public_key == public_key
+    end
+
+    @testset "client key exchange generation returns an encoded EC point" begin
+        pkey = TL12H._tls13_p256_private_key_from_bytes(_TLS12_SERVER_P256_PRIVATE_KEY)
+        try
+            public_key = TL12H._tls13_p256_public_key(pkey)
+            result = TL12H._tls12_generate_client_key_exchange(UInt16[TL12H.P256], TL12H.P256, public_key)
+            @test result.message isa TL12H._ClientKeyExchangeMsgTLS12
+            @test !isempty(result.shared_secret)
+            @test Int(result.message.ciphertext[1]) == length(result.message.ciphertext) - 1
+            @test result.message.ciphertext[2] == 0x04
+        finally
+            TL12H._free_evp_pkey!(pkey)
+        end
+    end
+
+    @testset "client key exchange generation supports X25519 for TLS 1.2" begin
+        pkey = TL12H._tls13_x25519_private_key_from_bytes(_TLS12_SERVER_X25519_PRIVATE_KEY)
+        try
+            public_key = TL12H._tls13_x25519_public_key(pkey)
+            result = TL12H._tls12_generate_client_key_exchange(UInt16[TL12H.X25519], TL12H.X25519, public_key)
+            @test result.message isa TL12H._ClientKeyExchangeMsgTLS12
+            @test !isempty(result.shared_secret)
+            @test length(result.message.ciphertext) == 33
+            @test Int(result.message.ciphertext[1]) == length(result.message.ciphertext) - 1
+        finally
+            TL12H._free_evp_pkey!(pkey)
+        end
+    end
+
+    @testset "TLS 1.2 ECDSA signature selection follows the peer list, not the cert curve" begin
+        ecdsa_key_pem = read(joinpath(@__DIR__, "resources", "native_tls_server_ecdsa.key"))
+        pkey = TL12H._tls13_load_private_key_pem(ecdsa_key_pem)
+        try
+            offered = UInt16[
+                TL12H._TLS_SIGNATURE_ECDSA_SECP384R1_SHA384,
+                TL12H._TLS_SIGNATURE_ECDSA_SECP256R1_SHA256,
+            ]
+            @test TL12H._tls12_select_signature_algorithm(pkey, offered) == TL12H._TLS_SIGNATURE_ECDSA_SECP384R1_SHA384
+        finally
+            TL12H._free_evp_pkey!(pkey)
+        end
+    end
+
+    @testset "client key exchange rejects unadvertised TLS 1.2 curves" begin
+        pkey = TL12H._tls13_x25519_private_key_from_bytes(_TLS12_SERVER_X25519_PRIVATE_KEY)
+        try
+            public_key = TL12H._tls13_x25519_public_key(pkey)
+            err = try
+                TL12H._tls12_generate_client_key_exchange(UInt16[TL12H.P256], TL12H.X25519, public_key)
+                nothing
+            catch ex
+                ex
+            end
+            @test err isa TL12H._TLSAlertError
+            if err isa TL12H._TLSAlertError
+                @test (err::TL12H._TLSAlertError).alert == TL12H._TLS_ALERT_ILLEGAL_PARAMETER
+            end
+        finally
+            TL12H._free_evp_pkey!(pkey)
+        end
+    end
+
+    @testset "TLS 1.2 treats Ed25519 certificates like ECDSA signing certificates" begin
+        pkey = _tls12_generate_test_ed25519_pkey()
+        try
+            @test TL12H._tls12_select_signature_algorithm(pkey, UInt16[TL12H._TLS_SIGNATURE_ED25519]) == TL12H._TLS_SIGNATURE_ED25519
+            @test TL12H._tls12_certificate_type_for_pkey(pkey) == TL12H._TLS12_CERT_TYPE_ECDSA_SIGN
+        finally
+            TL12H._free_evp_pkey!(pkey)
+        end
+
+        @test TL12H._tls12_server_certificate_matches_suite!(
+            TL12H._TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256_ID,
+            TL12H._TLSEd25519PublicKey(fill(UInt8(0x22), 32)),
+        ) === nothing
+
+        err = try
+            TL12H._tls12_server_certificate_matches_suite!(
+                TL12H._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID,
+                TL12H._TLSEd25519PublicKey(fill(UInt8(0x22), 32)),
+            )
+            nothing
+        catch ex
+            ex
+        end
+        @test err isa TL12H._TLSAlertError
+        if err isa TL12H._TLSAlertError
+            @test err.alert == TL12H._TLS_ALERT_HANDSHAKE_FAILURE
+        end
+    end
+end

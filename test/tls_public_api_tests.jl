@@ -1,240 +1,9 @@
 using Test
-using NetworkOptions
 using Reseau
 
-const TL = Reseau.TLS
-const NC = Reseau.TCP
-const ND = Reseau.HostResolvers
-const IP = Reseau.IOPoll
+isdefined(@__MODULE__, :_RESEAU_TLS_TEST_UTILS_LOADED) || include("tls_test_utils.jl")
 
-const _TLS_CERT_PATH = joinpath(@__DIR__, "resources", "unittests.crt")
-const _TLS_KEY_PATH = joinpath(@__DIR__, "resources", "unittests.key")
-
-function _tls_wait_task_done(task::Task, timeout_s::Float64 = 2.0)
-    return IP.timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
-end
-
-function _tls_close_quiet!(x)
-    x === nothing && return nothing
-    try
-        if x isa TL.Conn || x isa TL.Listener
-            close(x)
-        elseif x isa NC.Conn || x isa NC.Listener
-            close(x)
-        end
-    catch
-    end
-    return nothing
-end
-
-function _tls_trace(label::AbstractString)
-    println("[tls_tests] ", label)
-    flush(stdout)
-    return nothing
-end
-
-@inline function _tls_handshake_connect_error(ex)
-    return ex isa TL.TLSError || ex isa TL.TLSHandshakeTimeoutError
-end
-
-function _tls_server_config(; handshake_timeout_ns::Int64 = 0)
-    return TL.Config(
-        verify_peer = false,
-        cert_file = _TLS_CERT_PATH,
-        key_file = _TLS_KEY_PATH,
-        handshake_timeout_ns = handshake_timeout_ns,
-    )
-end
-
-function _tls_connect(
-        network::AbstractString,
-        address::AbstractString,
-        config::TL.Config = TL.Config();
-        timeout_ns::Integer = Int64(0),
-        deadline_ns::Integer = Int64(0),
-        local_addr::Union{Nothing, NC.SocketEndpoint} = nothing,
-        fallback_delay_ns::Integer = Int64(300_000_000),
-        resolver::ND.AbstractResolver = ND.DEFAULT_RESOLVER,
-        policy::ND.ResolverPolicy = ND.ResolverPolicy(),
-    )::TL.Conn
-    return TL.connect(
-        network,
-        address;
-        timeout_ns = timeout_ns,
-        deadline_ns = deadline_ns,
-        local_addr = local_addr,
-        fallback_delay_ns = fallback_delay_ns,
-        resolver = resolver,
-        policy = policy,
-        server_name = config.server_name,
-        verify_peer = config.verify_peer,
-        client_auth = config.client_auth,
-        cert_file = config.cert_file,
-        key_file = config.key_file,
-        ca_file = config.ca_file,
-        client_ca_file = config.client_ca_file,
-        alpn_protocols = copy(config.alpn_protocols),
-        handshake_timeout_ns = config.handshake_timeout_ns,
-        min_version = config.min_version,
-        max_version = config.max_version,
-    )
-end
-
-@testset "TLS phase 6" begin
-        @test TL.Conn <: IO
-        @test TL.DeadlineExceededError === NC.DeadlineExceededError
-        @test TL.DeadlineExceededError === IP.DeadlineExceededError
-        _tls_trace("START: config validation")
-        @testset "config validation" begin
-            cfg_default = TL.Config()
-            @test cfg_default.min_version == TL.TLS1_2_VERSION
-            @test cfg_default.client_auth == TL.ClientAuthMode.NoClientCert
-            default_ca = TL._default_ca_file_path()
-            expected_default_ca = try
-                path = NetworkOptions.ca_roots_path()
-                if path === nothing
-                    nothing
-                else
-                    path_s = String(path)
-                    isempty(path_s) || !ispath(path_s) ? nothing : path_s
-                end
-            catch
-                nothing
-            end
-            if expected_default_ca !== nothing
-                @test default_ca == expected_default_ca
-                @test ispath(default_ca::String)
-            else
-                @test default_ca === nothing
-            end
-            @test TL._effective_ca_file(cfg_default; is_server = false) == default_ca
-            explicit_ca_cfg = TL.Config(server_name = "localhost", ca_file = _TLS_CERT_PATH)
-            @test TL._effective_ca_file(explicit_ca_cfg; is_server = false) == _TLS_CERT_PATH
-            @test TL._effective_ca_file(TL.Config(verify_peer = false, client_auth = TL.ClientAuthMode.RequestClientCert); is_server = true) === nothing
-            verified_client_auth_cfg = TL.Config(
-                verify_peer = false,
-                client_auth = TL.ClientAuthMode.VerifyClientCertIfGiven,
-                client_ca_file = _TLS_CERT_PATH,
-            )
-            @test TL._effective_ca_file(verified_client_auth_cfg; is_server = true) == _TLS_CERT_PATH
-            @test_throws TL.ConfigError TL.Config(cert_file = _TLS_CERT_PATH)
-            @test_throws TL.ConfigError TL.Config(key_file = _TLS_KEY_PATH)
-            @test_throws TL.ConfigError TL.Config(handshake_timeout_ns = -1)
-            @test_throws TL.ConfigError TL._validate_config(TL.Config(min_version = TL.TLS1_3_VERSION, max_version = TL.TLS1_2_VERSION); is_server = false)
-            @test_throws TL.ConfigError TL._validate_config(TL.Config(verify_peer = false, ca_file = joinpath(@__DIR__, "missing-ca.pem")); is_server = false)
-            @test_throws TL.ConfigError TL._validate_config(TL.Config(verify_peer = false, client_ca_file = joinpath(@__DIR__, "missing-client-ca.pem")); is_server = true)
-            @test_throws TL.ConfigError TL._validate_config(TL.Config(
-                cert_file = _TLS_CERT_PATH,
-                key_file = _TLS_KEY_PATH,
-                verify_peer = false,
-                client_auth = TL.ClientAuthMode.VerifyClientCertIfGiven,
-            ); is_server = true)
-            @test_throws TL.ConfigError TL.listen("tcp", "127.0.0.1:0", TL.Config(verify_peer = false))
-            IP.shutdown!()
-            listener = nothing
-            client_tcp = nothing
-            server_tcp = nothing
-            try
-                listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 4)
-                laddr = NC.addr(listener)::NC.SocketAddrV4
-                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
-                client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
-                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
-                server_tcp = fetch(accept_task)
-                @test_throws TL.ConfigError TL.client(client_tcp, TL.Config(verify_peer = true))
-                _tls_close_quiet!(client_tcp)
-                client_tcp = nothing
-                _tls_close_quiet!(server_tcp)
-                server_tcp = nothing
-            finally
-                _tls_close_quiet!(server_tcp)
-                _tls_close_quiet!(client_tcp)
-                _tls_close_quiet!(listener)
-                IP.shutdown!()
-            end
-        end
-        @testset "version helpers and connect config inference" begin
-            method = ccall((:TLS_method, TL._LIBSSL_PATH), Ptr{Cvoid}, ())
-            function _ctx_new_for_test()
-                ctx = ccall((:SSL_CTX_new, TL._LIBSSL_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), method)
-                ctx == C_NULL && error("expected SSL_CTX")
-                return ctx
-            end
-            function _ctx_version_for_test(ctx::Ptr{Cvoid}, ctrl::Cint)
-                return UInt16(ccall(
-                    (:SSL_CTX_ctrl, TL._LIBSSL_PATH),
-                    Clong,
-                    (Ptr{Cvoid}, Cint, Clong, Ptr{Cvoid}),
-                    ctx,
-                    ctrl,
-                    Clong(0),
-                    C_NULL,
-                ))
-            end
-            ctx = _ctx_new_for_test()
-            try
-                TL._set_ctx_min_version!(ctx, TL.TLS1_1_VERSION)
-                @test _ctx_version_for_test(ctx, TL._SSL_CTRL_GET_MIN_PROTO_VERSION) == TL.TLS1_1_VERSION
-            finally
-                ccall((:SSL_CTX_free, TL._LIBSSL_PATH), Cvoid, (Ptr{Cvoid},), ctx)
-            end
-
-            ctx = _ctx_new_for_test()
-            try
-                TL._set_ctx_min_version!(ctx, TL.TLS1_3_VERSION)
-                @test _ctx_version_for_test(ctx, TL._SSL_CTRL_GET_MIN_PROTO_VERSION) == TL.TLS1_3_VERSION
-            finally
-                ccall((:SSL_CTX_free, TL._LIBSSL_PATH), Cvoid, (Ptr{Cvoid},), ctx)
-            end
-
-            ctx = _ctx_new_for_test()
-            try
-                TL._set_ctx_max_version!(ctx, TL.TLS1_2_VERSION)
-                @test _ctx_version_for_test(ctx, TL._SSL_CTRL_GET_MAX_PROTO_VERSION) == TL.TLS1_2_VERSION
-            finally
-                ccall((:SSL_CTX_free, TL._LIBSSL_PATH), Cvoid, (Ptr{Cvoid},), ctx)
-            end
-
-            ctx = _ctx_new_for_test()
-            try
-                TL._set_ctx_max_version!(ctx, TL.TLS1_1_VERSION)
-                @test _ctx_version_for_test(ctx, TL._SSL_CTRL_GET_MAX_PROTO_VERSION) == TL.TLS1_1_VERSION
-            finally
-                ccall((:SSL_CTX_free, TL._LIBSSL_PATH), Cvoid, (Ptr{Cvoid},), ctx)
-            end
-
-            ctx = _ctx_new_for_test()
-            try
-                TL._set_ctx_max_version!(ctx, TL.TLS1_0_VERSION)
-                @test _ctx_version_for_test(ctx, TL._SSL_CTRL_GET_MAX_PROTO_VERSION) == TL.TLS1_0_VERSION
-            finally
-                ccall((:SSL_CTX_free, TL._LIBSSL_PATH), Cvoid, (Ptr{Cvoid},), ctx)
-            end
-
-            ctx = _ctx_new_for_test()
-            try
-                @test_throws TL.TLSError TL._set_ctx_min_version!(ctx, UInt16(0x9999))
-            finally
-                ccall((:SSL_CTX_free, TL._LIBSSL_PATH), Cvoid, (Ptr{Cvoid},), ctx)
-            end
-
-            payload = UInt8[0x61, 0x62, 0x63]
-            copied = TL._write_buffer(@view(payload[1:2:3]), 2)
-            @test copied == UInt8[0x61, 0x63]
-            @test copied isa Vector{UInt8}
-
-            inferred = TL._prepare_connect_config(TL.Config(verify_peer = false), "Example.com.:443")
-            @test inferred.server_name == "Example.com"
-            inferred_ip = TL._prepare_connect_config(TL.Config(verify_peer = false), "[::1]:443")
-            @test inferred_ip.server_name == "::1"
-            inferred_addr = TL._prepare_connect_config(TL.Config(verify_peer = false), NC.loopback_addr(443))
-            @test inferred_addr.server_name == "127.0.0.1"
-            explicit = TL.Config(server_name = "manual.example", verify_peer = false)
-            @test TL._prepare_connect_config(explicit, "example.com:443") === explicit
-            @test TL._prepare_connect_config(explicit, NC.loopback_addr(443)) === explicit
-            unchanged = TL._prepare_connect_config(TL.Config(verify_peer = false), "bad-address")
-            @test unchanged.server_name === nothing
-        end
+@testset "TLS public API" begin
         @testset "direct socket-address connect/listen passthroughs" begin
             IP.shutdown!()
             listener = nothing
@@ -271,17 +40,7 @@ end
                 IP.shutdown!()
             end
         end
-        @testset "server client-auth mode mapping and runtime path" begin
-            @test TL._server_verify_mode(TL.Config(client_auth = TL.ClientAuthMode.NoClientCert)) == TL._SSL_VERIFY_NONE
-            @test TL._server_verify_mode(TL.Config(client_auth = TL.ClientAuthMode.RequestClientCert)) == TL._SSL_VERIFY_PEER
-            @test TL._server_verify_mode(TL.Config(client_auth = TL.ClientAuthMode.VerifyClientCertIfGiven)) == TL._SSL_VERIFY_PEER
-            @test TL._server_verify_mode(TL.Config(client_auth = TL.ClientAuthMode.RequireAnyClientCert)) == (TL._SSL_VERIFY_PEER | TL._SSL_VERIFY_FAIL_IF_NO_PEER_CERT)
-            @test TL._server_verify_mode(TL.Config(client_auth = TL.ClientAuthMode.RequireAndVerifyClientCert)) == (TL._SSL_VERIFY_PEER | TL._SSL_VERIFY_FAIL_IF_NO_PEER_CERT)
-            @test TL._server_verify_callback(TL.Config(client_auth = TL.ClientAuthMode.NoClientCert)) == C_NULL
-            @test TL._server_verify_callback(TL.Config(client_auth = TL.ClientAuthMode.VerifyClientCertIfGiven)) == C_NULL
-            @test TL._server_verify_callback(TL.Config(client_auth = TL.ClientAuthMode.RequireAndVerifyClientCert)) == C_NULL
-            @test TL._server_verify_callback(TL.Config(client_auth = TL.ClientAuthMode.RequestClientCert)) != C_NULL
-            @test TL._server_verify_callback(TL.Config(client_auth = TL.ClientAuthMode.RequireAnyClientCert)) != C_NULL
+        @testset "server client-auth runtime path" begin
             IP.shutdown!()
             listener = nothing
             accept_task = nothing
@@ -361,43 +120,6 @@ end
                 IP.shutdown!()
             end
         end
-        @testset "client certificate config loads native certificate into SSL handle" begin
-            IP.shutdown!()
-            listener = nothing
-            client_tcp = nothing
-            server_tcp = nothing
-            client_tls = nothing
-            try
-                listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
-                laddr = NC.addr(listener)::NC.SocketAddrV4
-                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
-                client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
-                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
-                server_tcp = fetch(accept_task)
-                client_tls = TL.client(client_tcp, TL.Config(
-                    verify_peer = false,
-                    server_name = "localhost",
-                    cert_file = _TLS_CERT_PATH,
-                    key_file = _TLS_KEY_PATH,
-                ))
-                cert_ptr = ccall((:SSL_get_certificate, TL._LIBSSL_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), client_tls.ssl)
-                @test cert_ptr != C_NULL
-            finally
-                _tls_close_quiet!(client_tls)
-                _tls_close_quiet!(server_tcp)
-                _tls_close_quiet!(client_tcp)
-                _tls_close_quiet!(listener)
-                IP.shutdown!()
-            end
-        end
-        @testset "SNI/hostname normalization parity" begin
-            @test TL._normalize_peer_name("example.com.") == "example.com"
-            @test TL._normalize_peer_name("[::1]") == "::1"
-            @test TL._normalize_peer_name("fe80::1%lo0") == "fe80::1"
-            @test TL._hostname_in_sni("example.com.") == "example.com"
-            @test TL._hostname_in_sni("127.0.0.1") == ""
-            @test TL._hostname_in_sni("[::1]") == ""
-        end
         @testset "ALPN negotiates on server and client paths" begin
             IP.shutdown!()
             listener = nothing
@@ -434,8 +156,87 @@ end
                 IP.shutdown!()
             end
         end
-        _tls_trace("DONE: config validation")
-        _tls_trace("START: show methods summarize TLS endpoints and handshake state")
+        @testset "ALPN h2 servers still accept http/1.1 clients without ALPN overlap" begin
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            try
+                server_cfg = TL.Config(
+                    verify_peer = false,
+                    cert_file = _TLS_CERT_PATH,
+                    key_file = _TLS_KEY_PATH,
+                    alpn_protocols = ["h2"],
+                )
+                listener = TL.listen("tcp", "127.0.0.1:0", server_cfg; backlog = 8)
+                laddr = TL.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn begin
+                    conn = TL.accept(listener)
+                    TL.handshake!(conn)
+                    return conn
+                end)
+                client_cfg = TL.Config(
+                    verify_peer = false,
+                    server_name = "localhost",
+                    alpn_protocols = ["http/1.1"],
+                )
+                client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                server = fetch(accept_task)
+                @test TL.connection_state(client).alpn_protocol == ""
+                @test TL.connection_state(server).alpn_protocol == ""
+            finally
+                _tls_close_quiet!(server)
+                _tls_close_quiet!(client)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
+        @testset "ALPN no-overlap fails the handshake" begin
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            try
+                server_cfg = TL.Config(
+                    verify_peer = false,
+                    cert_file = _TLS_CERT_PATH,
+                    key_file = _TLS_KEY_PATH,
+                    alpn_protocols = ["h2"],
+                )
+                listener = TL.listen("tcp", "127.0.0.1:0", server_cfg; backlog = 8)
+                laddr = TL.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn begin
+                    try
+                        conn = TL.accept(listener)
+                        TL.handshake!(conn)
+                    catch ex
+                        ex
+                    end
+                end)
+                client_cfg = TL.Config(
+                    verify_peer = false,
+                    server_name = "localhost",
+                    alpn_protocols = ["spdy/3"],
+                )
+                err = try
+                    _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                    nothing
+                catch ex
+                    ex
+                end
+                @test err isa TL.TLSError
+                if err isa TL.TLSError
+                    @test occursin("alert 120", err.message)
+                end
+                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                server_err = fetch(accept_task)
+                @test server_err isa TL.TLSError
+            finally
+                _tls_close_quiet!(client)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
         @testset "show methods summarize TLS endpoints and handshake state" begin
             IP.shutdown!()
             tls_listener = nothing
@@ -540,66 +341,6 @@ end
                 IP.shutdown!()
             end
         end
-        @testset "SSL_CTX is reused for equivalent client configs" begin
-            IP.shutdown!()
-            listener = nothing
-            accept_task = nothing
-            client1 = nothing
-            client2 = nothing
-            server_conns = TL.Conn[]
-            try
-                listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(); backlog = 16)
-                laddr = TL.addr(listener)::NC.SocketAddrV4
-                accept_task = errormonitor(Threads.@spawn begin
-                    local conns = TL.Conn[]
-                    for _ in 1:2
-                        conn = TL.accept(listener)
-                        TL.handshake!(conn)
-                        push!(conns, conn)
-                    end
-                    return conns
-                end)
-                client_cfg = TL.Config(verify_peer = false, server_name = "localhost")
-                client1 = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
-                client2 = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
-                @test client1.ssl_ctx != C_NULL
-                @test client1.ssl_ctx == client2.ssl_ctx
-                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
-                server_conns = fetch(accept_task)
-            finally
-                for conn in server_conns
-                    _tls_close_quiet!(conn)
-                end
-                _tls_close_quiet!(client1)
-                _tls_close_quiet!(client2)
-                _tls_close_quiet!(listener)
-                IP.shutdown!()
-            end
-        end
-        @testset "SSL_CTX cache respects max bound with eviction" begin
-            old_max = TL._CTX_CACHE_MAX[]
-            TL._CTX_CACHE_MAX[] = 2
-            TL._free_ssl_ctx_cache!()
-            try
-                cfg1 = TL.Config(verify_peer = false, alpn_protocols = ["proto-1"])
-                cfg2 = TL.Config(verify_peer = false, alpn_protocols = ["proto-2"])
-                cfg3 = TL.Config(verify_peer = false, alpn_protocols = ["proto-3"])
-                key1 = TL._ssl_context_key(cfg1; is_server = false)
-                ctx1 = TL._shared_ssl_ctx(cfg1; is_server = false)
-                ctx2 = TL._shared_ssl_ctx(cfg2; is_server = false)
-                ctx3 = TL._shared_ssl_ctx(cfg3; is_server = false)
-                @test ctx1 != C_NULL
-                @test ctx2 != C_NULL
-                @test ctx3 != C_NULL
-                @test length(TL._CTX_CACHE) <= 2
-                @test !haskey(TL._CTX_CACHE, key1)
-            finally
-                TL._free_ssl_ctx_cache!()
-                TL._CTX_CACHE_MAX[] = old_max
-            end
-        end
-        _tls_trace("DONE: show methods summarize TLS endpoints and handshake state")
-        _tls_trace("START: connect/listen handshake and roundtrip")
         @testset "connect/listen handshake and roundtrip" begin
             IP.shutdown!()
             listener = nothing
@@ -646,7 +387,12 @@ end
                 server = server_result::TL.Conn
                 state = TL.connection_state(client)
                 @test state.handshake_complete
-                @test !isempty(state.version)
+                @test state.version == "TLSv1.3"
+                @test state.using_native_tls13
+                server_state = TL.connection_state(server)
+                @test server_state.handshake_complete
+                @test server_state.version == "TLSv1.3"
+                @test server_state.using_native_tls13
             finally
                 _tls_close_quiet!(server)
                 _tls_close_quiet!(client)
@@ -654,8 +400,413 @@ end
                 IP.shutdown!()
             end
         end
-        _tls_trace("DONE: connect/listen handshake and roundtrip")
-        _tls_trace("START: write accepts string codeunits buffers")
+        @testset "mixed-version native client negotiates TLS 1.2 with an exact TLS 1.2 server" begin
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            try
+                listener = TL.listen("tcp", "127.0.0.1:0", TL.Config(
+                    verify_peer = false,
+                    cert_file = _TLS_CERT_PATH,
+                    key_file = _TLS_KEY_PATH,
+                    handshake_timeout_ns = 10_000_000_000,
+                    min_version = TL.TLS1_2_VERSION,
+                    max_version = TL.TLS1_2_VERSION,
+                ); backlog = 16)
+                laddr = TL.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn begin
+                    try
+                        conn = TL.accept(listener)
+                        TL.handshake!(conn)
+                        write(conn, UInt8[0x31])
+                        return conn
+                    catch err
+                        return err
+                    end
+                end)
+                client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
+                    verify_peer = false,
+                    server_name = "localhost",
+                    handshake_timeout_ns = 10_000_000_000,
+                ))
+                @test read(client, 1) == UInt8[0x31]
+                @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                server_result = fetch(accept_task)
+                server_result isa Exception && throw(server_result)
+                server = server_result::TL.Conn
+                client_state = TL.connection_state(client)
+                server_state = TL.connection_state(server)
+                @test client_state.handshake_complete
+                @test server_state.handshake_complete
+                @test client_state.version == "TLSv1.2"
+                @test server_state.version == "TLSv1.2"
+                @test !client_state.using_native_tls13
+                @test !server_state.using_native_tls13
+                @test client_state.curve == "P-256"
+                @test server_state.curve == "P-256"
+            finally
+                _tls_close_quiet!(server)
+                _tls_close_quiet!(client)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
+        @testset "mixed-version native server negotiates TLS 1.2 with an exact TLS 1.2 client" begin
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            try
+                listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(handshake_timeout_ns = 10_000_000_000); backlog = 16)
+                laddr = TL.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn begin
+                    try
+                        conn = TL.accept(listener)
+                        TL.handshake!(conn)
+                        write(conn, UInt8[0x41])
+                        return conn
+                    catch err
+                        return err
+                    end
+                end)
+                client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
+                    verify_peer = false,
+                    server_name = "localhost",
+                    handshake_timeout_ns = 10_000_000_000,
+                    max_version = TL.TLS1_2_VERSION,
+                ))
+                @test read(client, 1) == UInt8[0x41]
+                @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                server_result = fetch(accept_task)
+                server_result isa Exception && throw(server_result)
+                server = server_result::TL.Conn
+                client_state = TL.connection_state(client)
+                server_state = TL.connection_state(server)
+                @test client_state.handshake_complete
+                @test server_state.handshake_complete
+                @test client_state.version == "TLSv1.2"
+                @test server_state.version == "TLSv1.2"
+                @test !client_state.using_native_tls13
+                @test !server_state.using_native_tls13
+                @test client_state.curve == "P-256"
+                @test server_state.curve == "P-256"
+            finally
+                _tls_close_quiet!(server)
+                _tls_close_quiet!(client)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
+        @testset "mixed-version native TLS can negotiate TLS 1.2 with X25519 when configured" begin
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            try
+                listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(
+                    handshake_timeout_ns = 10_000_000_000,
+                    curve_preferences = UInt16[TL.X25519],
+                ); backlog = 16)
+                laddr = TL.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn begin
+                    try
+                        conn = TL.accept(listener)
+                        TL.handshake!(conn)
+                        write(conn, UInt8[0x58])
+                        return conn
+                    catch err
+                        return err
+                    end
+                end)
+                client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
+                    verify_peer = false,
+                    server_name = "localhost",
+                    handshake_timeout_ns = 10_000_000_000,
+                    max_version = TL.TLS1_2_VERSION,
+                    curve_preferences = UInt16[TL.X25519],
+                ))
+                @test read(client, 1) == UInt8[0x58]
+                @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                server_result = fetch(accept_task)
+                server_result isa Exception && throw(server_result)
+                server = server_result::TL.Conn
+                client_state = TL.connection_state(client)
+                server_state = TL.connection_state(server)
+                @test client_state.version == "TLSv1.2"
+                @test server_state.version == "TLSv1.2"
+                @test !client_state.using_native_tls13
+                @test !server_state.using_native_tls13
+                @test client_state.curve == "X25519"
+                @test server_state.curve == "X25519"
+            finally
+                _tls_close_quiet!(server)
+                _tls_close_quiet!(client)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
+        @testset "mixed-version native client supports TLS 1.2 mTLS and resumption against an exact TLS 1.2 server" begin
+            function run_once(server_cfg::TL.Config, client_cfg::TL.Config)
+                listener = nothing
+                client = nothing
+                accept_task = nothing
+                try
+                    listener = TL.listen("tcp", "127.0.0.1:0", server_cfg; backlog = 16)
+                    laddr = TL.addr(listener)::NC.SocketAddrV4
+                    accept_task = errormonitor(Threads.@spawn begin
+                        conn = TL.accept(listener)
+                        try
+                            TL.handshake!(conn)
+                            write(conn, UInt8[0x51])
+                            read(conn, 1) == UInt8[0x61] || error("unexpected TLS client ack")
+                            return TL.connection_state(conn)
+                        finally
+                            _tls_close_quiet!(conn)
+                        end
+                    end)
+                    client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                    read(client, 1) == UInt8[0x51] || error("unexpected TLS server byte")
+                    write(client, UInt8[0x61]) == 1 || error("unexpected TLS client ack write")
+                    @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                    return TL.connection_state(client), fetch(accept_task)::TL.ConnectionState
+                finally
+                    _tls_close_quiet!(client)
+                    _tls_close_quiet!(listener)
+                    IP.shutdown!()
+                end
+            end
+
+            server_cfg = _tls_server_config(
+                handshake_timeout_ns = 10_000_000_000,
+                cert_file = _TLS_NATIVE_SERVER_CERT_PATH,
+                key_file = _TLS_NATIVE_SERVER_KEY_PATH,
+                client_auth = TL.ClientAuthMode.RequireAndVerifyClientCert,
+                client_ca_file = _TLS_NATIVE_CA_PATH,
+                min_version = TL.TLS1_2_VERSION,
+                max_version = TL.TLS1_2_VERSION,
+            )
+            client_cfg = TL.Config(
+                verify_peer = true,
+                verify_hostname = true,
+                server_name = "localhost",
+                ca_file = _TLS_NATIVE_CA_PATH,
+                cert_file = _TLS_NATIVE_CLIENT_CERT_PATH,
+                key_file = _TLS_NATIVE_CLIENT_KEY_PATH,
+                handshake_timeout_ns = 10_000_000_000,
+            )
+
+            client_state1, server_state1 = run_once(server_cfg, client_cfg)
+            @test client_state1.version == "TLSv1.2"
+            @test server_state1.version == "TLSv1.2"
+            @test !client_state1.using_native_tls13
+            @test !server_state1.using_native_tls13
+            @test client_state1.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+            @test server_state1.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+            @test !client_state1.did_resume
+            @test !server_state1.did_resume
+            @test client_state1.has_resumable_session
+            @test client_state1.curve == "P-256"
+            @test server_state1.curve == "P-256"
+
+            client_state2, server_state2 = run_once(server_cfg, client_cfg)
+            @test client_state2.version == "TLSv1.2"
+            @test server_state2.version == "TLSv1.2"
+            @test !client_state2.using_native_tls13
+            @test !server_state2.using_native_tls13
+            @test client_state2.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+            @test server_state2.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+            @test client_state2.did_resume
+            @test server_state2.did_resume
+            @test client_state2.has_resumable_session
+            @test client_state2.curve == "P-256"
+            @test server_state2.curve == "P-256"
+        end
+        @testset "mixed-version native server supports TLS 1.2 mTLS and resumption against an exact TLS 1.2 client" begin
+            function run_once(server_cfg::TL.Config, client_cfg::TL.Config)
+                listener = nothing
+                client = nothing
+                accept_task = nothing
+                try
+                    listener = TL.listen("tcp", "127.0.0.1:0", server_cfg; backlog = 16)
+                    laddr = TL.addr(listener)::NC.SocketAddrV4
+                    accept_task = errormonitor(Threads.@spawn begin
+                        conn = TL.accept(listener)
+                        try
+                            TL.handshake!(conn)
+                            write(conn, UInt8[0x52])
+                            read(conn, 1) == UInt8[0x62] || error("unexpected TLS client ack")
+                            return TL.connection_state(conn)
+                        finally
+                            _tls_close_quiet!(conn)
+                        end
+                    end)
+                    client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                    read(client, 1) == UInt8[0x52] || error("unexpected TLS server byte")
+                    write(client, UInt8[0x62]) == 1 || error("unexpected TLS client ack write")
+                    @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                    return TL.connection_state(client), fetch(accept_task)::TL.ConnectionState
+                finally
+                    _tls_close_quiet!(client)
+                    _tls_close_quiet!(listener)
+                    IP.shutdown!()
+                end
+            end
+
+            server_cfg = _tls_server_config(
+                handshake_timeout_ns = 10_000_000_000,
+                cert_file = _TLS_NATIVE_SERVER_CERT_PATH,
+                key_file = _TLS_NATIVE_SERVER_KEY_PATH,
+                client_auth = TL.ClientAuthMode.RequireAndVerifyClientCert,
+                client_ca_file = _TLS_NATIVE_CA_PATH,
+            )
+            client_cfg = TL.Config(
+                verify_peer = true,
+                verify_hostname = true,
+                server_name = "localhost",
+                ca_file = _TLS_NATIVE_CA_PATH,
+                cert_file = _TLS_NATIVE_CLIENT_CERT_PATH,
+                key_file = _TLS_NATIVE_CLIENT_KEY_PATH,
+                handshake_timeout_ns = 10_000_000_000,
+                min_version = TL.TLS1_2_VERSION,
+                max_version = TL.TLS1_2_VERSION,
+            )
+
+            client_state1, server_state1 = run_once(server_cfg, client_cfg)
+            @test client_state1.version == "TLSv1.2"
+            @test server_state1.version == "TLSv1.2"
+            @test !client_state1.using_native_tls13
+            @test !server_state1.using_native_tls13
+            @test client_state1.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+            @test server_state1.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+            @test !client_state1.did_resume
+            @test !server_state1.did_resume
+            @test client_state1.has_resumable_session
+            @test client_state1.curve == "P-256"
+            @test server_state1.curve == "P-256"
+
+            client_state2, server_state2 = run_once(server_cfg, client_cfg)
+            @test client_state2.version == "TLSv1.2"
+            @test server_state2.version == "TLSv1.2"
+            @test !client_state2.using_native_tls13
+            @test !server_state2.using_native_tls13
+            @test client_state2.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+            @test server_state2.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+            @test client_state2.did_resume
+            @test server_state2.did_resume
+            @test client_state2.has_resumable_session
+            @test client_state2.curve == "P-256"
+            @test server_state2.curve == "P-256"
+        end
+        @testset "mixed-version native client still offers TLS 1.2 resumption when a TLS 1.3 session is cached" begin
+            function run_once(server_cfg::TL.Config, client_cfg::TL.Config)::TL.ConnectionState
+                listener = nothing
+                client = nothing
+                accept_task = nothing
+                try
+                    listener = TL.listen("tcp", "127.0.0.1:0", server_cfg; backlog = 16)
+                    laddr = TL.addr(listener)::NC.SocketAddrV4
+                    accept_task = errormonitor(Threads.@spawn begin
+                        conn = TL.accept(listener)
+                        try
+                            TL.handshake!(conn)
+                            write(conn, UInt8[0x53])
+                            read(conn, 1) == UInt8[0x63] || error("unexpected TLS client ack")
+                            return nothing
+                        finally
+                            _tls_close_quiet!(conn)
+                        end
+                    end)
+                    client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                    read(client, 1) == UInt8[0x53] || error("unexpected TLS server byte")
+                    write(client, UInt8[0x63]) == 1 || error("unexpected TLS client ack write")
+                    @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                    fetch(accept_task)
+                    return TL.connection_state(client)
+                finally
+                    _tls_close_quiet!(client)
+                    _tls_close_quiet!(listener)
+                    IP.shutdown!()
+                end
+            end
+
+            client_cfg = TL.Config(
+                verify_peer = false,
+                server_name = "localhost",
+                handshake_timeout_ns = 10_000_000_000,
+            )
+            mixed_server_cfg = _tls_server_config(handshake_timeout_ns = 10_000_000_000)
+            exact_tls12_server_cfg = _tls_server_config(
+                handshake_timeout_ns = 10_000_000_000,
+                min_version = TL.TLS1_2_VERSION,
+                max_version = TL.TLS1_2_VERSION,
+            )
+
+            tls13_state = run_once(mixed_server_cfg, client_cfg)
+            @test tls13_state.version == "TLSv1.3"
+            @test tls13_state.using_native_tls13
+            @test tls13_state.has_resumable_session
+
+            tls12_state1 = run_once(exact_tls12_server_cfg, client_cfg)
+            @test tls12_state1.version == "TLSv1.2"
+            @test !tls12_state1.using_native_tls13
+            @test !tls12_state1.did_resume
+            @test tls12_state1.has_resumable_session
+
+            tls12_state2 = run_once(exact_tls12_server_cfg, client_cfg)
+            @test tls12_state2.version == "TLSv1.2"
+            @test !tls12_state2.using_native_tls13
+            @test tls12_state2.did_resume
+            @test tls12_state2.has_resumable_session
+        end
+        @testset "effective TLS 1.2 client routing stays native with client certs" begin
+            IP.shutdown!()
+            listener = nothing
+            client_tls = nothing
+            server_tls = nothing
+            try
+                listener = TL.listen("tcp", "127.0.0.1:0", TL.Config(
+                    verify_peer = true,
+                    verify_hostname = false,
+                    cert_file = _TLS_NATIVE_SERVER_CERT_PATH,
+                    key_file = _TLS_NATIVE_SERVER_KEY_PATH,
+                    client_auth = TL.ClientAuthMode.RequireAndVerifyClientCert,
+                    client_ca_file = _TLS_NATIVE_CA_PATH,
+                    min_version = TL.TLS1_2_VERSION,
+                    max_version = TL.TLS1_2_VERSION,
+                ); backlog = 8)
+                laddr = TL.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn begin
+                    conn = TL.accept(listener)
+                    TL.handshake!(conn)
+                    return conn
+                end)
+                client_tls = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
+                    verify_peer = true,
+                    verify_hostname = true,
+                    server_name = "localhost",
+                    ca_file = _TLS_NATIVE_CA_PATH,
+                    cert_file = _TLS_NATIVE_CLIENT_CERT_PATH,
+                    key_file = _TLS_NATIVE_CLIENT_KEY_PATH,
+                    min_version = nothing,
+                    max_version = TL.TLS1_2_VERSION,
+                ))
+                @test client_tls.policy == TL._TLS_POLICY_TLS12
+                @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                server_tls = fetch(accept_task)
+                client_state = TL.connection_state(client_tls)
+                server_state = TL.connection_state(server_tls)
+                @test client_state.version == "TLSv1.2"
+                @test server_state.version == "TLSv1.2"
+                @test !client_state.using_native_tls13
+                @test !server_state.using_native_tls13
+            finally
+                _tls_close_quiet!(server_tls)
+                _tls_close_quiet!(client_tls)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
         @testset "write accepts string codeunits buffers" begin
             IP.shutdown!()
             listener = nothing
@@ -692,8 +843,6 @@ end
                 IP.shutdown!()
             end
         end
-        _tls_trace("DONE: write accepts string codeunits buffers")
-        _tls_trace("START: peer read observes clean EOF after close_notify")
         @testset "peer read observes clean EOF after close_notify" begin
             IP.shutdown!()
             listener = nothing
@@ -844,6 +993,83 @@ end
                 IP.shutdown!()
             end
         end
+        @testset "hostname verification can be enabled without chain verification" begin
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            try
+                listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(); backlog = 16)
+                laddr = TL.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn begin
+                    try
+                        conn = TL.accept(listener)
+                        TL.handshake!(conn)
+                        return conn
+                    catch err
+                        return err
+                    end
+                end)
+                client_cfg = TL.Config(
+                    verify_peer = false,
+                    verify_hostname = true,
+                    server_name = "localhost",
+                    handshake_timeout_ns = 10_000_000_000,
+                    max_version = TL.TLS1_2_VERSION,
+                )
+                client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                server_result = fetch(accept_task)
+                server_result isa Exception && throw(server_result)
+                server = server_result::TL.Conn
+                @test TL.connection_state(client).handshake_complete
+                @test !TL.connection_state(client).using_native_tls13
+            finally
+                _tls_close_quiet!(server)
+                _tls_close_quiet!(client)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
+        @testset "hostname verification failure surfaces TLSError without CA verification" begin
+            IP.shutdown!()
+            listener = nothing
+            accept_task = nothing
+            try
+                listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(); backlog = 16)
+                laddr = TL.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn begin
+                    conn = TL.accept(listener)
+                    try
+                        TL.handshake!(conn)
+                    catch
+                    end
+                    _tls_close_quiet!(conn)
+                    return nothing
+                end)
+                client_cfg = TL.Config(
+                    verify_peer = false,
+                    verify_hostname = true,
+                    server_name = "example.com",
+                    handshake_timeout_ns = 10_000_000_000,
+                    max_version = TL.TLS1_2_VERSION,
+                )
+                connect_err = try
+                    _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                    nothing
+                catch ex
+                    ex
+                end
+                @test connect_err isa TL.TLSError
+                if connect_err isa TL.TLSError
+                    @test occursin("certificate is not valid for host", connect_err.message)
+                end
+                accept_task !== nothing && _tls_wait_task_done(accept_task, 2.0)
+            finally
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
         @testset "peer verification failure surfaces TLSError" begin
             IP.shutdown!()
             listener = nothing
@@ -881,11 +1107,12 @@ end
                 IP.shutdown!()
             end
         end
-        @testset "ip literal verification path does not require explicit server_name" begin
+        @testset "ip literal verification path infers server_name and succeeds" begin
             IP.shutdown!()
             listener = nothing
             accept_task = nothing
             client = nothing
+            server = nothing
             try
                 listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(); backlog = 16)
                 laddr = TL.addr(listener)::NC.SocketAddrV4
@@ -893,29 +1120,28 @@ end
                     conn = TL.accept(listener)
                     try
                         TL.handshake!(conn)
+                        return conn
                     catch
+                        _tls_close_quiet!(conn)
+                        rethrow()
                     end
-                    _tls_close_quiet!(conn)
-                    return nothing
                 end)
                 client_cfg = TL.Config(
                     verify_peer = true,
                     ca_file = _TLS_CERT_PATH,
                     handshake_timeout_ns = 10_000_000_000,
                 )
-                connect_err = nothing
-                try
-                    client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
-                catch ex
-                    connect_err = ex
-                end
-                if connect_err !== nothing
-                    @test connect_err isa TL.TLSError || connect_err isa TL.TLSHandshakeTimeoutError
-                else
-                    @test client isa TL.Conn
-                end
-                accept_task !== nothing && _tls_wait_task_done(accept_task, 12.0)
+                client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                server = fetch(accept_task)
+                client_state = TL.connection_state(client)
+                server_state = TL.connection_state(server)
+                @test client_state.handshake_complete
+                @test server_state.handshake_complete
+                @test client_state.version == "TLSv1.3"
+                @test server_state.version == "TLSv1.3"
             finally
+                _tls_close_quiet!(server)
                 _tls_close_quiet!(client)
                 _tls_close_quiet!(listener)
                 IP.shutdown!()
@@ -926,15 +1152,21 @@ end
             listener = nothing
             client_tcp = nothing
             stalled_peer = nothing
+            accepted = Channel{Nothing}(1)
+            release_peer = Channel{Nothing}(1)
             try
                 listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn begin
                     conn = NC.accept(listener)
-                    IP.sleep(1.0)
+                    put!(accepted, nothing)
+                    take!(release_peer)
                     return conn
                 end)
                 client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
+                accepted_status = IP.timedwait(() -> isready(accepted), 2.0; pollint = 0.001)
+                @test accepted_status != :timed_out
+                accepted_status == :timed_out || take!(accepted)
                 client_tls = TL.client(client_tcp, TL.Config(
                     verify_peer = false,
                     server_name = "localhost",
@@ -954,9 +1186,11 @@ end
                 @test post_write_ns == pre_write_ns
                 _tls_close_quiet!(client_tls)
                 client_tcp = nothing
+                isready(release_peer) || put!(release_peer, nothing)
                 @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
                 stalled_peer = fetch(accept_task)
             finally
+                isready(release_peer) || put!(release_peer, nothing)
                 _tls_close_quiet!(stalled_peer)
                 _tls_close_quiet!(client_tcp)
                 _tls_close_quiet!(listener)
@@ -969,15 +1203,21 @@ end
             client_tcp = nothing
             stalled_peer = nothing
             client_tls = nothing
+            accepted = Channel{Nothing}(1)
+            release_peer = Channel{Nothing}(1)
             try
                 listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn begin
                     conn = NC.accept(listener)
-                    IP.sleep(1.0)
+                    put!(accepted, nothing)
+                    take!(release_peer)
                     return conn
                 end)
                 client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
+                accepted_status = IP.timedwait(() -> isready(accepted), 2.0; pollint = 0.001)
+                @test accepted_status != :timed_out
+                accepted_status == :timed_out || take!(accepted)
                 client_tls = TL.client(client_tcp, TL.Config(
                     verify_peer = false,
                     server_name = "localhost",
@@ -996,9 +1236,11 @@ end
                 if err isa TL.TLSError
                     @test err.message == "i/o timeout"
                 end
+                isready(release_peer) || put!(release_peer, nothing)
                 @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
                 stalled_peer = fetch(accept_task)
             finally
+                isready(release_peer) || put!(release_peer, nothing)
                 _tls_close_quiet!(client_tls)
                 _tls_close_quiet!(stalled_peer)
                 _tls_close_quiet!(client_tcp)
@@ -1009,15 +1251,20 @@ end
         @testset "host resolver timeout budget includes TLS handshake time" begin
             IP.shutdown!()
             listener = nothing
-            stalled_peer = nothing
+            accepted = Channel{Nothing}(1)
+            release_peer = Channel{Nothing}(1)
             try
                 listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn begin
                     conn = NC.accept(listener)
-                    IP.sleep(1.2)
-                    close(conn)
-                    return nothing
+                    try
+                        put!(accepted, nothing)
+                        take!(release_peer)
+                        return nothing
+                    finally
+                        close(conn)
+                    end
                 end)
                 host_resolver = ND.HostResolver(timeout_ns = 250_000_000)
                 cfg = TL.Config(
@@ -1025,32 +1272,42 @@ end
                     server_name = "localhost",
                     handshake_timeout_ns = 0,
                 )
-                started_ns = time_ns()
-                err = try
-                    _tls_connect(
-                        "tcp",
-                        "127.0.0.1:$(Int(laddr.port))",
-                        cfg;
-                        timeout_ns = host_resolver.timeout_ns,
-                        deadline_ns = host_resolver.deadline_ns,
-                        local_addr = host_resolver.local_addr,
-                        fallback_delay_ns = host_resolver.fallback_delay_ns,
-                        resolver = host_resolver.resolver,
-                        policy = host_resolver.policy,
-                    )
-                    nothing
-                catch ex
-                    ex
+                connect_task = errormonitor(Threads.@spawn begin
+                    try
+                        _tls_connect(
+                            "tcp",
+                            "127.0.0.1:$(Int(laddr.port))",
+                            cfg;
+                            timeout_ns = host_resolver.timeout_ns,
+                            deadline_ns = host_resolver.deadline_ns,
+                            local_addr = host_resolver.local_addr,
+                            fallback_delay_ns = host_resolver.fallback_delay_ns,
+                            resolver = host_resolver.resolver,
+                            policy = host_resolver.policy,
+                        )
+                        nothing
+                    catch ex
+                        ex
+                    end
+                end)
+                accepted_status = IP.timedwait(() -> isready(accepted), 2.0; pollint = 0.001)
+                @test accepted_status != :timed_out
+                accepted_status == :timed_out || take!(accepted)
+                connect_status = _tls_wait_task_done(connect_task, 2.0)
+                @test connect_status != :timed_out
+                err = connect_status == :timed_out ? nothing : fetch(connect_task)
+                @test !istaskdone(accept_task)
+                isready(release_peer) || put!(release_peer, nothing)
+                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                if istaskdone(accept_task)
+                    fetch(accept_task)
                 end
-                elapsed_ms = (time_ns() - started_ns) / 1.0e6
                 @test err isa TL.TLSError
                 if err isa TL.TLSError
                     @test err.message == "i/o timeout"
                 end
-                @test elapsed_ms < 700.0
-                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
             finally
-                _tls_close_quiet!(stalled_peer)
+                isready(release_peer) || put!(release_peer, nothing)
                 _tls_close_quiet!(listener)
                 IP.shutdown!()
             end
@@ -1148,20 +1405,29 @@ end
             IP.shutdown!()
             listener = nothing
             client = nothing
+            hold_ready = Channel{Nothing}(1)
+            release_hold = Channel{Nothing}(1)
             try
                 listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(); backlog = 8)
                 laddr = TL.addr(listener)::NC.SocketAddrV4
                 hold_task = errormonitor(@async begin
                     conn = TL.accept(listener)
-                    TL.handshake!(conn)
-                    IP.sleep(1.5)
-                    close(conn)
-                    return nothing
+                    try
+                        TL.handshake!(conn)
+                        put!(hold_ready, nothing)
+                        take!(release_hold)
+                        return nothing
+                    finally
+                        close(conn)
+                    end
                 end)
                 client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
                     verify_peer = false,
                     server_name = "localhost",
                 ))
+                hold_status = IP.timedwait(() -> isready(hold_ready), 2.0; pollint = 0.001)
+                @test hold_status != :timed_out
+                hold_status == :timed_out || take!(hold_ready)
                 TL.set_write_deadline!(client, time_ns() + 5_000_000)
                 payload = fill(UInt8(0x5a), 64 * 1024 * 1024)
                 first_err = try
@@ -1185,9 +1451,11 @@ end
                 if first_err isa TL.TLSError && second_err isa TL.TLSError
                     @test second_err === first_err
                 end
+                isready(release_hold) || put!(release_hold, nothing)
                 @test _tls_wait_task_done(hold_task, 2.0) != :timed_out
                 fetch(hold_task)
             finally
+                isready(release_hold) || put!(release_hold, nothing)
                 _tls_close_quiet!(client)
                 _tls_close_quiet!(listener)
                 IP.shutdown!()
