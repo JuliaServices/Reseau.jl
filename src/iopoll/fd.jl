@@ -63,7 +63,7 @@ Close and deadline state are consulted before and after parking so callers can
 distinguish "ready" from "woken because the descriptor was closed or timed
 out".
 """
-function _check_error(pd::PollState, mode::PollMode.T; refresh_event_err::Bool = true)::Int32
+function _check_error(pd::PollState, mode::PollMode.T, refresh_event_err::Bool = true)::Int32
     (@atomic :acquire pd.closing) && return _POLL_ERR_CLOSING
     if _mode_has_read(mode)
         (@atomic :acquire pd.rd_ns) < 0 && return _POLL_ERR_TIMEOUT
@@ -331,8 +331,8 @@ Returns `nothing`.
 Throws the same exceptions as `_convert_poll_error!` if close, timeout, or
 cached backend error state is already visible.
 """
-function prepareread(pd::PollState, is_file::Bool = false; refresh_event_err::Bool = true)
-    _convert_poll_error!(_check_error(pd, PollMode.READ; refresh_event_err), is_file)
+function prepareread(pd::PollState, is_file::Bool = false, refresh_event_err::Bool = true)
+    _convert_poll_error!(_check_error(pd, PollMode.READ, refresh_event_err), is_file)
     return nothing
 end
 
@@ -669,7 +669,7 @@ function _read_ptr_some!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
         # Avoid taking the global poller lock before every successful read.
         # If the read would block, `waitread` refreshes backend event state
         # before parking.
-        prepareread(fd.pd, fd.is_file; refresh_event_err = false)
+        prepareread(fd.pd, fd.is_file, false)
         while true
             n = SocketOps.read_once!(fd.sysfd, p, Csize_t(nbytes))
             if n >= 0
