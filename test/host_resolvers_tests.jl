@@ -11,6 +11,12 @@ struct _SlowResolver <: ND.AbstractResolver
     addrs::Vector{NC.SocketEndpoint}
 end
 
+struct _BlockingResolver <: ND.AbstractResolver
+    started::Channel{Nothing}
+    release::Channel{Nothing}
+    addrs::Vector{NC.SocketEndpoint}
+end
+
 function ND.resolve_tcp_addrs(
         resolver::_SlowResolver,
         network::AbstractString,
@@ -23,6 +29,22 @@ function ND.resolve_tcp_addrs(
     _ = op
     _ = policy
     sleep(resolver.delay_s)
+    return copy(resolver.addrs)
+end
+
+function ND.resolve_tcp_addrs(
+        resolver::_BlockingResolver,
+        network::AbstractString,
+        address::AbstractString;
+        op::Symbol = :connect,
+        policy::ND.ResolverPolicy = ND.ResolverPolicy(),
+    )::ND.ResolvedConnectAddrs
+    _ = network
+    _ = address
+    _ = op
+    _ = policy
+    put!(resolver.started, nothing)
+    take!(resolver.release)
     return copy(resolver.addrs)
 end
 
@@ -125,6 +147,12 @@ end
 
 function _nd_wait_task_done(task::Task, timeout_s::Float64 = 2.0)
     return timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
+end
+
+function _nd_wait_channel_ready(ch::Channel{Nothing}, timeout_s::Float64 = 2.0)
+    status = timedwait(() -> isready(ch), timeout_s; pollint = 0.001)
+    status == :timed_out || take!(ch)
+    return status
 end
 
 function _nd_spawn_synchronized(ready::Channel{Nothing}, start::Channel{Nothing}, f::F) where {F}
@@ -589,20 +617,30 @@ end
             end
         end
         @testset "error typing and wrapping (phase 5C)" begin
-            slow_resolver = _SlowResolver(2.5, NC.SocketEndpoint[NC.loopback_addr(1)])
-            started_ns = time_ns()
-            timeout_err = try
-                NC.connect("tcp", "slow.local:80"; timeout_ns = 20_000_000, resolver = slow_resolver)
-                nothing
-            catch ex
-                ex
+            resolver_started = Channel{Nothing}(1)
+            resolver_release = Channel{Nothing}(1)
+            blocking_resolver = _BlockingResolver(resolver_started, resolver_release, NC.SocketEndpoint[NC.loopback_addr(1)])
+            connect_task = Threads.@spawn begin
+                try
+                    NC.connect("tcp", "slow.local:80"; timeout_ns = 50_000_000, resolver = blocking_resolver)
+                    nothing
+                catch ex
+                    ex
+                end
             end
-            elapsed_ms = (time_ns() - started_ns) / 1.0e6
+            timeout_err = nothing
+            try
+                @test _nd_wait_channel_ready(resolver_started, 2.0) != :timed_out
+                @test _nd_wait_task_done(connect_task, 5.0) != :timed_out
+                timeout_err = istaskdone(connect_task) ? fetch(connect_task) : nothing
+            finally
+                put!(resolver_release, nothing)
+                _nd_wait_task_done(connect_task, 2.0)
+            end
             @test timeout_err isa ND.OpError
             if timeout_err isa ND.OpError
                 @test timeout_err.err isa ND.DialTimeoutError
             end
-            @test elapsed_ms < 1_500.0
             empty_net_err = try
                 ND.resolve_tcp_addrs("", "127.0.0.1:1")
                 nothing
