@@ -77,6 +77,7 @@ end
         @test hello.supported_points == UInt8[0x00]
         @test hello.extended_master_secret
         @test !hello.ocsp_stapling
+        @test !hello.scts
         @test hello.secure_renegotiation_supported
         @test hello.alpn_protocols == ["h2"]
         @test TL12H._TLS_SIGNATURE_ED25519 in hello.supported_signature_algorithms

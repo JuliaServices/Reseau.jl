@@ -116,6 +116,10 @@ end
         )
         @test !TL._tls13_client_hello(disabled_ticket_cfg).ticket_supported
         @test !TL._tls_auto_client_hello(disabled_ticket_cfg).ticket_supported
+        @test TL._tls13_client_hello(disabled_ticket_cfg).ocsp_stapling
+        @test TL._tls13_client_hello(disabled_ticket_cfg).scts
+        @test !TL._tls_auto_client_hello(disabled_ticket_cfg).ocsp_stapling
+        @test !TL._tls_auto_client_hello(disabled_ticket_cfg).scts
         @test_throws TL.ConfigError TL.Config(cert_file = _TLS_CERT_PATH)
         @test_throws TL.ConfigError TL.Config(key_file = _TLS_KEY_PATH)
         @test_throws TL.ConfigError TL.Config(handshake_timeout_ns = -1)

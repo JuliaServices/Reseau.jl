@@ -868,6 +868,11 @@ end
 
 function _tls_auto_client_hello(config::Config)::_ClientHelloMsg
     hello = _tls13_client_hello(config)
+    # The mixed-version ClientHello may negotiate TLS 1.2. Keep TLS 1.2
+    # CertificateStatus-triggering extensions disabled here until the native
+    # TLS 1.2 client flight can consume those optional messages.
+    hello.ocsp_stapling = false
+    hello.scts = false
     hello.supported_versions = UInt16[TLS1_3_VERSION, TLS1_2_VERSION]
     hello.cipher_suites = UInt16[
         _TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256_ID,

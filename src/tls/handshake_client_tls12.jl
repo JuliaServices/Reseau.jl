@@ -240,7 +240,10 @@ function _tls12_client_hello(config)::_ClientHelloMsg
     hello.supported_signature_algorithms_cert = copy(_TLS12_SUPPORTED_SIGNATURE_ALGORITHMS)
     hello.secure_renegotiation_supported = true
     hello.extended_master_secret = true
-    hello.scts = true
+    # TLS 1.2 SCT delivery can add a CertificateStatus handshake message between
+    # Certificate and ServerKeyExchange. Do not advertise it until that flight is
+    # supported by the native TLS 1.2 client state machine.
+    hello.scts = false
     return hello
 end
 
