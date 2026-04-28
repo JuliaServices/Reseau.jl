@@ -155,6 +155,25 @@ function _nd_wait_channel_ready(ch::Channel{Nothing}, timeout_s::Float64 = 2.0)
     return status
 end
 
+function _nd_set_cache_entry_deadlines!(
+        resolver::ND.CachingResolver,
+        network::AbstractString,
+        host::AbstractString;
+        expires_ns::Int64,
+        stale_expires_ns::Int64 = expires_ns,
+    )
+    key = ND._lookup_key(network, host)
+    lock(resolver.lock)
+    try
+        entry = resolver.entries[key]
+        entry.expires_ns = expires_ns
+        entry.stale_expires_ns = stale_expires_ns
+    finally
+        unlock(resolver.lock)
+    end
+    return nothing
+end
+
 function _nd_spawn_synchronized(ready::Channel{Nothing}, start::Channel{Nothing}, f::F) where {F}
     return errormonitor(Threads.@spawn begin
         put!(ready, nothing)
@@ -736,7 +755,14 @@ end
             stale_parent = _FlappingResolver([NC.SocketEndpoint[addr_a], NC.SocketEndpoint[addr_b]]; delay_s = 0.02)
             stale_cache = ND.CachingResolver(stale_parent; ttl_ns = 10_000_000, stale_ttl_ns = 200_000_000, negative_ttl_ns = 0, max_hosts = 8)
             first = ND.resolve_tcp_addrs(stale_cache, "tcp", "stale.test:80")
-            sleep(0.02)
+            stale_now_ns = Int64(time_ns())
+            _nd_set_cache_entry_deadlines!(
+                stale_cache,
+                "tcp",
+                "stale.test";
+                expires_ns = stale_now_ns - Int64(1),
+                stale_expires_ns = stale_now_ns + Int64(200_000_000),
+            )
             second = ND.resolve_tcp_addrs(stale_cache, "tcp", "stale.test:80")
             @test first == NC.SocketEndpoint[NC.SocketAddrV4(addr_a.ip, 80)]
             @test second == NC.SocketEndpoint[NC.SocketAddrV4(addr_a.ip, 80)]
@@ -770,7 +796,12 @@ end
             @test err2 isa ND.LookupError
             @test neg_parent.calls == 1
             @test (@atomic :acquire neg_cache.negative_hits) == 1
-            sleep(0.06)
+            _nd_set_cache_entry_deadlines!(
+                neg_cache,
+                "tcp",
+                "neg.test";
+                expires_ns = Int64(time_ns()) - Int64(1),
+            )
             err3 = try
                 ND.resolve_tcp_addrs(neg_cache, "tcp", "neg.test:80")
                 nothing

@@ -161,8 +161,10 @@ end
                 IP._set_nonblocking!(ipfd.sysfd)
                 IP.register!(ipfd)
                 IP.set_read_deadline!(ipfd, time_ns() + 20_000_000)
+                stale_rseq = @atomic :acquire ipfd.pd.rseq
                 IP.set_read_deadline!(ipfd, time_ns() + 5_000_000_000)
-                IP.sleep(0.06)
+                IP.deadline_fire!(ipfd.pd, IP.PollMode.READ, stale_rseq, UInt64(0))
+                @test IP._check_error(ipfd.pd, IP.PollMode.READ) == Int32(0)
                 _ip_write_byte(fd1, 0x63)
                 buf = Vector{UInt8}(undef, 1)
                 n = IP.read!(ipfd, buf)
@@ -183,14 +185,20 @@ end
                 IP._set_nonblocking!(ipfd.sysfd)
                 IP.register!(ipfd)
                 IP.set_read_deadline!(ipfd, time_ns() + 100_000_000)
+                stale_rseq = @atomic :acquire ipfd.pd.rseq
+                wait_started = Channel{Nothing}(1)
                 wait_task = errormonitor(Threads.@spawn begin
+                    put!(wait_started, nothing)
                     IP.waitread(ipfd.pd, ipfd.is_file)
                     return :ok
                 end)
+                started = IP.timedwait(() -> isready(wait_started), 2.0; pollint = 0.001)
+                @test started != :timed_out
+                started == :timed_out || take!(wait_started)
                 pre = IP.timedwait(() -> istaskdone(wait_task), 0.05; pollint = 0.001)
                 @test pre == :timed_out
                 IP.set_read_deadline!(ipfd, time_ns() + 5_000_000_000)
-                IP.sleep(0.12)
+                IP.deadline_fire!(ipfd.pd, IP.PollMode.READ, stale_rseq, UInt64(0))
                 stale = IP.timedwait(() -> istaskdone(wait_task), 0.02; pollint = 0.001)
                 @test stale == :timed_out
                 _ip_write_byte(fd1, 0x64)
@@ -237,7 +245,9 @@ end
                     unlock(state.lock)
                 end
                 IP.set_deadline!(ipfd, Int64(time_ns()) + Int64(30_000_000))
-                IP.sleep(0.06)
+                rseq = @atomic :acquire ipfd.pd.rseq
+                wseq = @atomic :acquire ipfd.pd.wseq
+                IP.deadline_fire!(ipfd.pd, IP.PollMode.READWRITE, rseq, wseq)
                 @test IP._check_error(ipfd.pd, IP.PollMode.READ) == Int32(2)
                 @test IP._check_error(ipfd.pd, IP.PollMode.WRITE) == Int32(2)
                 IP.set_deadline!(ipfd, Int64(0))

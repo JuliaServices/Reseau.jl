@@ -84,6 +84,12 @@ function _el_wait_task_done(task::Task, timeout_s::Float64 = 2.0)
     return status
 end
 
+function _el_wait_channel_ready(ch::Channel{Nothing}, timeout_s::Float64 = 2.0)
+    status = timedwait(() -> isready(ch), timeout_s; pollint = 0.001)
+    status == :timed_out || take!(ch)
+    return status
+end
+
 function _el_log_test_progress(msg::AbstractString)
     println("[iopoll_runtime_tests] ", msg)
     flush(stdout)
@@ -268,12 +274,15 @@ end
                 registration = NP.register!(fd0; mode = NP.PollMode.READWRITE)
                 @test registration.token > 0
                 wait_ch = Channel{Nothing}(1)
+                wait_started = Channel{Nothing}(1)
                 waiter_task = errormonitor(@async begin
                     NP.arm_waiter!(registration, NP.PollMode.READ)
+                    put!(wait_started, nothing)
                     NP.pollwait!(registration.read_waiter)
                     put!(wait_ch, nothing)
                     return nothing
                 end)
+                @test _el_wait_channel_ready(wait_started, 2.0) != :timed_out
                 pre = timedwait(() -> isready(wait_ch), 0.05; pollint = 0.001)
                 @test pre == :timed_out
                 _el_log_test_progress("runtime register/pollwait/deregister: trigger read ready")
@@ -319,13 +328,15 @@ end
                 token2 = registration2.token
                 @test token2 != token1
                 wait_ch = Channel{Nothing}(1)
+                wait_started = Channel{Nothing}(1)
                 waiter_task = errormonitor(@async begin
                     NP.arm_waiter!(registration2, NP.PollMode.READ)
+                    put!(wait_started, nothing)
                     NP.pollwait!(registration2.read_waiter)
                     put!(wait_ch, nothing)
                     return nothing
                 end)
-                sleep(0.02)
+                @test _el_wait_channel_ready(wait_started, 2.0) != :timed_out
                 stale = NP.PollEvent(Cint(-1), token1, NP.PollMode.READ, false)
                 NP._dispatch_ready_event!(state, stale)
                 stale_status = timedwait(() -> isready(wait_ch), 0.05; pollint = 0.001)
@@ -365,13 +376,15 @@ end
                 close(stale_pd)
                 @test NP.current_registration(registration.pollstate) === registration
                 wait_ch = Channel{Nothing}(1)
+                wait_started = Channel{Nothing}(1)
                 waiter_task = errormonitor(@async begin
                     NP.arm_waiter!(registration, NP.PollMode.READ)
+                    put!(wait_started, nothing)
                     NP.pollwait!(registration.read_waiter)
                     put!(wait_ch, nothing)
                     return nothing
                 end)
-                sleep(0.02)
+                @test _el_wait_channel_ready(wait_started, 2.0) != :timed_out
                 _el_write_byte(fd1, 0x55)
                 status = timedwait(() -> isready(wait_ch), 2.0; pollint = 0.001)
                 @test status != :timed_out
@@ -423,15 +436,20 @@ end
                 registration = NP.register!(fd0; mode = NP.PollMode.READ)
                 timer = NP.TimerState()
                 @test NP.schedule_timer!(timer, Int64(time_ns()) + Int64(5_000_000_000))
+                reg_started = Channel{Nothing}(1)
+                timer_started = Channel{Nothing}(1)
                 reg_task = errormonitor(@async begin
+                    put!(reg_started, nothing)
                     reg_reason[] = NP.pollwait!(registration.read_waiter)
                     return nothing
                 end)
                 timer_task = errormonitor(@async begin
+                    put!(timer_started, nothing)
                     timer_reason[] = NP.pollwait!(timer.waiter)
                     return nothing
                 end)
-                sleep(0.05)
+                @test _el_wait_channel_ready(reg_started, 2.0) != :timed_out
+                @test _el_wait_channel_ready(timer_started, 2.0) != :timed_out
                 NP._notify_all_waiters!(state)
                 @test _el_wait_task_done(reg_task, 2.0) != :timed_out
                 @test _el_wait_task_done(timer_task, 2.0) != :timed_out

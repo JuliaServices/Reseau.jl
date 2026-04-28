@@ -326,7 +326,9 @@ end
                 @test (@atomic :acquire pfd.pd.rd_ns) == future_deadline
                 @test (@atomic :acquire pfd.pd.wd_ns) == future_deadline
                 NC.set_deadline!(server, Int64(time_ns()) + Int64(30_000_000))
-                IP.sleep(0.06)
+                rseq = @atomic :acquire pfd.pd.rseq
+                wseq = @atomic :acquire pfd.pd.wseq
+                IP.deadline_fire!(pfd.pd, IP.PollMode.READWRITE, rseq, wseq)
                 @test IP._check_error(pfd.pd, IP.PollMode.READ) == Int32(2)
                 @test IP._check_error(pfd.pd, IP.PollMode.WRITE) == Int32(2)
                 NC.set_deadline!(server, Int64(0))

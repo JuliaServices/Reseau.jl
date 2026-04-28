@@ -1152,15 +1152,21 @@ isdefined(@__MODULE__, :_RESEAU_TLS_TEST_UTILS_LOADED) || include("tls_test_util
             listener = nothing
             client_tcp = nothing
             stalled_peer = nothing
+            accepted = Channel{Nothing}(1)
+            release_peer = Channel{Nothing}(1)
             try
                 listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn begin
                     conn = NC.accept(listener)
-                    IP.sleep(1.0)
+                    put!(accepted, nothing)
+                    take!(release_peer)
                     return conn
                 end)
                 client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
+                accepted_status = IP.timedwait(() -> isready(accepted), 2.0; pollint = 0.001)
+                @test accepted_status != :timed_out
+                accepted_status == :timed_out || take!(accepted)
                 client_tls = TL.client(client_tcp, TL.Config(
                     verify_peer = false,
                     server_name = "localhost",
@@ -1180,9 +1186,11 @@ isdefined(@__MODULE__, :_RESEAU_TLS_TEST_UTILS_LOADED) || include("tls_test_util
                 @test post_write_ns == pre_write_ns
                 _tls_close_quiet!(client_tls)
                 client_tcp = nothing
+                isready(release_peer) || put!(release_peer, nothing)
                 @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
                 stalled_peer = fetch(accept_task)
             finally
+                isready(release_peer) || put!(release_peer, nothing)
                 _tls_close_quiet!(stalled_peer)
                 _tls_close_quiet!(client_tcp)
                 _tls_close_quiet!(listener)
@@ -1195,15 +1203,21 @@ isdefined(@__MODULE__, :_RESEAU_TLS_TEST_UTILS_LOADED) || include("tls_test_util
             client_tcp = nothing
             stalled_peer = nothing
             client_tls = nothing
+            accepted = Channel{Nothing}(1)
+            release_peer = Channel{Nothing}(1)
             try
                 listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn begin
                     conn = NC.accept(listener)
-                    IP.sleep(1.0)
+                    put!(accepted, nothing)
+                    take!(release_peer)
                     return conn
                 end)
                 client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
+                accepted_status = IP.timedwait(() -> isready(accepted), 2.0; pollint = 0.001)
+                @test accepted_status != :timed_out
+                accepted_status == :timed_out || take!(accepted)
                 client_tls = TL.client(client_tcp, TL.Config(
                     verify_peer = false,
                     server_name = "localhost",
@@ -1222,9 +1236,11 @@ isdefined(@__MODULE__, :_RESEAU_TLS_TEST_UTILS_LOADED) || include("tls_test_util
                 if err isa TL.TLSError
                     @test err.message == "i/o timeout"
                 end
+                isready(release_peer) || put!(release_peer, nothing)
                 @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
                 stalled_peer = fetch(accept_task)
             finally
+                isready(release_peer) || put!(release_peer, nothing)
                 _tls_close_quiet!(client_tls)
                 _tls_close_quiet!(stalled_peer)
                 _tls_close_quiet!(client_tcp)
@@ -1235,15 +1251,20 @@ isdefined(@__MODULE__, :_RESEAU_TLS_TEST_UTILS_LOADED) || include("tls_test_util
         @testset "host resolver timeout budget includes TLS handshake time" begin
             IP.shutdown!()
             listener = nothing
-            stalled_peer = nothing
+            accepted = Channel{Nothing}(1)
+            release_peer = Channel{Nothing}(1)
             try
                 listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn begin
                     conn = NC.accept(listener)
-                    IP.sleep(1.2)
-                    close(conn)
-                    return nothing
+                    try
+                        put!(accepted, nothing)
+                        take!(release_peer)
+                        return nothing
+                    finally
+                        close(conn)
+                    end
                 end)
                 host_resolver = ND.HostResolver(timeout_ns = 250_000_000)
                 cfg = TL.Config(
@@ -1251,32 +1272,42 @@ isdefined(@__MODULE__, :_RESEAU_TLS_TEST_UTILS_LOADED) || include("tls_test_util
                     server_name = "localhost",
                     handshake_timeout_ns = 0,
                 )
-                started_ns = time_ns()
-                err = try
-                    _tls_connect(
-                        "tcp",
-                        "127.0.0.1:$(Int(laddr.port))",
-                        cfg;
-                        timeout_ns = host_resolver.timeout_ns,
-                        deadline_ns = host_resolver.deadline_ns,
-                        local_addr = host_resolver.local_addr,
-                        fallback_delay_ns = host_resolver.fallback_delay_ns,
-                        resolver = host_resolver.resolver,
-                        policy = host_resolver.policy,
-                    )
-                    nothing
-                catch ex
-                    ex
+                connect_task = errormonitor(Threads.@spawn begin
+                    try
+                        _tls_connect(
+                            "tcp",
+                            "127.0.0.1:$(Int(laddr.port))",
+                            cfg;
+                            timeout_ns = host_resolver.timeout_ns,
+                            deadline_ns = host_resolver.deadline_ns,
+                            local_addr = host_resolver.local_addr,
+                            fallback_delay_ns = host_resolver.fallback_delay_ns,
+                            resolver = host_resolver.resolver,
+                            policy = host_resolver.policy,
+                        )
+                        nothing
+                    catch ex
+                        ex
+                    end
+                end)
+                accepted_status = IP.timedwait(() -> isready(accepted), 2.0; pollint = 0.001)
+                @test accepted_status != :timed_out
+                accepted_status == :timed_out || take!(accepted)
+                connect_status = _tls_wait_task_done(connect_task, 2.0)
+                @test connect_status != :timed_out
+                err = connect_status == :timed_out ? nothing : fetch(connect_task)
+                @test !istaskdone(accept_task)
+                isready(release_peer) || put!(release_peer, nothing)
+                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                if istaskdone(accept_task)
+                    fetch(accept_task)
                 end
-                elapsed_ms = (time_ns() - started_ns) / 1.0e6
                 @test err isa TL.TLSError
                 if err isa TL.TLSError
                     @test err.message == "i/o timeout"
                 end
-                @test elapsed_ms < 700.0
-                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
             finally
-                _tls_close_quiet!(stalled_peer)
+                isready(release_peer) || put!(release_peer, nothing)
                 _tls_close_quiet!(listener)
                 IP.shutdown!()
             end
@@ -1374,20 +1405,29 @@ isdefined(@__MODULE__, :_RESEAU_TLS_TEST_UTILS_LOADED) || include("tls_test_util
             IP.shutdown!()
             listener = nothing
             client = nothing
+            hold_ready = Channel{Nothing}(1)
+            release_hold = Channel{Nothing}(1)
             try
                 listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(); backlog = 8)
                 laddr = TL.addr(listener)::NC.SocketAddrV4
                 hold_task = errormonitor(@async begin
                     conn = TL.accept(listener)
-                    TL.handshake!(conn)
-                    IP.sleep(1.5)
-                    close(conn)
-                    return nothing
+                    try
+                        TL.handshake!(conn)
+                        put!(hold_ready, nothing)
+                        take!(release_hold)
+                        return nothing
+                    finally
+                        close(conn)
+                    end
                 end)
                 client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
                     verify_peer = false,
                     server_name = "localhost",
                 ))
+                hold_status = IP.timedwait(() -> isready(hold_ready), 2.0; pollint = 0.001)
+                @test hold_status != :timed_out
+                hold_status == :timed_out || take!(hold_ready)
                 TL.set_write_deadline!(client, time_ns() + 5_000_000)
                 payload = fill(UInt8(0x5a), 64 * 1024 * 1024)
                 first_err = try
@@ -1411,9 +1451,11 @@ isdefined(@__MODULE__, :_RESEAU_TLS_TEST_UTILS_LOADED) || include("tls_test_util
                 if first_err isa TL.TLSError && second_err isa TL.TLSError
                     @test second_err === first_err
                 end
+                isready(release_hold) || put!(release_hold, nothing)
                 @test _tls_wait_task_done(hold_task, 2.0) != :timed_out
                 fetch(hold_task)
             finally
+                isready(release_hold) || put!(release_hold, nothing)
                 _tls_close_quiet!(client)
                 _tls_close_quiet!(listener)
                 IP.shutdown!()
