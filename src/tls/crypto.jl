@@ -123,6 +123,10 @@ const _TLS12_SERVER_FINISHED_LABEL = "server finished"
 const _EMPTY_SHA256_DIGEST = SHA.sha256(UInt8[])
 const _EMPTY_SHA384_DIGEST = SHA.sha384(UInt8[])
 
+@noinline function _unsupported_tls_hash_kind()
+    throw(ArgumentError("unsupported TLS hash kind"))
+end
+
 """
     _TranscriptHash
 
@@ -208,19 +212,19 @@ end
 @inline function _hash_len(hash_kind::_TLSHashKind)::Int
     hash_kind == _HASH_SHA256 && return 32
     hash_kind == _HASH_SHA384 && return 48
-    throw(ArgumentError("unsupported TLS hash kind: $(hash_kind)"))
+    _unsupported_tls_hash_kind()
 end
 
 @inline function _new_hash_context(hash_kind::_TLSHashKind)
     hash_kind == _HASH_SHA256 && return SHA.SHA256_CTX()
     hash_kind == _HASH_SHA384 && return SHA.SHA384_CTX()
-    throw(ArgumentError("unsupported TLS hash kind: $(hash_kind)"))
+    _unsupported_tls_hash_kind()
 end
 
 @inline function _hash_block_len(hash_kind::_TLSHashKind)::Int
     hash_kind == _HASH_SHA256 && return 64
     hash_kind == _HASH_SHA384 && return 128
-    throw(ArgumentError("unsupported TLS hash kind: $(hash_kind)"))
+    _unsupported_tls_hash_kind()
 end
 
 struct _TLSHMACTemplate{CTX<:SHA.SHA_CTX}
@@ -264,7 +268,7 @@ end
 @inline function _empty_hash_digest(hash_kind::_TLSHashKind)::Vector{UInt8}
     hash_kind == _HASH_SHA256 && return copy(_EMPTY_SHA256_DIGEST)
     hash_kind == _HASH_SHA384 && return copy(_EMPTY_SHA384_DIGEST)
-    throw(ArgumentError("unsupported TLS hash kind: $(hash_kind)"))
+    _unsupported_tls_hash_kind()
 end
 
 @inline function _hash_data(hash_kind::_TLSHashKind, data::AbstractVector{UInt8})::Vector{UInt8}
@@ -325,7 +329,7 @@ function _TranscriptHash(hash_kind::_TLSHashKind; buffer_handshake::Bool = true)
             buffer_handshake ? UInt8[] : nothing,
         )
     end
-    throw(ArgumentError("unsupported TLS hash kind: $(hash_kind)"))
+    _unsupported_tls_hash_kind()
 end
 
 # Transcript updates intentionally own buffered handshake bytes. The handshake
