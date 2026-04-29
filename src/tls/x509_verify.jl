@@ -230,7 +230,7 @@ end
 @inline function _tls_ip_range_matches(range::_TLSIPRangeConstraint, ip::AbstractVector{UInt8})::Bool
     length(ip) == length(range.network) || return false
     length(ip) == length(range.mask) || return false
-    @inbounds for i in eachindex(ip, range.network, range.mask)
+    @inbounds for i in 1:length(ip)
         (ip[i] & range.mask[i]) == (range.network[i] & range.mask[i]) || return false
     end
     return true
@@ -245,15 +245,34 @@ struct _TLSParsedMailbox
     domain::String
 end
 
+@inline function _tls_findfirst_ascii_byte(text::String, byte::UInt8, start::Int = 1)::Union{Nothing, Int}
+    i = max(start, 1)
+    n = ncodeunits(text)
+    while i <= n
+        codeunit(text, i) == byte && return i
+        i += 1
+    end
+    return nothing
+end
+
+@inline function _tls_findlast_ascii_byte(text::String, byte::UInt8)::Union{Nothing, Int}
+    i = ncodeunits(text)
+    while i >= 1
+        codeunit(text, i) == byte && return i
+        i -= 1
+    end
+    return nothing
+end
+
 @inline function _tls_parse_rfc2821_mailbox(value::AbstractString)::Union{Nothing, _TLSParsedMailbox}
     text = String(value)
-    at = findfirst(==('@'), text)
+    at = _tls_findfirst_ascii_byte(text, UInt8('@'))
     at === nothing && return nothing
     local_end = at - 1
     domain_start = at + 1
     local_end >= 1 || return nothing
     domain_start <= ncodeunits(text) || return nothing
-    findnext(==('@'), text, domain_start) === nothing || return nothing
+    _tls_findfirst_ascii_byte(text, UInt8('@'), domain_start) === nothing || return nothing
     local_part = text[1:local_end]
     domain = text[domain_start:end]
     isempty(local_part) && return nothing
@@ -263,7 +282,7 @@ end
 
 function _tls_parse_uri_host_domain(uri::AbstractString)::Union{Nothing, String}
     text = String(uri)
-    scheme_end = findfirst(==(':'), text)
+    scheme_end = _tls_findfirst_ascii_byte(text, UInt8(':'))
     scheme_end === nothing && return nothing
     authority_start = scheme_end + 1
     authority_start + 1 <= ncodeunits(text) || return nothing
@@ -279,16 +298,16 @@ function _tls_parse_uri_host_domain(uri::AbstractString)::Union{Nothing, String}
     end
     authority_end >= authority_start || return nothing
     authority = text[authority_start:authority_end]
-    userinfo_end = findlast(==('@'), authority)
+    userinfo_end = _tls_findlast_ascii_byte(authority, UInt8('@'))
     hostport = userinfo_end === nothing ? authority : authority[(userinfo_end + 1):end]
     isempty(hostport) && return nothing
     host = if startswith(hostport, "[")
-        bracket_end = findfirst(==(']'), hostport)
+        bracket_end = _tls_findfirst_ascii_byte(hostport, UInt8(']'))
         bracket_end === nothing && return nothing
         bracket_end == lastindex(hostport) || startswith(hostport[(bracket_end + 1):end], ":") || return nothing
         hostport[2:(bracket_end - 1)]
     else
-        colon = findlast(==(':'), hostport)
+        colon = _tls_findlast_ascii_byte(hostport, UInt8(':'))
         colon === nothing ? hostport : hostport[1:(colon - 1)]
     end
     isempty(host) && return nothing

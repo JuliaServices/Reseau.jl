@@ -462,13 +462,13 @@ end
 function _new_tls13_binder_transcript(hash_kind::_TLSHashKind)
     hash_kind == _HASH_SHA256 && return _TranscriptHash(_HASH_SHA256; buffer_handshake = false)
     hash_kind == _HASH_SHA384 && return _TranscriptHash(_HASH_SHA384; buffer_handshake = false)
-    throw(ArgumentError("unsupported TLS hash kind: $(hash_kind)"))
+    _unsupported_tls_hash_kind()
 end
 
 function _new_tls13_handshake_transcript(hash_kind::_TLSHashKind)::_TLS13TranscriptState
     hash_kind == _HASH_SHA256 && return _TranscriptHash(_HASH_SHA256)
     hash_kind == _HASH_SHA384 && return _TranscriptHash(_HASH_SHA384)
-    throw(ArgumentError("unsupported TLS hash kind: $(hash_kind)"))
+    _unsupported_tls_hash_kind()
 end
 
 @inline function _tls13_selected_transcript(state::_TLS13ClientHandshakeState)::_TLS13TranscriptState
