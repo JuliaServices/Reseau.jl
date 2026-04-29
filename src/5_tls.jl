@@ -340,22 +340,22 @@ const _TLS_POLICY_AUTO = UInt8(3)
 @inline _is_tls12_policy(policy::UInt8) = policy == _TLS_POLICY_TLS12
 @inline _is_tls_auto_policy(policy::UInt8) = policy == _TLS_POLICY_AUTO
 
-function Config(;
-        server_name::Union{Nothing, AbstractString} = nothing,
-        verify_peer::Bool = true,
-        verify_hostname::Bool = verify_peer,
-        client_auth::ClientAuthMode.T = ClientAuthMode.NoClientCert,
-        cert_file::Union{Nothing, AbstractString} = nothing,
-        key_file::Union{Nothing, AbstractString} = nothing,
-        ca_file::Union{Nothing, AbstractString} = nothing,
-        client_ca_file::Union{Nothing, AbstractString} = nothing,
-        alpn_protocols::Vector{String} = String[],
-        curve_preferences::Vector{UInt16} = UInt16[],
-        handshake_timeout_ns::Integer = Int64(0),
-        min_version::Union{Nothing, UInt16} = TLS1_2_VERSION,
-        max_version::Union{Nothing, UInt16} = nothing,
-        session_tickets_disabled::Bool = false,
-        session_cache_capacity::Integer = 64,
+function Config(
+        server_name::Union{Nothing, String},
+        verify_peer::Bool,
+        verify_hostname::Bool,
+        client_auth::ClientAuthMode.T,
+        cert_file::Union{Nothing, String},
+        key_file::Union{Nothing, String},
+        ca_file::Union{Nothing, String},
+        client_ca_file::Union{Nothing, String},
+        alpn_protocols::Vector{String},
+        curve_preferences::Vector{UInt16},
+        handshake_timeout_ns::Int64,
+        min_version::Union{Nothing, UInt16},
+        max_version::Union{Nothing, UInt16},
+        session_tickets_disabled::Bool,
+        session_cache_capacity::Int = 64,
     )
     # Normalize to owned `String` storage so shared configs do not depend on caller-owned
     # string buffers or views.
@@ -395,6 +395,78 @@ function Config(;
         _TLSSessionCache(_TLS12ServerSession, session_cache_capacity),
         _TLSLocalIdentityState(),
         _TLSLocalIdentityState(),
+    )
+end
+
+function Config(
+        server_name::Union{Nothing, AbstractString},
+        verify_peer::Bool,
+        verify_hostname::Bool,
+        client_auth::ClientAuthMode.T,
+        cert_file::Union{Nothing, AbstractString},
+        key_file::Union{Nothing, AbstractString},
+        ca_file::Union{Nothing, AbstractString},
+        client_ca_file::Union{Nothing, AbstractString},
+        alpn_protocols::Vector{String},
+        curve_preferences::Vector{UInt16},
+        handshake_timeout_ns::Integer,
+        min_version::Union{Nothing, UInt16},
+        max_version::Union{Nothing, UInt16},
+        session_tickets_disabled::Bool,
+        session_cache_capacity::Integer = 64,
+    )
+    return Config(
+        server_name === nothing ? nothing : String(server_name),
+        verify_peer,
+        verify_hostname,
+        client_auth,
+        cert_file === nothing ? nothing : String(cert_file),
+        key_file === nothing ? nothing : String(key_file),
+        ca_file === nothing ? nothing : String(ca_file),
+        client_ca_file === nothing ? nothing : String(client_ca_file),
+        alpn_protocols,
+        curve_preferences,
+        Int64(handshake_timeout_ns),
+        min_version,
+        max_version,
+        session_tickets_disabled,
+        Int(session_cache_capacity),
+    )
+end
+
+function Config(;
+        server_name::Union{Nothing, AbstractString} = nothing,
+        verify_peer::Bool = true,
+        verify_hostname::Bool = verify_peer,
+        client_auth::ClientAuthMode.T = ClientAuthMode.NoClientCert,
+        cert_file::Union{Nothing, AbstractString} = nothing,
+        key_file::Union{Nothing, AbstractString} = nothing,
+        ca_file::Union{Nothing, AbstractString} = nothing,
+        client_ca_file::Union{Nothing, AbstractString} = nothing,
+        alpn_protocols::Vector{String} = String[],
+        curve_preferences::Vector{UInt16} = UInt16[],
+        handshake_timeout_ns::Integer = Int64(0),
+        min_version::Union{Nothing, UInt16} = TLS1_2_VERSION,
+        max_version::Union{Nothing, UInt16} = nothing,
+        session_tickets_disabled::Bool = false,
+        session_cache_capacity::Integer = 64,
+    )
+    return Config(
+        server_name === nothing ? nothing : String(server_name),
+        verify_peer,
+        verify_hostname,
+        client_auth,
+        cert_file === nothing ? nothing : String(cert_file),
+        key_file === nothing ? nothing : String(key_file),
+        ca_file === nothing ? nothing : String(ca_file),
+        client_ca_file === nothing ? nothing : String(client_ca_file),
+        alpn_protocols,
+        curve_preferences,
+        Int64(handshake_timeout_ns),
+        min_version,
+        max_version,
+        session_tickets_disabled,
+        Int(session_cache_capacity),
     )
 end
 
