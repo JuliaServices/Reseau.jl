@@ -49,6 +49,70 @@ end
             max_version = TL.TLS1_3_VERSION,
             curve_preferences = UInt16[TL.P256, TL.X25519],
         )) == UInt16[TL.P256, TL.X25519]
+        alpn = ["h2"]
+        curves = UInt16[TL.P256]
+        positional_cfg = TL.Config(
+            "example.com",
+            false,
+            false,
+            TL.ClientAuthMode.NoClientCert,
+            nothing,
+            nothing,
+            nothing,
+            nothing,
+            alpn,
+            curves,
+            123,
+            TL.TLS1_2_VERSION,
+            TL.TLS1_3_VERSION,
+            true,
+        )
+        @test positional_cfg.server_name == "example.com"
+        @test !positional_cfg.verify_peer
+        @test !positional_cfg.verify_hostname
+        @test positional_cfg.client_auth == TL.ClientAuthMode.NoClientCert
+        @test positional_cfg.alpn_protocols == ["h2"]
+        @test positional_cfg.curve_preferences == UInt16[TL.P256]
+        @test positional_cfg.handshake_timeout_ns == 123
+        @test positional_cfg.min_version == TL.TLS1_2_VERSION
+        @test positional_cfg.max_version == TL.TLS1_3_VERSION
+        @test positional_cfg.session_tickets_disabled
+        push!(alpn, "http/1.1")
+        push!(curves, TL.X25519)
+        @test positional_cfg.alpn_protocols == ["h2"]
+        @test positional_cfg.curve_preferences == UInt16[TL.P256]
+        @test_throws TL.ConfigError TL.Config(
+            nothing,
+            true,
+            true,
+            TL.ClientAuthMode.NoClientCert,
+            _TLS_CERT_PATH,
+            nothing,
+            nothing,
+            nothing,
+            String[],
+            UInt16[],
+            0,
+            TL.TLS1_2_VERSION,
+            nothing,
+            false,
+        )
+        @test_throws TL.ConfigError TL.Config(
+            nothing,
+            true,
+            true,
+            TL.ClientAuthMode.NoClientCert,
+            nothing,
+            nothing,
+            nothing,
+            nothing,
+            String[],
+            UInt16[],
+            -1,
+            TL.TLS1_2_VERSION,
+            nothing,
+            false,
+        )
         default_ca = TL._default_ca_file_path()
         expected_default_ca = try
             path = NetworkOptions.ca_roots_path()
