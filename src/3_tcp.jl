@@ -997,6 +997,63 @@ function Base.write(conn::Conn, buf::ByteMemory, nbytes::Integer)::Int
 end
 
 """
+    writev(conn, buffers) -> Int
+
+Vectored write: send a sequence of disjoint byte regions in a single kernel
+call (`sendmsg(2)` on POSIX). Returns the total number of bytes written
+(equal to the sum of all buffer lengths on success).
+
+Each entry in `buffers` may be any `AbstractVector{UInt8}` with a
+contiguous storage layout (`Vector{UInt8}`, `Base.CodeUnits`, a stride-1
+view) — the call falls back to scalar writes for any entry that is not
+contiguous.
+
+Compared to issuing one `write` per buffer, `writev` saves a syscall per
+extra buffer and avoids the application-level memcpy that combining the
+buffers into a single `Vector{UInt8}` would otherwise require. This is
+especially valuable when emitting protocols that interleave small
+metadata (e.g. HTTP/2 frame headers, 9 bytes each) with large payload
+slices that already live in caller-managed buffers.
+
+Like other `Conn` writes, `writev` may block waiting for socket write
+readiness, and honors the connection's write deadline (configurable via
+[`set_write_deadline!`](@ref)/[`set_deadline!`](@ref)).
+"""
+function writev(conn::Conn, buffers::AbstractVector)
+    isempty(buffers) && return 0
+    if length(buffers) == 1
+        return write(conn, @inbounds buffers[1])
+    end
+    # Hot path: build iovecs directly from the caller's buffers without a
+    # parallel `backing` array — the caller's `buffers` Vector keeps each
+    # entry alive, and `GC.@preserve buffers` covers them all.
+    iovecs = Vector{SocketOps.IOVec}(undef, length(buffers))
+    materialized = nothing  # only allocated if a non-contiguous buffer slips in
+    @inbounds for i in eachindex(buffers)
+        b = buffers[i]
+        b isa AbstractVector{UInt8} || throw(ArgumentError("writev buffers must be AbstractVector{UInt8}"))
+        if b isa Vector{UInt8}
+            iovecs[i] = SocketOps.IOVec(Base.unsafe_convert(Ptr{Cvoid}, pointer(b)), Csize_t(length(b)))
+        elseif b isa Base.CodeUnits{UInt8,<:AbstractString}
+            iovecs[i] = SocketOps.IOVec(Base.unsafe_convert(Ptr{Cvoid}, pointer(b.s)), Csize_t(ncodeunits(b.s)))
+        elseif b isa StridedVector{UInt8} && stride(b, 1) == 1
+            iovecs[i] = SocketOps.IOVec(Base.unsafe_convert(Ptr{Cvoid}, pointer(b)), Csize_t(length(b)))
+        else
+            mat = Vector{UInt8}(b)
+            if materialized === nothing
+                materialized = Any[mat]
+            else
+                push!(materialized::Vector{Any}, mat)
+            end
+            iovecs[i] = SocketOps.IOVec(Base.unsafe_convert(Ptr{Cvoid}, pointer(mat)), Csize_t(length(mat)))
+        end
+    end
+    GC.@preserve buffers iovecs materialized begin
+        return Int(IOPoll._writev_ptr!(conn.fd.pfd, iovecs))
+    end
+end
+
+"""
     close(conn)
 
 Close the connection. Repeated closes are treated as no-ops.

@@ -470,6 +470,45 @@ end
                 IP.shutdown!()
             end
         end
+        @testset "writev sends multiple disjoint buffers in one syscall" begin
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            try
+                listener = NC.listen(NC.loopback_addr(0); backlog = 8)
+                laddr = NC.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(@async NC.accept(listener))
+                client = NC.connect(NC.loopback_addr(Int(laddr.port)))
+                @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
+                server = fetch(accept_task)
+                # Mix Vector{UInt8}, CodeUnits, and stride-1 SubArray inputs.
+                buf1 = UInt8[0x48, 0x49]                 # "HI"
+                buf2 = codeunits("!")                     # CodeUnits
+                whole = collect(0x61:0x6f)                # 15 bytes
+                buf3 = @view whole[3:7]                   # stride-1 SubArray, 5 bytes
+                total_bytes = length(buf1) + length(buf2) + length(buf3)
+                n = NC.writev(client, [buf1, buf2, buf3])
+                @test n == total_bytes
+                received = read(server, total_bytes)
+                @test length(received) == total_bytes
+                @test received[1:2] == buf1
+                @test received[3:3] == collect(buf2)
+                @test received[4:end] == collect(buf3)
+                # Empty input is a no-op.
+                @test NC.writev(client, AbstractVector{UInt8}[]) == 0
+                # Single-buffer fast path falls through to write().
+                @test NC.writev(client, [UInt8[0xff]]) == 1
+                @test read(server, 1) == UInt8[0xff]
+                NC.closeread(server)
+                closewrite(client)
+            finally
+                _close_quiet!(server)
+                _close_quiet!(client)
+                _close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
         @testset "IPv6 show output uses compressed form" begin
             @test string(NC.loopback_addr(80)) == "127.0.0.1:80"
             @test repr(NC.loopback_addr(80)) == "127.0.0.1:80"

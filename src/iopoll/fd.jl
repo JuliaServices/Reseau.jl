@@ -748,3 +748,82 @@ function _write_ptr!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
         _fd_write_unlock!(fd)
     end
 end
+
+"""
+    _writev_ptr!(fd, iovecs) -> Int
+
+Vectored write of multiple disjoint byte regions in one socket call (via
+`sendmsg(2)` on POSIX, `WSASendMsg` on Windows). On success returns the
+total number of bytes written across all iovecs. The iovec array describes
+slices of caller-managed memory; the caller MUST keep those memory regions
+alive (e.g. via `GC.@preserve`) for the duration of the call.
+
+The `IOVec` struct is provided by `Reseau.SocketOps`. Each entry has a
+`Ptr{Cvoid}` base and a `Csize_t` length.
+
+Handles short writes by re-sending only the unwritten suffix on each
+retry. The input `iovecs` may be mutated in place — on return its
+contents are unspecified.
+"""
+function _writev_ptr!(fd::FD, iovecs::Vector{SocketOps.IOVec})::Int
+    isempty(iovecs) && return 0
+    total = 0
+    for iov in iovecs
+        total += Int(iov.iov_len)
+    end
+    total == 0 && return 0
+    _fd_write_lock!(fd)
+    written = 0
+    iov_start = 1
+    try
+        preparewrite(fd.pd, fd.is_file)
+        while written < total
+            # Build a MsgHdr referencing the still-unwritten suffix of the
+            # iovec array. `iov_start` advances past fully-written iovecs;
+            # the iovec at `iov_start` may have been mutated to reflect a
+            # partial-write offset.
+            iovlen = length(iovecs) - iov_start + 1
+            GC.@preserve iovecs begin
+                iov_ptr = pointer(iovecs, iov_start)
+                msg = @static if Sys.islinux()
+                    SocketOps.MsgHdr(C_NULL, SocketOps.SockLen(0), iov_ptr, Csize_t(iovlen), C_NULL, Csize_t(0), Cint(0))
+                else
+                    SocketOps.MsgHdr(C_NULL, SocketOps.SockLen(0), iov_ptr, Cint(iovlen), C_NULL, SocketOps.SockLen(0), Cint(0))
+                end
+                msg_ref = Ref(msg)
+                n = SocketOps.send_msg!(fd.sysfd, msg_ref)
+                if n > 0
+                    written += Int(n)
+                    # Advance past iovecs fully drained by this write.
+                    remaining = Int(n)
+                    while remaining > 0 && iov_start <= length(iovecs)
+                        iov = iovecs[iov_start]
+                        if Int(iov.iov_len) <= remaining
+                            remaining -= Int(iov.iov_len)
+                            iov_start += 1
+                        else
+                            # Partial-iovec consumption: trim base + len in place.
+                            new_base = iov.iov_base + remaining
+                            new_len = Csize_t(Int(iov.iov_len) - remaining)
+                            iovecs[iov_start] = SocketOps.IOVec(new_base, new_len)
+                            remaining = 0
+                        end
+                    end
+                    continue
+                end
+                if n == 0
+                    throw(EOFError())
+                end
+                errno = SocketOps.last_error()
+                if errno == Int32(Base.Libc.EAGAIN) && pollable(fd.pd)
+                    waitwrite(fd.pd, fd.is_file)
+                    continue
+                end
+                throw(SystemError("writev", Int(errno)))
+            end
+        end
+    finally
+        _fd_write_unlock!(fd)
+    end
+    return written
+end
