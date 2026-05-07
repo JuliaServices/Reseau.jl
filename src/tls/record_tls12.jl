@@ -299,7 +299,7 @@ function _tls12_process_alert!(state::_TLS12NativeState, alert::AbstractVector{U
         else
             "unknown"
         end
-        throw(_tls_peer_alert_error(alert_desc, "tls: received $level_name TLS 1.2 alert $(Int(alert_desc))"))
+        throw(_tls_peer_alert_error(alert_desc, "tls: received $level_name TLS 1.2 alert $(Int(alert_desc)) ($(_tls_alert_name(alert_desc)))"))
     end
     state.peer_close_notify = true
     return nothing

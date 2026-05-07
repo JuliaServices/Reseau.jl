@@ -1394,6 +1394,11 @@ function _native_tls_auto_client_handshake!(conn::Conn)::Nothing
     native_state13 = _native_tls13_state(conn)
     io13 = _TLS13HandshakeRecordIO(conn.tcp, native_state13)
     try
+        identity = _tls_local_identity(conn.config; is_server = false)
+        if identity !== nothing
+            state13.client_certificate_chain = copy((identity::_TLSLocalIdentity).certificate_chain)
+            state13.client_private_key = identity.private_key
+        end
         _write_client_hello!(state13, io13)
         raw_server_hello = _read_handshake_bytes!(io13)
         server_hello = _unmarshal_server_hello(raw_server_hello)

@@ -704,6 +704,60 @@ isdefined(@__MODULE__, :_RESEAU_TLS_TEST_UTILS_LOADED) || include("tls_test_util
             @test client_state2.curve == "P-256"
             @test server_state2.curve == "P-256"
         end
+        @testset "mixed-version native client supports TLS 1.3 mTLS against a mixed-version server" begin
+            # Regression: in the mixed-version (auto) client path the loaded
+            # local identity used to be dropped before the TLS 1.3 handshake
+            # state machine could see it, so the client always sent an empty
+            # Certificate message and the server failed with
+            # "client did not provide a certificate".
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            accept_task = nothing
+            try
+                server_cfg = _tls_server_config(
+                    handshake_timeout_ns = 10_000_000_000,
+                    cert_file = _TLS_NATIVE_SERVER_CERT_PATH,
+                    key_file = _TLS_NATIVE_SERVER_KEY_PATH,
+                    client_auth = TL.ClientAuthMode.RequireAndVerifyClientCert,
+                    client_ca_file = _TLS_NATIVE_CA_PATH,
+                )
+                client_cfg = TL.Config(
+                    verify_peer = true,
+                    verify_hostname = true,
+                    server_name = "localhost",
+                    ca_file = _TLS_NATIVE_CA_PATH,
+                    cert_file = _TLS_NATIVE_CLIENT_CERT_PATH,
+                    key_file = _TLS_NATIVE_CLIENT_KEY_PATH,
+                    handshake_timeout_ns = 10_000_000_000,
+                )
+                listener = TL.listen("tcp", "127.0.0.1:0", server_cfg; backlog = 16)
+                laddr = TL.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn begin
+                    conn = TL.accept(listener)
+                    try
+                        TL.handshake!(conn)
+                        write(conn, UInt8[0x42])
+                        return TL.connection_state(conn)
+                    finally
+                        _tls_close_quiet!(conn)
+                    end
+                end)
+                client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                @test read(client, 1) == UInt8[0x42]
+                @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                client_state = TL.connection_state(client)
+                server_state = fetch(accept_task)::TL.ConnectionState
+                @test client_state.version == "TLSv1.3"
+                @test server_state.version == "TLSv1.3"
+                @test client_state.using_native_tls13
+                @test server_state.using_native_tls13
+            finally
+                _tls_close_quiet!(client)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
         @testset "mixed-version native client still offers TLS 1.2 resumption when a TLS 1.3 session is cached" begin
             function run_once(server_cfg::TL.Config, client_cfg::TL.Config)::TL.ConnectionState
                 listener = nothing

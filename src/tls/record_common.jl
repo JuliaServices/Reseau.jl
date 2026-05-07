@@ -18,6 +18,45 @@ const _TLS_ALERT_INTERNAL_ERROR = UInt8(80)
 const _TLS_ALERT_NO_APPLICATION_PROTOCOL = UInt8(120)
 const _TLS_ALERT_CERTIFICATE_REQUIRED = UInt8(116)
 
+# Symbolic names for TLS alert descriptions (RFC 8446 §6, RFC 5246 §7.2).
+# Used when surfacing peer alerts so error messages name the alert instead of
+# leaving callers to decode raw numerics.
+@inline function _tls_alert_name(alert::UInt8)::String
+    alert == 0   && return "close_notify"
+    alert == 10  && return "unexpected_message"
+    alert == 20  && return "bad_record_mac"
+    alert == 21  && return "decryption_failed"
+    alert == 22  && return "record_overflow"
+    alert == 30  && return "decompression_failure"
+    alert == 40  && return "handshake_failure"
+    alert == 41  && return "no_certificate"
+    alert == 42  && return "bad_certificate"
+    alert == 43  && return "unsupported_certificate"
+    alert == 44  && return "certificate_revoked"
+    alert == 45  && return "certificate_expired"
+    alert == 46  && return "certificate_unknown"
+    alert == 47  && return "illegal_parameter"
+    alert == 48  && return "unknown_ca"
+    alert == 49  && return "access_denied"
+    alert == 50  && return "decode_error"
+    alert == 51  && return "decrypt_error"
+    alert == 60  && return "export_restriction"
+    alert == 70  && return "protocol_version"
+    alert == 71  && return "insufficient_security"
+    alert == 80  && return "internal_error"
+    alert == 86  && return "inappropriate_fallback"
+    alert == 90  && return "user_canceled"
+    alert == 100 && return "no_renegotiation"
+    alert == 109 && return "missing_extension"
+    alert == 110 && return "unsupported_extension"
+    alert == 112 && return "unrecognized_name"
+    alert == 113 && return "bad_certificate_status_response"
+    alert == 115 && return "unknown_psk_identity"
+    alert == 116 && return "certificate_required"
+    alert == 120 && return "no_application_protocol"
+    return "unknown"
+end
+
 const _TLS_MAX_USELESS_RECORDS = 16
 
 """

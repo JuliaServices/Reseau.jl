@@ -312,7 +312,7 @@ function _tls13_process_alert!(state::_TLS13NativeClientState, alert::AbstractVe
         else
             "unknown"
         end
-        throw(_tls_peer_alert_error(alert_desc, "tls: received $level_name TLS 1.3 alert $(Int(alert_desc))"))
+        throw(_tls_peer_alert_error(alert_desc, "tls: received $level_name TLS 1.3 alert $(Int(alert_desc)) ($(_tls_alert_name(alert_desc)))"))
     end
     state.peer_close_notify = true
     return nothing
