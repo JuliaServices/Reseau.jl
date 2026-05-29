@@ -406,6 +406,75 @@ end
                 IP.shutdown!()
             end
         end
+        @testset "re-armed readavailable deadline fires after data then quiet (HTTP _read_until_quiet repro)" begin
+            # Faithful repro of HTTP.jl's `_read_until_quiet` test helper, whose
+            # stack was captured hanging on Windows CI: read whatever bytes are
+            # available, then RE-ARM a short read deadline and `readavailable`
+            # again expecting a quiet-period timeout. On Windows that post-data
+            # `readavailable` intermittently blocks forever — the re-armed read
+            # deadline never fires. An earlier single-arm `read!` repro missed
+            # this; the trigger is `readavailable` + re-arm-in-loop *after first
+            # receiving data*. Watchdog-bounded so a strand is counted and FAILS
+            # fast instead of hanging CI.
+            iterations = 60
+            overall_timeout_s = 2.0
+            quiet_timeout_s = 0.1
+            watchdog_s = 10.0
+            IP.shutdown!()
+            listener = nothing
+            try
+                listener = NC.listen(NC.loopback_addr(0); backlog = 32)
+                laddr = NC.addr(listener)::NC.SocketAddrV4
+                strands = 0
+                for _ in 1:iterations
+                    client = nothing
+                    server = nothing
+                    try
+                        accept_task = errormonitor(@async NC.accept(listener))
+                        client = NC.connect(NC.loopback_addr(Int(laddr.port)))
+                        @test _nc_wait_task_done(accept_task, 5.0) != :timed_out
+                        server = fetch(accept_task)
+                        # Server sends a little then idles (stays open, sends no
+                        # more), so the client's post-data read must rely on the
+                        # re-armed quiet deadline to return.
+                        write(server, Vector{UInt8}("ok"))
+                        op = errormonitor(@async begin
+                            out = UInt8[]
+                            deadline_ns = Int64(time_ns()) + round(Int64, overall_timeout_s * 1.0e9)
+                            saw_bytes = false
+                            while true
+                                remaining_ns = deadline_ns - Int64(time_ns())
+                                remaining_ns <= 0 && break
+                                read_timeout_s = saw_bytes ? min(quiet_timeout_s, remaining_ns / 1.0e9) : (remaining_ns / 1.0e9)
+                                NC.set_read_deadline!(client, Int64(time_ns()) + round(Int64, read_timeout_s * 1.0e9))
+                                try
+                                    chunk = readavailable(client)
+                                    isempty(chunk) && break
+                                    append!(out, chunk)
+                                    saw_bytes = true
+                                catch
+                                    # Any error (deadline/EOF/peer close) means the
+                                    # read returned — not a strand. Only an
+                                    # indefinite block (caught by the watchdog) is
+                                    # the bug we are hunting.
+                                    break
+                                end
+                            end
+                        end)
+                        if _nc_wait_task_done(op, watchdog_s) == :timed_out
+                            strands += 1
+                        end
+                    finally
+                        _close_quiet!(server)
+                        _close_quiet!(client)
+                    end
+                end
+                @test strands == 0
+            finally
+                _close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
         @testset "listener deadline, open state, and local_addr alias" begin
             IP.shutdown!()
             listener = nothing
