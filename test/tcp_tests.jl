@@ -341,6 +341,71 @@ end
                 IP.shutdown!()
             end
         end
+        @testset "re-armed write deadline fires when the write blocks (HTTP write-timeout repro)" begin
+            # Faithful repro of HTTP.jl's h1 stream write path, which re-arms the
+            # write deadline before EVERY chunk write (http_server_streams.jl:
+            # `_set_write_deadline!` then `write(conn, chunk)`), driven by a
+            # handler doing `while true; write(stream, chunk); end`. While the
+            # send buffer has room the writes succeed and the deadline is re-armed
+            # each time; once the buffer fills the write blocks and the freshly
+            # re-armed deadline must fire. A SINGLE-arm loop did NOT reproduce the
+            # intermittent Windows hang seen in HTTP.jl CI — this re-arm-per-write
+            # pattern is the difference. Small chunks maximize re-arm churn before
+            # the blocking write. Watchdog-bounded so a strand (deadline never
+            # fires, write blocks forever) is counted and FAILS fast, not hangs.
+            deadline_ns = 100_000_000   # 100ms
+            watchdog_s = 10.0
+            iterations = 50
+            chunk = fill(0x61, 4 * 1024)   # 4 KiB: many re-arms before the buffer fills
+            IP.shutdown!()
+            listener = nothing
+            try
+                listener = NC.listen(NC.loopback_addr(0); backlog = 32)
+                laddr = NC.addr(listener)::NC.SocketAddrV4
+                strands = 0
+                nondeadline = 0
+                for _ in 1:iterations
+                    client = nothing
+                    server = nothing
+                    try
+                        accept_task = errormonitor(@async NC.accept(listener))
+                        client = NC.connect(NC.loopback_addr(Int(laddr.port)))
+                        @test _nc_wait_task_done(accept_task, 5.0) != :timed_out
+                        server = fetch(accept_task)
+                        outcome = Ref{Symbol}(:pending)
+                        # Peer (client) never reads; the server re-arms the write
+                        # deadline before each chunk and writes until it blocks.
+                        op = errormonitor(@async begin
+                            try
+                                while true
+                                    NC.set_write_deadline!(server, time_ns() + deadline_ns)
+                                    write(server, chunk)
+                                end
+                                outcome[] = :no_throw
+                            catch err
+                                outcome[] = err isa NC.DeadlineExceededError ? :deadline : :other
+                            end
+                        end)
+                        if _nc_wait_task_done(op, watchdog_s) == :timed_out
+                            strands += 1
+                        elseif outcome[] !== :deadline
+                            nondeadline += 1
+                        end
+                    finally
+                        _close_quiet!(server)
+                        _close_quiet!(client)
+                    end
+                end
+                # The bug we are hunting is `strands` (deadline never fired). A
+                # `:other` error path (peer reset under load) is not the hang, so
+                # report it separately and do not fail the run on it.
+                @test strands == 0
+                nondeadline == 0 || @info "re-arm repro: $(nondeadline)/$(iterations) ended in a non-deadline error (not a strand)"
+            finally
+                _close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
         @testset "listener deadline, open state, and local_addr alias" begin
             IP.shutdown!()
             listener = nothing
