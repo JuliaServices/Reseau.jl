@@ -341,6 +341,98 @@ end
                 IP.shutdown!()
             end
         end
+        @testset "deadlines fire under repetition (IOCP wake-strand regression)" begin
+            # Regression for an intermittent Windows/IOCP hang: a read or write
+            # deadline occasionally fails to wake the poller, so the deadline'd
+            # operation blocks far past its deadline ("strands"). The readiness
+            # backends (epoll/kqueue) self-correct, so this is expected to surface
+            # only on the Windows IOCP backend.
+            #
+            # Each iteration bounds the deadline'd op with a task-level watchdog so
+            # a strand is counted and FAILS fast instead of hanging CI. Closing the
+            # socket in the finally unblocks any stranded op so no task is leaked.
+            # Bump `iterations` if the race proves rarer than this catches.
+            deadline_ns = 30_000_000   # 30ms; must surface well within the watchdog
+            watchdog_s = 5.0
+            iterations = 100
+            IP.shutdown!()
+            listener = nothing
+            try
+                listener = NC.listen(NC.loopback_addr(0); backlog = 32)
+                laddr = NC.addr(listener)::NC.SocketAddrV4
+
+                read_strands = 0
+                for _ in 1:iterations
+                    client = nothing
+                    server = nothing
+                    try
+                        accept_task = errormonitor(@async NC.accept(listener))
+                        client = NC.connect(NC.loopback_addr(Int(laddr.port)))
+                        @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
+                        server = fetch(accept_task)
+                        # Peer never sends, so the read blocks until the deadline.
+                        NC.set_read_deadline!(server, time_ns() + deadline_ns)
+                        outcome = Ref{Symbol}(:pending)
+                        read_task = errormonitor(@async begin
+                            try
+                                read!(server, Vector{UInt8}(undef, 1))
+                                outcome[] = :no_throw
+                            catch err
+                                outcome[] = err isa NC.DeadlineExceededError ? :deadline : :other
+                            end
+                        end)
+                        if _nc_wait_task_done(read_task, watchdog_s) == :timed_out
+                            read_strands += 1
+                        else
+                            @test outcome[] === :deadline
+                        end
+                    finally
+                        _close_quiet!(server)
+                        _close_quiet!(client)
+                    end
+                end
+                @test read_strands == 0
+
+                write_strands = 0
+                payload = fill(0x61, 1_048_576)   # 1 MiB fills the send buffer so writes block
+                for _ in 1:iterations
+                    client = nothing
+                    server = nothing
+                    try
+                        accept_task = errormonitor(@async NC.accept(listener))
+                        client = NC.connect(NC.loopback_addr(Int(laddr.port)))
+                        @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
+                        server = fetch(accept_task)
+                        # Peer never reads, so once the send buffer fills the write
+                        # blocks until the deadline (mirrors HTTP.jl's write-timeout test).
+                        NC.set_write_deadline!(server, time_ns() + deadline_ns)
+                        outcome = Ref{Symbol}(:pending)
+                        write_task = errormonitor(@async begin
+                            try
+                                while true
+                                    write(server, payload)
+                                end
+                                outcome[] = :no_throw
+                            catch err
+                                outcome[] = err isa NC.DeadlineExceededError ? :deadline : :other
+                            end
+                        end)
+                        if _nc_wait_task_done(write_task, watchdog_s) == :timed_out
+                            write_strands += 1
+                        else
+                            @test outcome[] === :deadline
+                        end
+                    finally
+                        _close_quiet!(server)
+                        _close_quiet!(client)
+                    end
+                end
+                @test write_strands == 0
+            finally
+                _close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
         @testset "listener deadline, open state, and local_addr alias" begin
             IP.shutdown!()
             listener = nothing
