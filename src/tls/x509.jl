@@ -504,7 +504,12 @@ end
 function _tls_parse_certificate_signature_spec(bytes::AbstractVector{UInt8}, value_start::Int, value_end::Int)::_TLSSignatureVerifySpec
     oid_start, oid_end, pos = _asn1_expect_tlv(bytes, value_start, _ASN1_OBJECT_IDENTIFIER)
     if _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_SHA1_WITH_RSA_ENCRYPTION)
-        throw(ArgumentError("tls: SHA-1 X.509 certificate signatures are not supported"))
+        # SHA-1 is parsed (digest_bits = 160) but rejected later, only for
+        # signatures actually verified during chain building. This keeps SHA-1
+        # self-signed trust anchors usable (their self-signature is never
+        # verified), matching OpenSSL and MbedTLS.
+        _tls_require_algorithm_identifier_null_or_absent(bytes, pos, value_end)
+        return _TLSSignatureVerifySpec(UInt16(160), false, false)
     elseif _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_SHA224_WITH_RSA_ENCRYPTION)
         _tls_require_algorithm_identifier_null_or_absent(bytes, pos, value_end)
         return _TLSSignatureVerifySpec(UInt16(224), false, false)
@@ -518,7 +523,8 @@ function _tls_parse_certificate_signature_spec(bytes::AbstractVector{UInt8}, val
         _tls_require_algorithm_identifier_null_or_absent(bytes, pos, value_end)
         return _TLSSignatureVerifySpec(UInt16(512), false, false)
     elseif _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_ECDSA_WITH_SHA1)
-        throw(ArgumentError("tls: SHA-1 X.509 certificate signatures are not supported"))
+        pos > value_end || throw(ArgumentError("tls: malformed X.509 ECDSA signature parameters"))
+        return _TLSSignatureVerifySpec(UInt16(160), false, false)
     elseif _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_ECDSA_WITH_SHA224)
         pos > value_end || throw(ArgumentError("tls: malformed X.509 ECDSA signature parameters"))
         return _TLSSignatureVerifySpec(UInt16(224), false, false)

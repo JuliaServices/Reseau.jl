@@ -185,7 +185,11 @@ end
         ] in cert.ip_addresses
     end
 
-    @testset "SHA-1 X.509 certificate signatures are rejected during parsing" begin
+    @testset "SHA-1 X.509 signatures parse but are rejected at verification" begin
+        # SHA-1 signature algorithms now parse (digest_bits = 160). They are
+        # refused where the signature is actually verified, not at parse time, so
+        # a SHA-1 self-signed trust anchor (whose self-signature is never verified)
+        # stays usable — matching OpenSSL and MbedTLS.
         sha1_rsa = UInt8[
             0x06, 0x09,
             0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x05,
@@ -195,8 +199,8 @@ end
             0x06, 0x07,
             0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x01,
         ]
-        @test_throws ArgumentError TLX._tls_parse_certificate_signature_spec(sha1_rsa, 1, length(sha1_rsa))
-        @test_throws ArgumentError TLX._tls_parse_certificate_signature_spec(sha1_ecdsa, 1, length(sha1_ecdsa))
+        @test TLX._tls_parse_certificate_signature_spec(sha1_rsa, 1, length(sha1_rsa)).digest_bits == 160
+        @test TLX._tls_parse_certificate_signature_spec(sha1_ecdsa, 1, length(sha1_ecdsa)).digest_bits == 160
     end
 
     @testset "Go-style hostname matching helpers" begin
@@ -302,6 +306,12 @@ end
         @test TLX._tls_verify_certificate_signature(rsa_cert, rsa_ca)
         @test TLX._tls_verify_certificate_signature(ecdsa_cert, ecdsa_cert)
         @test TLX._tls_verify_certificate_signature(rsa_ca, rsa_ca)
+
+        # A SHA-1 (digest_bits == 160) signature is refused when actually verified,
+        # even though the certificate parses fine.
+        sha1_signed = _tls_copy_cert(rsa_cert;
+            signature_verify_spec = TLX._TLSSignatureVerifySpec(UInt16(160), false, false))
+        @test TLX._tls_verify_certificate_signature(sha1_signed, rsa_ca) == false
 
         max_modulus = vcat(UInt8[0x80], zeros(UInt8, 1023))
         oversized_modulus = vcat(UInt8[0x01], zeros(UInt8, 1024))

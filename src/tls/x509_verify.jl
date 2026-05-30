@@ -188,6 +188,11 @@ end
 # intermediates/roots that satisfy issuer linkage, CA constraints, time
 # validity, and signature checks until it finds a trust anchor.
 function _tls_verify_certificate_signature(child::_TLSCertificateInfo, parent::_TLSCertificateInfo)::Bool
+    # Reject SHA-1 (digest_bits == 160) for signatures we actually verify in the
+    # chain. A self-signed root's own signature is never verified (see
+    # `_tls_build_chain_to_trust_anchor!`), so SHA-1 trust anchors stay usable —
+    # matching OpenSSL and MbedTLS, which apply the policy only to verified signatures.
+    child.signature_verify_spec.digest_bits == 160 && return false
     return _openssl_verify_signature_with_spec(parent.public_key, child.signature_verify_spec, child.tbs_der, child.signature)
 end
 
@@ -534,7 +539,7 @@ function _tls_verify_peer_certificate_chain!(
         end
     catch ex
         ex isa _TLSAlertError && rethrow()
-        _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: malformed X.509 certificate")
+        _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: malformed X.509 certificate ($(sprint(showerror, ex)))")
     end
     leaf = parsed[1]
     now_s = Int64(floor(time()))
@@ -588,7 +593,7 @@ function _tls_verify_certificate_chain(
             _tls_parse_der_certificate_info(certificates[1])
         catch ex
             ex isa _TLSAlertError && rethrow()
-            _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: malformed X.509 certificate")
+            _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: malformed X.509 certificate ($(sprint(showerror, ex)))")
         end
     end
     verify_hostname && isempty(peer_name) &&
@@ -657,7 +662,7 @@ function _tls13_check_x509_peer_name!(cert_der::AbstractVector{UInt8}, peer_name
         _tls_parse_der_certificate_info(cert_der)
     catch ex
         ex isa _TLSAlertError && rethrow()
-        _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: malformed X.509 certificate")
+        _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: malformed X.509 certificate ($(sprint(showerror, ex)))")
     end
     _tls_verify_certificate_peer_name!(cert_info, peer_name)
     return nothing
