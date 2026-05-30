@@ -24,7 +24,12 @@ const SockLen = @static Sys.iswindows() ? Cint : UInt32
 
 const AF_UNIX = Cint(1)
 const AF_INET = Cint(2)
-const AF_INET6 = @static Sys.iswindows() ? Cint(23) : Sys.islinux() ? Cint(10) : Cint(30)
+const AF_INET6 = @static Sys.iswindows() ? Cint(23) :
+                         Sys.islinux()   ? Cint(10) :
+                         Sys.isapple()   ? Cint(30) :
+                         Sys.isfreebsd() || Sys.isdragonfly() ? Cint(28) :
+                         Sys.isopenbsd() || Sys.isnetbsd()    ? Cint(24) :
+                         Cint(10)  # an error might be more appropriate here
 
 const SOCK_STREAM = Cint(1)
 const SOCK_DGRAM = Cint(2)
@@ -41,9 +46,9 @@ const SO_REUSEADDR = @static Sys.islinux() ? Cint(0x0002) : Cint(0x0004)
 const SO_KEEPALIVE = @static Sys.islinux() ? Cint(0x0009) : Cint(0x0008)
 const TCP_NODELAY = Cint(0x01)
 
-@static if Sys.isapple()
+@static if Sys.isbsd()
     """
-    Darwin-compatible `sockaddr_in` for IPv4 operations.
+    BSD-compatible `sockaddr_in` for IPv4 operations.
     """
     struct SockAddrIn
         sin_len::UInt8
@@ -54,7 +59,7 @@ const TCP_NODELAY = Cint(0x01)
     end
 
     """
-    Darwin-compatible `sockaddr_in6` for IPv6 operations.
+    BSD-compatible `sockaddr_in6` for IPv6 operations.
     """
     struct SockAddrIn6
         sin6_len::UInt8
@@ -191,7 +196,7 @@ Throws `ArgumentError` if the port is out of range.
 """
 function sockaddr_in(ip::NTuple{4, UInt8}, port::Integer)::SockAddrIn
     p = _hton16(_port_u16(port))
-    @static if Sys.isapple()
+    @static if Sys.isbsd()
         return SockAddrIn(
             UInt8(sizeof(SockAddrIn)),
             UInt8(AF_INET),
@@ -251,7 +256,7 @@ function sockaddr_in6(
     (flowinfo < 0 || flowinfo > typemax(UInt32)) && throw(ArgumentError("flowinfo must be in [0, 2^32-1]"))
     (scope_id < 0 || scope_id > typemax(UInt32)) && throw(ArgumentError("scope_id must be in [0, 2^32-1]"))
     p = _hton16(_port_u16(port))
-    @static if Sys.isapple()
+    @static if Sys.isbsd()
         return SockAddrIn6(
             UInt8(sizeof(SockAddrIn6)),
             UInt8(AF_INET6),
@@ -375,7 +380,7 @@ end
 
 @static if Sys.isapple()
 include("socket_ops/darwin.jl")
-elseif Sys.islinux()
+elseif Sys.islinux() || Sys.isbsd()
 include("socket_ops/linux.jl")
 elseif Sys.iswindows()
 include("socket_ops/windows.jl")

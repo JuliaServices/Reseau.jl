@@ -1,8 +1,8 @@
-@static if Sys.isapple()
+@static if Sys.isbsd()
 
 const EVFILT_READ = Int16(-1)
 const EVFILT_WRITE = Int16(-2)
-const EVFILT_USER = Int16(-10)
+const EVFILT_USER = Sys.isfreebsd() ? Int16(-11) : Int16(-10)
 const EV_ADD = UInt16(0x0001)
 const EV_DELETE = UInt16(0x0002)
 const EV_ENABLE = UInt16(0x0004)
@@ -17,7 +17,7 @@ const WAKE_IDENT = UInt(1)
 const MAX_KQUEUE_EVENTS = 64
 
 """
-Mirror of Darwin's `struct kevent`.
+Mirror of `struct kevent`, excluding extensions present on some platforms.
 """
 struct Kevent
     ident::UInt

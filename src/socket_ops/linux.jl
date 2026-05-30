@@ -1,4 +1,4 @@
-# Linux socket syscall bindings used by `SocketOps`.
+# Linux and BSD socket syscall bindings used by `SocketOps`.
 #
 # The higher layers assume these invariants:
 # - newly created sockets are non-blocking and close-on-exec before they escape
@@ -6,7 +6,7 @@
 # - connect/accept can surface raw errno so the poll layer can finish the state
 #   machine after readiness notifications
 #
-# Linux gives us the best-case primitives (`SOCK_NONBLOCK`, `SOCK_CLOEXEC`,
+# Linux and FreeBSD give us the best-case primitives (`SOCK_NONBLOCK`, `SOCK_CLOEXEC`,
 # `accept4`) so this backend mostly tries to take the atomic fast path first and
 # only falls back to older-kernel behavior when required.
 const _F_GETFD = Cint(1)
@@ -14,16 +14,23 @@ const _F_SETFD = Cint(2)
 const _F_GETFL = Cint(3)
 const _F_SETFL = Cint(4)
 const _FD_CLOEXEC = Cint(0x0001)
-const _O_NONBLOCK = Cint(0x0800)
-const _SOCK_CLOEXEC = Cint(0x80000)
-const _SOCK_NONBLOCK = Cint(0x0800)
+const _O_NONBLOCK = Sys.isfreebsd() ? Cint(0x0004) : Cint(0x0800)
+const _SOCK_CLOEXEC = Sys.isfreebsd() ? Cint(0x10000000) : Cint(0x80000)
+const _SOCK_NONBLOCK = Sys.isfreebsd() ? Cint(0x20000000) : Cint(0x0800)
 const _ACCEPT_ADDRBUF_LEN = 128
 const _ACCEPT4_UNSET = Int32(0)
 const _ACCEPT4_ENABLED = Int32(1)
 const _ACCEPT4_DISABLED = Int32(2)
 
-struct _SockAddrHeader
-    sa_family::UInt16
+if Sys.islinux()
+    struct _SockAddrHeader
+        sa_family::UInt16
+    end
+else
+    struct _SockAddrHeader
+        sa_len::UInt8
+        sa_family::UInt8
+    end
 end
 
 const _accept4_state = Ref{Int32}(_ACCEPT4_UNSET)
