@@ -838,6 +838,7 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
     end
     if ok == 0
         err = _win_get_last_error()
+        err == UInt32(0) && return Int32(0)
         err == _WAIT_TIMEOUT && return Int32(0)
         mapped = _map_win_errno(err)
         if !(@atomic :acquire state.running)
