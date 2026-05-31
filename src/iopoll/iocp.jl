@@ -547,11 +547,28 @@ function _finish_iocp_mode_with_bytes!(registration::Registration, mode::PollMod
     bytes, result = _wsagetoverlappedresult_bytes(registration.fd, op::IocpOp)
     lock(state.lock)
     try
-        _clear_iocp_op!(op)
+        if result != Int32(Base.Libc.EAGAIN)
+            _clear_iocp_op!(op)
+        end
     finally
         unlock(state.lock)
     end
     return bytes, result
+end
+
+function _iocp_mode_active(registration::Registration, mode::PollMode.T)::Bool
+    isassigned(POLLER) || return false
+    state = POLLER[]
+    (@atomic :acquire state.running) || return false
+    lock(state.lock)
+    try
+        reg = _lookup_iocp_registration(registration)
+        reg === nothing && return false
+        op = _iocp_op_for_mode(reg, mode)
+        return @atomic :acquire op.active
+    finally
+        unlock(state.lock)
+    end
 end
 
 function _iocp_cancel_mode!(registration::Registration, mode::PollMode.T)::Bool
@@ -917,6 +934,12 @@ end
 function _iocp_finish_write!(registration::Registration)::Tuple{UInt32, Int32}
     _ = registration
     return UInt32(0), Int32(Base.Libc.ENOSYS)
+end
+
+function _iocp_mode_active(registration::Registration, mode::PollMode.T)::Bool
+    _ = registration
+    _ = mode
+    return false
 end
 
 function _iocp_submit_connect!(registration::Registration, addrbuf::Vector{UInt8}, addrlen::Int32)::Int32

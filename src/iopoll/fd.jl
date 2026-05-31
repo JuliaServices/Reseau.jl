@@ -429,6 +429,7 @@ function _wait_iocp_completion!(registration::Registration, pd::PollState, mode:
         reason = pollwait!(waiter)
         err = _check_error(pd, mode)
         if reason == PollWakeReason.READY
+            _iocp_mode_active(registration, mode) && continue
             _convert_poll_error!(err, is_file)
             return nothing
         end
@@ -556,8 +557,15 @@ function connect!(fd::FD, addrbuf::Vector{UInt8}, addrlen::Int32)
     try
         preparewrite(fd.pd, fd.is_file)
         registration = _poll_registration(fd.pd)
-        errno = _iocp_submit_connect!(registration, addrbuf, addrlen)
-        errno == Int32(0) || throw(SystemError("connectex", Int(errno)))
+        while true
+            errno = _iocp_submit_connect!(registration, addrbuf, addrlen)
+            errno == Int32(0) && break
+            if errno == Int32(Base.Libc.EALREADY)
+                waitwrite(fd.pd, fd.is_file)
+                continue
+            end
+            throw(SystemError("connectex", Int(errno)))
+        end
         try
             _wait_iocp_completion!(registration, fd.pd, PollMode.WRITE, fd.is_file)
         catch err
@@ -595,6 +603,10 @@ function accept!(fd::FD, family::Cint, sotype::Cint)::Tuple{Cint, SocketOps.Acce
                 errno = _iocp_submit_accept!(registration, child_sysfd, addrbuf)
                 if errno != Int32(0)
                     SocketOps.close_socket_nothrow(child_sysfd)
+                    if errno == Int32(Base.Libc.EALREADY)
+                        waitread(fd.pd, fd.is_file)
+                        continue
+                    end
                     throw(SystemError("acceptex", Int(errno)))
                 end
                 try
