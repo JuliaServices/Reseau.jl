@@ -296,6 +296,88 @@ end
                 IP.shutdown!()
             end
         end
+        @testset "repeated half-close requests observe close-delimited responses" begin
+            IP.shutdown!()
+            listener = nothing
+            server_task = nothing
+            iterations = Sys.iswindows() ? 120 : 20
+            request = collect(codeunits("HEAD /head HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+            response = collect(codeunits("HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n"))
+            try
+                listener = NC.listen(NC.loopback_addr(0); backlog = 32)
+                laddr = NC.addr(listener)::NC.SocketAddrV4
+                server_task = errormonitor(@async begin
+                    for _ in 1:iterations
+                        server = NC.accept(listener)
+                        try
+                            raw_request = _readavailable_until_quiet(server; timeout_s = 2.0, quiet_timeout_s = 0.02)
+                            @test raw_request == request
+                            @test write(server, response) == length(response)
+                        finally
+                            _close_quiet!(server)
+                        end
+                    end
+                    return nothing
+                end)
+                for _ in 1:iterations
+                    client = nothing
+                    try
+                        client = NC.connect(NC.loopback_addr(Int(laddr.port)))
+                        @test write(client, request) == length(request)
+                        closewrite(client)
+                        @test _readavailable_until_quiet(client; timeout_s = 2.0, quiet_timeout_s = 0.02) == response
+                    finally
+                        _close_quiet!(client)
+                    end
+                end
+                @test _nc_wait_task_done(server_task, 2.0) != :timed_out
+                wait(server_task)
+            finally
+                _close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
+        @testset "repeated fixed-body requests observe responses before close" begin
+            IP.shutdown!()
+            listener = nothing
+            server_task = nothing
+            iterations = Sys.iswindows() ? 120 : 20
+            request = collect(codeunits("POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nConnection: close\r\n\r\necho"))
+            response = collect(codeunits("HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\necho"))
+            try
+                listener = NC.listen(NC.loopback_addr(0); backlog = 32)
+                laddr = NC.addr(listener)::NC.SocketAddrV4
+                server_task = errormonitor(@async begin
+                    for _ in 1:iterations
+                        server = NC.accept(listener)
+                        try
+                            buf = Vector{UInt8}(undef, length(request))
+                            @test readbytes!(server, buf, length(buf); all = true) == length(request)
+                            @test buf == request
+                            @test write(server, response) == length(response)
+                        finally
+                            _close_quiet!(server)
+                        end
+                    end
+                    return nothing
+                end)
+                for _ in 1:iterations
+                    client = nothing
+                    try
+                        client = NC.connect(NC.loopback_addr(Int(laddr.port)))
+                        @test write(client, request) == length(request)
+                        @test _readavailable_until_quiet(client; timeout_s = 2.0, quiet_timeout_s = 0.02) == response
+                    finally
+                        _close_quiet!(client)
+                    end
+                end
+                @test _nc_wait_task_done(server_task, 2.0) != :timed_out
+                wait(server_task)
+            finally
+                _close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
         @testset "show methods summarize TCP endpoints" begin
             IP.shutdown!()
             listener = nothing
