@@ -23,6 +23,29 @@ function _close_quiet!(x)
     return nothing
 end
 
+function _readavailable_until_quiet(conn::NC.Conn; timeout_s::Float64 = 2.0, quiet_timeout_s::Float64 = 0.1)::Vector{UInt8}
+    out = UInt8[]
+    deadline_ns = Int64(time_ns()) + round(Int64, timeout_s * 1.0e9)
+    saw_bytes = false
+    while true
+        remaining_ns = deadline_ns - Int64(time_ns())
+        remaining_ns <= 0 && break
+        read_timeout_s = saw_bytes ? min(quiet_timeout_s, remaining_ns / 1.0e9) : (remaining_ns / 1.0e9)
+        NC.set_read_deadline!(conn, Int64(time_ns()) + round(Int64, read_timeout_s * 1.0e9))
+        chunk = try
+            readavailable(conn)
+        catch err
+            ex = err::Exception
+            (ex isa IP.DeadlineExceededError || ex isa EOFError) || rethrow(ex)
+            break
+        end
+        isempty(chunk) && break
+        append!(out, chunk)
+        saw_bytes = true
+    end
+    return out
+end
+
 @testset "TCP phase 4" begin
         @test NC.Conn <: IO
         @test NC.DeadlineExceededError === IP.DeadlineExceededError
@@ -191,6 +214,47 @@ end
                 buf = Vector{UInt8}(undef, length(payload))
                 @test readbytes!(client, buf, length(buf); all = true) == length(payload)
                 @test buf == payload
+                @test _nc_wait_task_done(server_task, 2.0) != :timed_out
+                wait(server_task)
+            finally
+                _close_quiet!(client)
+                _close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
+        @testset "readavailable observes response after peer half-close" begin
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server_task = nothing
+            try
+                listener = NC.listen(NC.loopback_addr(0); backlog = 8)
+                laddr = NC.addr(listener)::NC.SocketAddrV4
+                request = collect(codeunits("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+                response_parts = [
+                    collect(codeunits("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")),
+                    collect(codeunits("5\r\nhello\r\n")),
+                    collect(codeunits("0\r\nX-Trailer: ok\r\n\r\n")),
+                ]
+                expected = reduce(vcat, response_parts)
+                server_task = errormonitor(@async begin
+                    server = NC.accept(listener)
+                    try
+                        buf = Vector{UInt8}(undef, length(request))
+                        @test readbytes!(server, buf, length(buf); all = true) == length(request)
+                        @test buf == request
+                        for part in response_parts
+                            @test write(server, part) == length(part)
+                        end
+                    finally
+                        _close_quiet!(server)
+                    end
+                    return nothing
+                end)
+                client = NC.connect(NC.loopback_addr(Int(laddr.port)))
+                @test write(client, request) == length(request)
+                closewrite(client)
+                @test _readavailable_until_quiet(client; timeout_s = 2.0, quiet_timeout_s = 0.1) == expected
                 @test _nc_wait_task_done(server_task, 2.0) != :timed_out
                 wait(server_task)
             finally
