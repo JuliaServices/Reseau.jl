@@ -8,13 +8,13 @@ const _INVALID_SOCKET = UInt(typemax(UInt))
 const _INFINITE = UInt32(0xffff_ffff)
 const _WAIT_TIMEOUT = UInt32(0x00000102)
 const _ERROR_IO_PENDING = Int32(997)
-const _ERROR_OPERATION_ABORTED = Int32(995)
 const _ERROR_NOT_FOUND = UInt32(1168)
 const _ERROR_INVALID_HANDLE = UInt32(6)
 const _ERROR_INVALID_PARAMETER = UInt32(87)
 const _ERROR_NOT_ENOUGH_MEMORY = UInt32(8)
 const _ERROR_NETNAME_DELETED = UInt32(64)
 const _ERROR_BROKEN_PIPE = UInt32(109)
+const _ERROR_IO_INCOMPLETE = UInt32(996)
 const _SIO_GET_EXTENSION_FUNCTION_POINTER = UInt32(0xC8000006)
 const _SOL_SOCKET = Cint(0xffff)
 const _SO_PROTOCOL_INFOW = Cint(0x2005)
@@ -28,21 +28,9 @@ const _IPPROTO_TCP = Cint(6)
 const _WSAEWOULDBLOCK = Int32(10035)
 const _WSAEINPROGRESS = Int32(10036)
 const _WSAEALREADY = Int32(10037)
-const _WSAEADDRNOTAVAIL = Int32(10049)
-const _WSAENETUNREACH = Int32(10051)
-const _WSAENETRESET = Int32(10052)
-const _WSAECONNABORTED = Int32(10053)
-const _WSAECONNRESET = Int32(10054)
-const _WSAEISCONN = Int32(10056)
 const _WSAENOTCONN = Int32(10057)
-const _WSAESHUTDOWN = Int32(10058)
-const _WSAETIMEDOUT = Int32(10060)
-const _WSAECONNREFUSED = Int32(10061)
-const _WSAEHOSTUNREACH = Int32(10065)
 const _MAX_IOCP_EVENTS = 128
 const _WAKE_KEY = typemax(UInt)
-const _ERRNO_ECANCELED = @static isdefined(Base.Libc, :ECANCELED) ? Int32(getfield(Base.Libc, :ECANCELED)) : Int32(Base.Libc.EINTR)
-const _ERRNO_ESHUTDOWN = @static isdefined(Base.Libc, :ESHUTDOWN) ? Int32(getfield(Base.Libc, :ESHUTDOWN)) : Int32(Base.Libc.ENOTCONN)
 const _CONNECTEX_LOCK = ReentrantLock()
 const _CONNECTEX_PTR = Ref{Ptr{Cvoid}}(C_NULL)
 
@@ -182,28 +170,22 @@ end
     err == _ERROR_NOT_ENOUGH_MEMORY && return Int32(Base.Libc.ENOMEM)
     err == _ERROR_NETNAME_DELETED && return Int32(Base.Libc.ECONNRESET)
     err == _ERROR_BROKEN_PIPE && return Int32(Base.Libc.EPIPE)
+    err == _ERROR_IO_INCOMPLETE && return Int32(Base.Libc.EAGAIN)
     return Int32(Base.Libc.EIO)
 end
 
 @inline function _map_overlapped_errno(err::Int32)::Int32
     err == Int32(0) && return Int32(0)
-    err == _ERROR_OPERATION_ABORTED && return _ERRNO_ECANCELED
-    err == _ERROR_IO_PENDING && return Int32(Base.Libc.EINPROGRESS)
-    err == _WSAEWOULDBLOCK && return Int32(Base.Libc.EAGAIN)
-    err == _WSAEINPROGRESS && return Int32(Base.Libc.EINPROGRESS)
-    err == _WSAEALREADY && return Int32(Base.Libc.EALREADY)
-    err == _WSAEADDRNOTAVAIL && return Int32(Base.Libc.EADDRNOTAVAIL)
-    err == _WSAENETUNREACH && return Int32(Base.Libc.ENETUNREACH)
-    err == _WSAENETRESET && return Int32(Base.Libc.ENETRESET)
-    err == _WSAECONNABORTED && return Int32(Base.Libc.ECONNABORTED)
-    err == _WSAECONNRESET && return Int32(Base.Libc.ECONNRESET)
-    err == _WSAEISCONN && return Int32(Base.Libc.EISCONN)
-    err == _WSAENOTCONN && return Int32(Base.Libc.ENOTCONN)
-    err == _WSAESHUTDOWN && return _ERRNO_ESHUTDOWN
-    err == _WSAETIMEDOUT && return Int32(Base.Libc.ETIMEDOUT)
-    err == _WSAECONNREFUSED && return Int32(Base.Libc.ECONNREFUSED)
-    err == _WSAEHOSTUNREACH && return Int32(Base.Libc.EHOSTUNREACH)
+    mapped = SocketOps._map_wsa_errno(err)
+    mapped != Int32(Base.Libc.EIO) && return mapped
     return _map_win_errno(UInt32(err))
+end
+
+@inline function _trace_iocp_errno(context::AbstractString, raw::Int32, mapped::Int32)
+    if mapped == Int32(Base.Libc.EIO) && get(ENV, "RESEAU_IOCP_TRACE_ERRORS", "0") == "1"
+        @warn "unmapped Windows IOCP socket error" context raw_error=raw mapped_errno=mapped
+    end
+    return nothing
 end
 
 function _new_iocp_registration(fd::Cint, token::UInt64)::IocpRegistration
@@ -276,7 +258,10 @@ end
         )::Int32
     end
     ok != 0 && return bytes_ref[], Int32(0)
-    return UInt32(0), _map_overlapped_errno(_wsa_get_last_error())
+    raw = _wsa_get_last_error()
+    mapped = _map_overlapped_errno(raw)
+    _trace_iocp_errno("WSAGetOverlappedResult", raw, mapped)
+    return UInt32(0), mapped
 end
 
 @inline function _wsagetoverlappedresult(fd::Cint, op::IocpOp)::Int32
@@ -495,7 +480,9 @@ function _submit_iocp_op!(
         end
         @atomic :release op.active = false
         _clear_iocp_op!(op)
-        return _map_overlapped_errno(err)
+        mapped = _map_overlapped_errno(err)
+        _trace_iocp_errno(op.kind == IocpOpKind.READ ? "WSARecv" : "WSASend", err, mapped)
+        return mapped
     end
     if rc != 0
         reg.wait_on_success && return Int32(0)
@@ -509,7 +496,9 @@ function _submit_iocp_op!(
     end
     @atomic :release op.active = false
     _clear_iocp_op!(op)
-    return _map_overlapped_errno(err)
+    mapped = _map_overlapped_errno(err)
+    _trace_iocp_errno(op.kind == IocpOpKind.CONNECT ? "ConnectEx" : "AcceptEx", err, mapped)
+    return mapped
 end
 
 function _iocp_op_for_mode(reg::IocpRegistration, mode::PollMode.T)::IocpOp
