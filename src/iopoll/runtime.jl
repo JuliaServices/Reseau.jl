@@ -388,7 +388,6 @@ function _poller_thread_main!(state::Poller)
         if errno == Int32(Base.Libc.EINTR)
             continue
         end
-        @error "IOPoll backend poll failed; stopping poller" errno
         _notify_all_waiters!(state)
         @atomic :release state.running = false
     end

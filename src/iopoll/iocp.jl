@@ -181,13 +181,6 @@ end
     return _map_win_errno(UInt32(err))
 end
 
-@inline function _trace_iocp_errno(context::AbstractString, raw::Int32, mapped::Int32)
-    if get(ENV, "RESEAU_IOCP_TRACE_ERRORS", "0") == "1"
-        @warn "Windows IOCP socket error" context raw_error=raw mapped_errno=mapped
-    end
-    return nothing
-end
-
 function _new_iocp_registration(fd::Cint, token::UInt64)::IocpRegistration
     read_op = IocpOp(Ref(_ZERO_OVERLAPPED), PollMode.READ, token, IocpOpKind.PROBE_READ, nothing, nothing, false)
     write_op = IocpOp(Ref(_ZERO_OVERLAPPED), PollMode.WRITE, token, IocpOpKind.PROBE_WRITE, nothing, nothing, false)
@@ -253,9 +246,7 @@ end
     end
     ok != 0 && return bytes_ref[], Int32(0)
     raw = _wsa_get_last_error()
-    mapped = _map_overlapped_errno(raw)
-    _trace_iocp_errno("WSAGetOverlappedResult", raw, mapped)
-    return UInt32(0), mapped
+    return UInt32(0), _map_overlapped_errno(raw)
 end
 
 @inline function _wsagetoverlappedresult(fd::Cint, op::IocpOp)::Int32
@@ -346,11 +337,7 @@ function _submit_iocp_op!(
         request::IocpRequest=nothing,
     )::Int32
     _, ok = @atomicreplace(op.active, false => true)
-    if !ok
-        attempted = kind === nothing ? op.kind : kind
-        _trace_iocp_errno("active $(op.kind) while submitting $(attempted)", Int32(Base.Libc.EALREADY), Int32(Base.Libc.EALREADY))
-        return Int32(Base.Libc.EALREADY)
-    end
+    ok || return Int32(Base.Libc.EALREADY)
     if kind !== nothing
         op.kind = kind::IocpOpKind.T
         op.request = request
@@ -487,11 +474,8 @@ function _submit_iocp_op!(
             return Int32(0)
         end
         @atomic :release op.active = false
-        context = op.kind == IocpOpKind.READ ? "WSARecv" : "WSASend"
         _clear_iocp_op!(op)
-        mapped = _map_overlapped_errno(err)
-        _trace_iocp_errno(context, err, mapped)
-        return mapped
+        return _map_overlapped_errno(err)
     end
     if rc != 0
         reg.wait_on_success && return Int32(0)
@@ -504,11 +488,8 @@ function _submit_iocp_op!(
         return Int32(0)
     end
     @atomic :release op.active = false
-    context = op.kind == IocpOpKind.CONNECT ? "ConnectEx" : "AcceptEx"
     _clear_iocp_op!(op)
-    mapped = _map_overlapped_errno(err)
-    _trace_iocp_errno(context, err, mapped)
-    return mapped
+    return _map_overlapped_errno(err)
 end
 
 function _iocp_op_for_mode(reg::IocpRegistration, mode::PollMode.T)::IocpOp
@@ -842,13 +823,8 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
         err = _win_get_last_error()
         err == UInt32(0) && return Int32(0)
         err == _WAIT_TIMEOUT && return Int32(0)
-        mapped = _map_win_errno(err)
-        if !(@atomic :acquire state.running)
-            _trace_iocp_errno("GetQueuedCompletionStatusEx after shutdown", Int32(err), mapped)
-            return Int32(0)
-        end
-        _trace_iocp_errno("GetQueuedCompletionStatusEx", Int32(err), mapped)
-        return mapped
+        !(@atomic :acquire state.running) && return Int32(0)
+        return _map_win_errno(err)
     end
     n = Int(removed[])
     for i in 1:n

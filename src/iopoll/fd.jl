@@ -314,45 +314,9 @@ function pollable(pd::PollState)::Bool
     return @atomic :acquire pd.pollable
 end
 
-function _trace_missing_registration(pd::PollState)::Nothing
-    get(ENV, "RESEAU_IOPOLL_TRACE_MISSING_REGISTRATION", "0") == "1" || return nothing
-    pollable_state = @atomic :acquire pd.pollable
-    closing_state = @atomic :acquire pd.closing
-    event_err_state = @atomic :acquire pd.event_err
-    running_state = false
-    fd_match = false
-    token_match = false
-    fd_token = UInt64(0)
-    token_fd = Cint(-1)
-    if isassigned(POLLER)
-        state = POLLER[]
-        running_state = @atomic :acquire state.running
-        lock(state.lock)
-        try
-            fd_registration = get(state.registrations, pd.sysfd, nothing)
-            if fd_registration !== nothing
-                fd_match = true
-                fd_token = (fd_registration::Registration).token
-            end
-            token_registration = get(state.registrations_by_token, pd.token, nothing)
-            if token_registration !== nothing
-                token_match = true
-                token_fd = (token_registration::Registration).fd
-            end
-        finally
-            unlock(state.lock)
-        end
-    end
-    @warn "missing active poll registration" sysfd=pd.sysfd token=pd.token pollable=pollable_state closing=closing_state event_err=event_err_state poller_running=running_state fd_match token_match fd_token token_fd
-    return nothing
-end
-
 @inline function _poll_registration(pd::PollState)::Registration
     registration = current_registration(pd)
-    if registration === nothing
-        _trace_missing_registration(pd)
-        throw(SystemError("iopoll wait", Int(Base.Libc.EBADF)))
-    end
+    registration === nothing && throw(SystemError("iopoll wait", Int(Base.Libc.EBADF)))
     return registration
 end
 
