@@ -839,7 +839,13 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
     if ok == 0
         err = _win_get_last_error()
         err == _WAIT_TIMEOUT && return Int32(0)
-        return _map_win_errno(err)
+        mapped = _map_win_errno(err)
+        if !(@atomic :acquire state.running)
+            _trace_iocp_errno("GetQueuedCompletionStatusEx after shutdown", Int32(err), mapped)
+            return Int32(0)
+        end
+        _trace_iocp_errno("GetQueuedCompletionStatusEx", Int32(err), mapped)
+        return mapped
     end
     n = Int(removed[])
     for i in 1:n
