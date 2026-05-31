@@ -670,8 +670,15 @@ function _read_ptr_some!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
             prepareread(fd.pd, fd.is_file)
             registration = _poll_registration(fd.pd)
             n = UInt32(min(nbytes, Int(typemax(UInt32))))
-            errno = _iocp_submit_read!(registration, p, n)
-            errno == Int32(0) || throw(SystemError("read", Int(errno)))
+            while true
+                errno = _iocp_submit_read!(registration, p, n)
+                errno == Int32(0) && break
+                if errno == Int32(Base.Libc.EALREADY)
+                    waitread(fd.pd, fd.is_file)
+                    continue
+                end
+                throw(SystemError("read", Int(errno)))
+            end
             try
                 _wait_iocp_completion!(registration, fd.pd, PollMode.READ, fd.is_file)
             catch err
@@ -755,8 +762,15 @@ function _write_ptr!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
                 preparewrite(fd.pd, fd.is_file)
                 registration = _poll_registration(fd.pd)
                 chunk = UInt32(min(nbytes - nn, Int(typemax(UInt32))))
-                errno = _iocp_submit_write!(registration, p + nn, chunk)
-                errno == Int32(0) || throw(SystemError("write", Int(errno)))
+                while true
+                    errno = _iocp_submit_write!(registration, p + nn, chunk)
+                    errno == Int32(0) && break
+                    if errno == Int32(Base.Libc.EALREADY)
+                        waitwrite(fd.pd, fd.is_file)
+                        continue
+                    end
+                    throw(SystemError("write", Int(errno)))
+                end
                 try
                     _wait_iocp_completion!(registration, fd.pd, PollMode.WRITE, fd.is_file)
                 catch err

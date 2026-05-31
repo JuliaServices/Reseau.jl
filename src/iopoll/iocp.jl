@@ -208,12 +208,6 @@ end
     return nothing
 end
 
-@inline function _set_data_io_kind!(op::IocpOp)
-    op.kind = op.mode == PollMode.READ ? IocpOpKind.READ : IocpOpKind.WRITE
-    op.request = nothing
-    return nothing
-end
-
 function _load_connectex_ptr(fd::Cint)::Ptr{Cvoid}
     ptr = _CONNECTEX_PTR[]
     ptr != C_NULL && return ptr
@@ -348,9 +342,19 @@ function _submit_iocp_op!(
         op::IocpOp;
         ptr::Ptr{UInt8}=Ptr{UInt8}(C_NULL),
         nbytes::UInt32=UInt32(0),
+        kind::Union{Nothing, IocpOpKind.T}=nothing,
+        request::IocpRequest=nothing,
     )::Int32
     _, ok = @atomicreplace(op.active, false => true)
-    ok || return Int32(Base.Libc.EALREADY)
+    if !ok
+        attempted = kind === nothing ? op.kind : kind
+        _trace_iocp_errno("active $(op.kind) while submitting $(attempted)", Int32(Base.Libc.EALREADY), Int32(Base.Libc.EALREADY))
+        return Int32(Base.Libc.EALREADY)
+    end
+    if kind !== nothing
+        op.kind = kind::IocpOpKind.T
+        op.request = request
+    end
     _reset_overlapped!(op)
     rc = Cint(-1)
     if op.kind == IocpOpKind.PROBE_READ || op.kind == IocpOpKind.PROBE_WRITE
@@ -413,7 +417,11 @@ function _submit_iocp_op!(
         request = op.request
         request isa IocpConnectRequest || throw(ArgumentError("missing ConnectEx request"))
         connectex_ptr = _load_connectex_ptr(reg.fd)
-        connectex_ptr == C_NULL && return _map_overlapped_errno(_wsa_get_last_error())
+        if connectex_ptr == C_NULL
+            mapped = _map_overlapped_errno(_wsa_get_last_error())
+            _clear_iocp_op!(op)
+            return mapped
+        end
         bytes_ref = Ref{UInt32}(UInt32(0))
         addrbuf = request.addrbuf
         rc = GC.@preserve op addrbuf bytes_ref begin
@@ -572,9 +580,10 @@ function _iocp_submit_read!(registration::Registration, ptr::Ptr{UInt8}, nbytes:
         reg = _lookup_iocp_registration(registration)
         reg === nothing && return Int32(Base.Libc.EBADF)
         op = reg.read_op
-        _set_data_io_kind!(op)
-        errno = _submit_iocp_op!(registration, reg, op; ptr, nbytes)
-        errno != Int32(0) && _clear_iocp_op!(op)
+        errno = _submit_iocp_op!(registration, reg, op; ptr, nbytes, kind=IocpOpKind.READ)
+        if errno != Int32(0) && errno != Int32(Base.Libc.EALREADY)
+            _clear_iocp_op!(op)
+        end
     finally
         unlock(state.lock)
     end
@@ -595,9 +604,10 @@ function _iocp_submit_write!(registration::Registration, ptr::Ptr{UInt8}, nbytes
         reg = _lookup_iocp_registration(registration)
         reg === nothing && return Int32(Base.Libc.EBADF)
         op = reg.write_op
-        _set_data_io_kind!(op)
-        errno = _submit_iocp_op!(registration, reg, op; ptr, nbytes)
-        errno != Int32(0) && _clear_iocp_op!(op)
+        errno = _submit_iocp_op!(registration, reg, op; ptr, nbytes, kind=IocpOpKind.WRITE)
+        if errno != Int32(0) && errno != Int32(Base.Libc.EALREADY)
+            _clear_iocp_op!(op)
+        end
     finally
         unlock(state.lock)
     end
@@ -618,10 +628,11 @@ function _iocp_submit_connect!(registration::Registration, addrbuf::Vector{UInt8
         reg = _lookup_iocp_registration(registration)
         reg === nothing && return Int32(Base.Libc.EBADF)
         op = reg.write_op
-        op.kind = IocpOpKind.CONNECT
-        op.request = IocpConnectRequest(addrbuf, addrlen)
-        errno = _submit_iocp_op!(registration, reg, op)
-        errno != Int32(0) && _clear_iocp_op!(op)
+        request = IocpConnectRequest(addrbuf, addrlen)
+        errno = _submit_iocp_op!(registration, reg, op; kind=IocpOpKind.CONNECT, request=request)
+        if errno != Int32(0) && errno != Int32(Base.Libc.EALREADY)
+            _clear_iocp_op!(op)
+        end
     finally
         unlock(state.lock)
     end
@@ -642,10 +653,11 @@ function _iocp_submit_accept!(registration::Registration, acceptfd::Cint, addrbu
         reg = _lookup_iocp_registration(registration)
         reg === nothing && return Int32(Base.Libc.EBADF)
         op = reg.read_op
-        op.kind = IocpOpKind.ACCEPT
-        op.request = IocpAcceptRequest(acceptfd, addrbuf)
-        errno = _submit_iocp_op!(registration, reg, op)
-        errno != Int32(0) && _clear_iocp_op!(op)
+        request = IocpAcceptRequest(acceptfd, addrbuf)
+        errno = _submit_iocp_op!(registration, reg, op; kind=IocpOpKind.ACCEPT, request=request)
+        if errno != Int32(0) && errno != Int32(Base.Libc.EALREADY)
+            _clear_iocp_op!(op)
+        end
     finally
         unlock(state.lock)
     end
@@ -731,12 +743,10 @@ function _backend_arm_waiter!(state::Poller, registration::Registration, mode::P
     reg === nothing && return Int32(0)
     reg.token == registration.token || return Int32(0)
     if _mode_has_read(mode) && _mode_has_read(registration.mode)
-        _set_probe_kind!(reg.read_op)
-        _submit_iocp_op!(registration, reg, reg.read_op)
+        _submit_iocp_op!(registration, reg, reg.read_op; kind=IocpOpKind.PROBE_READ)
     end
     if _mode_has_write(mode) && _mode_has_write(registration.mode)
-        _set_probe_kind!(reg.write_op)
-        _submit_iocp_op!(registration, reg, reg.write_op)
+        _submit_iocp_op!(registration, reg, reg.write_op; kind=IocpOpKind.PROBE_WRITE)
     end
     return Int32(0)
 end
