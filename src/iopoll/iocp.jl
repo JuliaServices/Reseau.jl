@@ -217,6 +217,12 @@ end
     return nothing
 end
 
+@inline function _set_data_io_kind!(op::IocpOp)
+    op.kind = op.mode == PollMode.READ ? IocpOpKind.READ : IocpOpKind.WRITE
+    op.request = nothing
+    return nothing
+end
+
 function _load_connectex_ptr(fd::Cint)::Ptr{Cvoid}
     ptr = _CONNECTEX_PTR[]
     ptr != C_NULL && return ptr
@@ -248,7 +254,7 @@ function _load_connectex_ptr(fd::Cint)::Ptr{Cvoid}
     end
 end
 
-@inline function _wsagetoverlappedresult(fd::Cint, op::IocpOp)::Int32
+@inline function _wsagetoverlappedresult_bytes(fd::Cint, op::IocpOp)::Tuple{UInt32, Int32}
     bytes_ref = Ref{UInt32}(UInt32(0))
     flags_ref = Ref{UInt32}(UInt32(0))
     ok = GC.@preserve op bytes_ref flags_ref begin
@@ -260,8 +266,13 @@ end
             flags_ref::Ref{UInt32},
         )::Int32
     end
-    ok != 0 && return Int32(0)
-    return _map_overlapped_errno(_wsa_get_last_error())
+    ok != 0 && return bytes_ref[], Int32(0)
+    return UInt32(0), _map_overlapped_errno(_wsa_get_last_error())
+end
+
+@inline function _wsagetoverlappedresult(fd::Cint, op::IocpOp)::Int32
+    _, errno = _wsagetoverlappedresult_bytes(fd, op)
+    return errno
 end
 
 @inline function _clear_iocp_op!(op::IocpOp)
@@ -337,7 +348,13 @@ function _cancel_iocp_op!(reg::IocpRegistration, op::IocpOp)::Bool
     return true
 end
 
-function _submit_iocp_op!(registration::Registration, reg::IocpRegistration, op::IocpOp)::Int32
+function _submit_iocp_op!(
+        registration::Registration,
+        reg::IocpRegistration,
+        op::IocpOp;
+        ptr::Ptr{UInt8}=Ptr{UInt8}(C_NULL),
+        nbytes::UInt32=UInt32(0),
+    )::Int32
     _, ok = @atomicreplace(op.active, false => true)
     ok || return Int32(Base.Libc.EALREADY)
     _reset_overlapped!(op)
@@ -368,6 +385,35 @@ function _submit_iocp_op!(registration::Registration, reg::IocpRegistration, op:
                     C_NULL::Ptr{Cvoid},
                 )::Cint
             end
+        end
+    elseif op.kind == IocpOpKind.READ
+        wsabuf = Ref(WSABUF(nbytes, ptr))
+        bytes = Ref{UInt32}(UInt32(0))
+        flags = Ref{UInt32}(UInt32(0))
+        rc = GC.@preserve op wsabuf bytes flags begin
+            @gcsafe_ccall _WS2_32.WSARecv(
+                _socket_value(reg.fd)::UInt,
+                wsabuf::Ref{WSABUF},
+                UInt32(1)::UInt32,
+                bytes::Ref{UInt32},
+                flags::Ref{UInt32},
+                _op_ptr(op)::Ptr{Cvoid},
+                C_NULL::Ptr{Cvoid},
+            )::Cint
+        end
+    elseif op.kind == IocpOpKind.WRITE
+        wsabuf = Ref(WSABUF(nbytes, ptr))
+        bytes = Ref{UInt32}(UInt32(0))
+        rc = GC.@preserve op wsabuf bytes begin
+            @gcsafe_ccall _WS2_32.WSASend(
+                _socket_value(reg.fd)::UInt,
+                wsabuf::Ref{WSABUF},
+                UInt32(1)::UInt32,
+                bytes::Ref{UInt32},
+                UInt32(0)::UInt32,
+                _op_ptr(op)::Ptr{Cvoid},
+                C_NULL::Ptr{Cvoid},
+            )::Cint
         end
     elseif op.kind == IocpOpKind.CONNECT
         request = op.request
@@ -427,6 +473,21 @@ function _submit_iocp_op!(registration::Registration, reg::IocpRegistration, op:
         _notify_registration!(registration, op.mode)
         return Int32(0)
     end
+    if op.kind == IocpOpKind.READ || op.kind == IocpOpKind.WRITE
+        if rc == 0
+            reg.wait_on_success && return Int32(0)
+            @atomic :release op.active = false
+            _notify_registration!(registration, op.mode)
+            return Int32(0)
+        end
+        err = _wsa_get_last_error()
+        if err == _ERROR_IO_PENDING
+            return Int32(0)
+        end
+        @atomic :release op.active = false
+        _clear_iocp_op!(op)
+        return _map_overlapped_errno(err)
+    end
     if rc != 0
         reg.wait_on_success && return Int32(0)
         @atomic :release op.active = false
@@ -461,25 +522,30 @@ function _lookup_iocp_registration(registration::Registration)::Union{Nothing, I
 end
 
 function _finish_iocp_mode!(registration::Registration, mode::PollMode.T)::Int32
+    _, errno = _finish_iocp_mode_with_bytes!(registration, mode)
+    return errno
+end
+
+function _finish_iocp_mode_with_bytes!(registration::Registration, mode::PollMode.T)::Tuple{UInt32, Int32}
     state = POLLER[]
     reg = nothing
     op = nothing
     lock(state.lock)
     try
         reg = _lookup_iocp_registration(registration)
-        reg === nothing && return Int32(Base.Libc.EBADF)
+        reg === nothing && return UInt32(0), Int32(Base.Libc.EBADF)
         op = _iocp_op_for_mode(reg, mode)
     finally
         unlock(state.lock)
     end
-    result = _wsagetoverlappedresult(registration.fd, op::IocpOp)
+    bytes, result = _wsagetoverlappedresult_bytes(registration.fd, op::IocpOp)
     lock(state.lock)
     try
         _clear_iocp_op!(op)
     finally
         unlock(state.lock)
     end
-    return result
+    return bytes, result
 end
 
 function _iocp_cancel_mode!(registration::Registration, mode::PollMode.T)::Bool
@@ -496,6 +562,52 @@ function _iocp_cancel_mode!(registration::Registration, mode::PollMode.T)::Bool
         unlock(state.lock)
     end
     return canceled
+end
+
+function _iocp_submit_read!(registration::Registration, ptr::Ptr{UInt8}, nbytes::UInt32)::Int32
+    isassigned(POLLER) || return Int32(Base.Libc.ENOSYS)
+    state = POLLER[]
+    (@atomic :acquire state.running) || return Int32(Base.Libc.EBADF)
+    errno = Int32(0)
+    lock(state.lock)
+    try
+        reg = _lookup_iocp_registration(registration)
+        reg === nothing && return Int32(Base.Libc.EBADF)
+        op = reg.read_op
+        _set_data_io_kind!(op)
+        errno = _submit_iocp_op!(registration, reg, op; ptr, nbytes)
+        errno != Int32(0) && _clear_iocp_op!(op)
+    finally
+        unlock(state.lock)
+    end
+    return errno
+end
+
+function _iocp_finish_read!(registration::Registration)::Tuple{UInt32, Int32}
+    return _finish_iocp_mode_with_bytes!(registration, PollMode.READ)
+end
+
+function _iocp_submit_write!(registration::Registration, ptr::Ptr{UInt8}, nbytes::UInt32)::Int32
+    isassigned(POLLER) || return Int32(Base.Libc.ENOSYS)
+    state = POLLER[]
+    (@atomic :acquire state.running) || return Int32(Base.Libc.EBADF)
+    errno = Int32(0)
+    lock(state.lock)
+    try
+        reg = _lookup_iocp_registration(registration)
+        reg === nothing && return Int32(Base.Libc.EBADF)
+        op = reg.write_op
+        _set_data_io_kind!(op)
+        errno = _submit_iocp_op!(registration, reg, op; ptr, nbytes)
+        errno != Int32(0) && _clear_iocp_op!(op)
+    finally
+        unlock(state.lock)
+    end
+    return errno
+end
+
+function _iocp_finish_write!(registration::Registration)::Tuple{UInt32, Int32}
+    return _finish_iocp_mode_with_bytes!(registration, PollMode.WRITE)
 end
 
 function _iocp_submit_connect!(registration::Registration, addrbuf::Vector{UInt8}, addrlen::Int32)::Int32
@@ -773,6 +885,30 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
     _ = state
     _ = delay_ns
     return Int32(Base.Libc.ENOSYS)
+end
+
+function _iocp_submit_read!(registration::Registration, ptr::Ptr{UInt8}, nbytes::UInt32)::Int32
+    _ = registration
+    _ = ptr
+    _ = nbytes
+    return Int32(Base.Libc.ENOSYS)
+end
+
+function _iocp_finish_read!(registration::Registration)::Tuple{UInt32, Int32}
+    _ = registration
+    return UInt32(0), Int32(Base.Libc.ENOSYS)
+end
+
+function _iocp_submit_write!(registration::Registration, ptr::Ptr{UInt8}, nbytes::UInt32)::Int32
+    _ = registration
+    _ = ptr
+    _ = nbytes
+    return Int32(Base.Libc.ENOSYS)
+end
+
+function _iocp_finish_write!(registration::Registration)::Tuple{UInt32, Int32}
+    _ = registration
+    return UInt32(0), Int32(Base.Libc.ENOSYS)
 end
 
 function _iocp_submit_connect!(registration::Registration, addrbuf::Vector{UInt8}, addrlen::Int32)::Int32

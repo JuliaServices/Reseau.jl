@@ -40,6 +40,8 @@ Base.@enum T::UInt8 begin
     PROBE_WRITE = 0x02
     CONNECT = 0x03
     ACCEPT = 0x04
+    READ = 0x05
+    WRITE = 0x06
 end
 end
 
