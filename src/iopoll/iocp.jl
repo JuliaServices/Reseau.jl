@@ -487,9 +487,10 @@ function _submit_iocp_op!(
             return Int32(0)
         end
         @atomic :release op.active = false
+        context = op.kind == IocpOpKind.READ ? "WSARecv" : "WSASend"
         _clear_iocp_op!(op)
         mapped = _map_overlapped_errno(err)
-        _trace_iocp_errno(op.kind == IocpOpKind.READ ? "WSARecv" : "WSASend", err, mapped)
+        _trace_iocp_errno(context, err, mapped)
         return mapped
     end
     if rc != 0
@@ -503,9 +504,10 @@ function _submit_iocp_op!(
         return Int32(0)
     end
     @atomic :release op.active = false
+    context = op.kind == IocpOpKind.CONNECT ? "ConnectEx" : "AcceptEx"
     _clear_iocp_op!(op)
     mapped = _map_overlapped_errno(err)
-    _trace_iocp_errno(op.kind == IocpOpKind.CONNECT ? "ConnectEx" : "AcceptEx", err, mapped)
+    _trace_iocp_errno(context, err, mapped)
     return mapped
 end
 
