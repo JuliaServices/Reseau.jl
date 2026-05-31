@@ -169,6 +169,36 @@ end
                 IP.shutdown!()
             end
         end
+        @testset "read observes data before peer close" begin
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server_task = nothing
+            try
+                listener = NC.listen(NC.loopback_addr(0); backlog = 8)
+                laddr = NC.addr(listener)::NC.SocketAddrV4
+                payload = collect(codeunits("HTTP/1.1 302 Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"))
+                server_task = errormonitor(@async begin
+                    server = NC.accept(listener)
+                    try
+                        write(server, payload)
+                    finally
+                        _close_quiet!(server)
+                    end
+                    return nothing
+                end)
+                client = NC.connect(NC.loopback_addr(Int(laddr.port)))
+                buf = Vector{UInt8}(undef, length(payload))
+                @test readbytes!(client, buf, length(buf); all = true) == length(payload)
+                @test buf == payload
+                @test _nc_wait_task_done(server_task, 2.0) != :timed_out
+                wait(server_task)
+            finally
+                _close_quiet!(client)
+                _close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
         @testset "show methods summarize TCP endpoints" begin
             IP.shutdown!()
             listener = nothing
