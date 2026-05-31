@@ -16,8 +16,6 @@ jobs:
       RESEAU_RUN_NETWORK_TESTS: '1'
       RESEAU_TRIM_EXE_TIMEOUT_S: "60.0"
       RESEAU_TRIM_BUNDLE: '1'
-      RESEAU_IOCP_TRACE_ERRORS: '1'
-      RESEAU_IOPOLL_TRACE_MISSING_REGISTRATION: '1'
     strategy:
       fail-fast: false
       matrix:
