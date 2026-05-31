@@ -182,8 +182,8 @@ end
 end
 
 @inline function _trace_iocp_errno(context::AbstractString, raw::Int32, mapped::Int32)
-    if mapped == Int32(Base.Libc.EIO) && get(ENV, "RESEAU_IOCP_TRACE_ERRORS", "0") == "1"
-        @warn "unmapped Windows IOCP socket error" context raw_error=raw mapped_errno=mapped
+    if get(ENV, "RESEAU_IOCP_TRACE_ERRORS", "0") == "1"
+        @warn "Windows IOCP socket error" context raw_error=raw mapped_errno=mapped
     end
     return nothing
 end
