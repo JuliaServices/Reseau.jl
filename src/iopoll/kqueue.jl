@@ -17,7 +17,7 @@ const WAKE_IDENT = UInt(1)
 const MAX_KQUEUE_EVENTS = 64
 
 """
-Mirror of `struct kevent`, excluding extensions present on some platforms.
+Mirror of `struct kevent`.
 """
 struct Kevent
     ident::UInt
@@ -26,6 +26,9 @@ struct Kevent
     fflags::UInt32
     data::Int
     udata::Ptr{Cvoid}
+    @static if Sys.isfreebsd()
+        ext::NTuple{4,UInt64}
+    end
 end
 
 """
@@ -55,7 +58,11 @@ end
         data::Int,
         udata::Ptr{Cvoid},
     )
-    return Kevent(ident, filter, flags, fflags, data, udata)
+    @static if Sys.isfreebsd()
+        return Kevent(ident, filter, flags, fflags, data, udata, ntuple(_ -> UInt64(0), 4))
+    else
+        return Kevent(ident, filter, flags, fflags, data, udata)
+    end
 end
 
 function _fcntl(fd::Cint, cmd::Cint)::Cint
