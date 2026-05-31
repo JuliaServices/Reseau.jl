@@ -2,6 +2,7 @@
 Global singleton state for the runtime poller.
 """
 const POLLER = Ref{Poller}()
+const POLLER_LOCK = ReentrantLock()
 const _POLLER_THREAD_ENTRY_C = Ref{Ptr{Cvoid}}(C_NULL)
 const _pthread_t = UInt
 
@@ -113,29 +114,34 @@ Throws `ArgumentError` if the current platform is unsupported and `SystemError`
 if backend initialization or thread creation fails.
 """
 function init!()::Poller
-    if isassigned(POLLER)
-        state = POLLER[]
-        (@atomic state.running) && return state
-    end
-    _runtime_supported() || throw(ArgumentError("iopoll backend is currently supported on macOS, Linux, and Windows"))
-    new_state = Poller()
-    errno = _backend_init!(new_state)
-    errno == Int32(0) || _throw_errno("iopoll backend init", errno)
-    @atomic new_state.running = true
-    POLLER[] = new_state
+    lock(POLLER_LOCK)
     try
-        _spawn_detached_thread(
-            "reseau-iopoll-poller",
-            _POLLER_THREAD_ENTRY_C,
-            new_state,
-        )
-    catch
-        @atomic :release new_state.running = false
-        _backend_close!(new_state)
-        POLLER[] = Poller()
-        rethrow()
+        if isassigned(POLLER)
+            state = POLLER[]
+            (@atomic state.running) && return state
+        end
+        _runtime_supported() || throw(ArgumentError("iopoll backend is currently supported on macOS, Linux, and Windows"))
+        new_state = Poller()
+        errno = _backend_init!(new_state)
+        errno == Int32(0) || _throw_errno("iopoll backend init", errno)
+        @atomic new_state.running = true
+        POLLER[] = new_state
+        try
+            _spawn_detached_thread(
+                "reseau-iopoll-poller",
+                _POLLER_THREAD_ENTRY_C,
+                new_state,
+            )
+        catch
+            @atomic :release new_state.running = false
+            _backend_close!(new_state)
+            POLLER[] = Poller()
+            rethrow()
+        end
+        return new_state
+    finally
+        unlock(POLLER_LOCK)
     end
-    return new_state
 end
 
 """
@@ -149,31 +155,36 @@ Waiting registrations are notified so blocked Julia tasks can observe close or
 shutdown on their next state check instead of remaining parked forever.
 """
 function shutdown!()
-    isassigned(POLLER) || return nothing
-    state = POLLER[]
-    registrations = Registration[]
-    stop_requested = false
-    lock(state.lock)
+    lock(POLLER_LOCK)
     try
-        append!(registrations, values(state.registrations))
-        empty!(state.registrations)
-        empty!(state.registrations_by_token)
-        if @atomic :acquire state.running
-            @atomic :release state.running = false
-            stop_requested = true
+        isassigned(POLLER) || return nothing
+        state = POLLER[]
+        registrations = Registration[]
+        stop_requested = false
+        lock(state.lock)
+        try
+            append!(registrations, values(state.registrations))
+            empty!(state.registrations)
+            empty!(state.registrations_by_token)
+            if @atomic :acquire state.running
+                @atomic :release state.running = false
+                stop_requested = true
+            end
+        finally
+            unlock(state.lock)
         end
+        for registration in registrations
+            _notify_registration!(registration, PollMode.READWRITE, PollWakeReason.CANCELED)
+        end
+        if stop_requested
+            wake_errno = _backend_wake!(state)
+            wake_errno == Int32(0) || _throw_errno("iopoll wake", wake_errno)
+            wait(state.shutdown_event)
+        end
+        _backend_close!(state)
     finally
-        unlock(state.lock)
+        unlock(POLLER_LOCK)
     end
-    for registration in registrations
-        _notify_registration!(registration, PollMode.READWRITE, PollWakeReason.CANCELED)
-    end
-    if stop_requested
-        wake_errno = _backend_wake!(state)
-        wake_errno == Int32(0) || _throw_errno("iopoll wake", wake_errno)
-        wait(state.shutdown_event)
-    end
-    _backend_close!(state)
     return nothing
 end
 

@@ -429,6 +429,7 @@ function _wait_iocp_completion!(registration::Registration, pd::PollState, mode:
         reason = pollwait!(waiter)
         err = _check_error(pd, mode)
         if reason == PollWakeReason.READY
+            _iocp_mode_active(registration, mode) && continue
             _convert_poll_error!(err, is_file)
             return nothing
         end
@@ -556,8 +557,15 @@ function connect!(fd::FD, addrbuf::Vector{UInt8}, addrlen::Int32)
     try
         preparewrite(fd.pd, fd.is_file)
         registration = _poll_registration(fd.pd)
-        errno = _iocp_submit_connect!(registration, addrbuf, addrlen)
-        errno == Int32(0) || throw(SystemError("connectex", Int(errno)))
+        while true
+            errno = _iocp_submit_connect!(registration, addrbuf, addrlen)
+            errno == Int32(0) && break
+            if errno == Int32(Base.Libc.EALREADY)
+                waitwrite(fd.pd, fd.is_file)
+                continue
+            end
+            throw(SystemError("connectex", Int(errno)))
+        end
         try
             _wait_iocp_completion!(registration, fd.pd, PollMode.WRITE, fd.is_file)
         catch err
@@ -595,6 +603,10 @@ function accept!(fd::FD, family::Cint, sotype::Cint)::Tuple{Cint, SocketOps.Acce
                 errno = _iocp_submit_accept!(registration, child_sysfd, addrbuf)
                 if errno != Int32(0)
                     SocketOps.close_socket_nothrow(child_sysfd)
+                    if errno == Int32(Base.Libc.EALREADY)
+                        waitread(fd.pd, fd.is_file)
+                        continue
+                    end
                     throw(SystemError("acceptex", Int(errno)))
                 end
                 try
@@ -666,6 +678,35 @@ function _read_ptr_some!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
     _fd_read_lock!(fd)
     try
         nbytes == 0 && return 0
+        @static if Sys.iswindows()
+            prepareread(fd.pd, fd.is_file)
+            registration = _poll_registration(fd.pd)
+            n = UInt32(min(nbytes, Int(typemax(UInt32))))
+            while true
+                errno = _iocp_submit_read!(registration, p, n)
+                errno == Int32(0) && break
+                if errno == Int32(Base.Libc.EALREADY)
+                    waitread(fd.pd, fd.is_file)
+                    continue
+                end
+                throw(SystemError("read", Int(errno)))
+            end
+            try
+                _wait_iocp_completion!(registration, fd.pd, PollMode.READ, fd.is_file)
+            catch err
+                if _iocp_cancel_mode!(registration, PollMode.READ)
+                    pollwait!(registration.read_waiter)
+                end
+                _, _ = _iocp_finish_read!(registration)
+                rethrow(err)
+            end
+            bytes, result = _iocp_finish_read!(registration)
+            result == Int32(0) || throw(SystemError("read", Int(result)))
+            if bytes == UInt32(0) && fd.zero_read_is_eof
+                throw(EOFError())
+            end
+            return Int(bytes)
+        end
         # Avoid taking the global poller lock before every successful read.
         # If the read would block, `waitread` refreshes backend event state
         # before parking.
@@ -728,6 +769,36 @@ function _write_ptr!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
     _fd_write_lock!(fd)
     nn = 0
     try
+        @static if Sys.iswindows()
+            while nn < nbytes
+                preparewrite(fd.pd, fd.is_file)
+                registration = _poll_registration(fd.pd)
+                chunk = UInt32(min(nbytes - nn, Int(typemax(UInt32))))
+                while true
+                    errno = _iocp_submit_write!(registration, p + nn, chunk)
+                    errno == Int32(0) && break
+                    if errno == Int32(Base.Libc.EALREADY)
+                        waitwrite(fd.pd, fd.is_file)
+                        continue
+                    end
+                    throw(SystemError("write", Int(errno)))
+                end
+                try
+                    _wait_iocp_completion!(registration, fd.pd, PollMode.WRITE, fd.is_file)
+                catch err
+                    if _iocp_cancel_mode!(registration, PollMode.WRITE)
+                        pollwait!(registration.write_waiter)
+                    end
+                    _, _ = _iocp_finish_write!(registration)
+                    rethrow(err)
+                end
+                bytes, result = _iocp_finish_write!(registration)
+                result == Int32(0) || throw(SystemError("write", Int(result)))
+                bytes == UInt32(0) && throw(EOFError())
+                nn += Int(bytes)
+            end
+            return nn
+        end
         preparewrite(fd.pd, fd.is_file)
         while true
             nn == nbytes && return nn
