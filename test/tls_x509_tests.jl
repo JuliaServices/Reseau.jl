@@ -185,7 +185,11 @@ end
         ] in cert.ip_addresses
     end
 
-    @testset "SHA-1 X.509 certificate signatures are rejected during parsing" begin
+    @testset "SHA-1 X.509 signatures parse but are rejected at verification" begin
+        # SHA-1 signature algorithms now parse (digest_bits = 160). They are
+        # refused where the signature is actually verified, not at parse time, so
+        # a SHA-1 self-signed trust anchor (whose self-signature is never verified)
+        # stays usable — matching OpenSSL and MbedTLS.
         sha1_rsa = UInt8[
             0x06, 0x09,
             0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x05,
@@ -195,8 +199,8 @@ end
             0x06, 0x07,
             0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x01,
         ]
-        @test_throws ArgumentError TLX._tls_parse_certificate_signature_spec(sha1_rsa, 1, length(sha1_rsa))
-        @test_throws ArgumentError TLX._tls_parse_certificate_signature_spec(sha1_ecdsa, 1, length(sha1_ecdsa))
+        @test TLX._tls_parse_certificate_signature_spec(sha1_rsa, 1, length(sha1_rsa)).digest_bits == 160
+        @test TLX._tls_parse_certificate_signature_spec(sha1_ecdsa, 1, length(sha1_ecdsa)).digest_bits == 160
     end
 
     @testset "Go-style hostname matching helpers" begin
@@ -302,6 +306,12 @@ end
         @test TLX._tls_verify_certificate_signature(rsa_cert, rsa_ca)
         @test TLX._tls_verify_certificate_signature(ecdsa_cert, ecdsa_cert)
         @test TLX._tls_verify_certificate_signature(rsa_ca, rsa_ca)
+
+        # A SHA-1 (digest_bits == 160) signature is refused when actually verified,
+        # even though the certificate parses fine.
+        sha1_signed = _tls_copy_cert(rsa_cert;
+            signature_verify_spec = TLX._TLSSignatureVerifySpec(UInt16(160), false, false))
+        @test TLX._tls_verify_certificate_signature(sha1_signed, rsa_ca) == false
 
         max_modulus = vcat(UInt8[0x80], zeros(UInt8, 1023))
         oversized_modulus = vcat(UInt8[0x01], zeros(UInt8, 1024))
@@ -420,6 +430,35 @@ end
             ca_file = _TLS_CA_PATH,
         )
         @test pkey isa TLX._TLSRSAPublicKey
+    end
+
+    @testset "native trust verifier accepts a SHA-1 self-signed trust anchor" begin
+        server_certs = TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CERT_PATH))
+        # Flip the CA signatureAlgorithm OID SHA256-RSA → SHA1-RSA (same length; two
+        # occurrences: tbsCertificate.signature + outer signatureAlgorithm) to obtain a
+        # SHA-1 self-signed root without a new fixture. Only the OID changes — the RSA
+        # public key is untouched, so the real leaf's SHA-256 signature still verifies.
+        sha1_root_der = copy(only(TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CA_PATH))))
+        oid = UInt8[0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b]
+        flipped = 0
+        i = firstindex(sha1_root_der)
+        while i <= lastindex(sha1_root_der) - length(oid) + 1
+            if @views sha1_root_der[i:i + length(oid) - 1] == oid
+                sha1_root_der[i + length(oid) - 1] = 0x05  # SHA256withRSA → SHA1withRSA
+                flipped += 1
+                i += length(oid)
+            else
+                i += 1
+            end
+        end
+        @test flipped == 2
+        # The fix lets a SHA-1 self-signed root parse (digest_bits = 160) instead of throwing.
+        sha1_root = TLX._tls_parse_der_certificate_info(sha1_root_der)
+        @test sha1_root.signature_verify_spec.digest_bits == 160
+        # A real leaf chains through the SHA-1 self-signed trust anchor: its own
+        # self-signature is never verified, so the SHA-1 policy does not reject it.
+        store = TLX._TLSTrustStore([sha1_root])
+        @test TLX._tls_verify_peer_certificate_chain!(server_certs, store, "ssl_server") isa TLX._TLSCertificateInfo
     end
 
     @testset "native trust verifier supports CA directories" begin
