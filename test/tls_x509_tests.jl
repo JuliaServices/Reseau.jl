@@ -432,6 +432,35 @@ end
         @test pkey isa TLX._TLSRSAPublicKey
     end
 
+    @testset "native trust verifier accepts a SHA-1 self-signed trust anchor" begin
+        server_certs = TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CERT_PATH))
+        # Flip the CA signatureAlgorithm OID SHA256-RSA → SHA1-RSA (same length; two
+        # occurrences: tbsCertificate.signature + outer signatureAlgorithm) to obtain a
+        # SHA-1 self-signed root without a new fixture. Only the OID changes — the RSA
+        # public key is untouched, so the real leaf's SHA-256 signature still verifies.
+        sha1_root_der = copy(only(TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CA_PATH))))
+        oid = UInt8[0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b]
+        flipped = 0
+        i = firstindex(sha1_root_der)
+        while i <= lastindex(sha1_root_der) - length(oid) + 1
+            if @views sha1_root_der[i:i + length(oid) - 1] == oid
+                sha1_root_der[i + length(oid) - 1] = 0x05  # SHA256withRSA → SHA1withRSA
+                flipped += 1
+                i += length(oid)
+            else
+                i += 1
+            end
+        end
+        @test flipped == 2
+        # The fix lets a SHA-1 self-signed root parse (digest_bits = 160) instead of throwing.
+        sha1_root = TLX._tls_parse_der_certificate_info(sha1_root_der)
+        @test sha1_root.signature_verify_spec.digest_bits == 160
+        # A real leaf chains through the SHA-1 self-signed trust anchor: its own
+        # self-signature is never verified, so the SHA-1 policy does not reject it.
+        store = TLX._TLSTrustStore([sha1_root])
+        @test TLX._tls_verify_peer_certificate_chain!(server_certs, store, "ssl_server") isa TLX._TLSCertificateInfo
+    end
+
     @testset "native trust verifier supports CA directories" begin
         certs = TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CERT_PATH))
         mktempdir() do dir
