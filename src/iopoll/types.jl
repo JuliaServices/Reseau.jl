@@ -86,7 +86,11 @@ simultaneously, or if the waiter state machine is observed in an invalid state.
 """
 function pollwait!(waiter::PollWaiter)::PollWakeReason.T
     task = current_task()
-    task.sticky && (task.sticky = false)
+    # Intentionally preserve the caller's task stickiness. The poller wakes this
+    # task via `schedule(task)`; for a migratable task that drops it into the
+    # global run-queue, waking a cold parked worker whose cost scales with
+    # nthreads. Stickiness is the caller's choice (`@async` to pin a hot reader,
+    # `Threads.@spawn` to stay migratable) — don't override it here.
     waiter.task = task
     try
         # Fast path: transition directly from EMPTY -> WAITING and park.
