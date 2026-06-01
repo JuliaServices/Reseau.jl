@@ -116,6 +116,7 @@ jobs:
           copyback: false
           prepare: |
             pkg install -y git
+            chown -R $(whoami) .  # Work around file ownership differences between runner and VM
             # Pretend we're running on Cirrus CI (RIP) to reuse FreeBSD testing setup
             export JULIA_VERSION="${{ matrix.version }}"
             export CIRRUS_CI="true"
