@@ -235,8 +235,17 @@ end
 # The low-level ASN.1 helpers stay intentionally strict and allocation-light so
 # malformed certificates fail early and higher-level parsing code can remain
 # mostly linear over validated TLV slices.
-function _asn1_read_length(bytes::AbstractVector{UInt8}, pos::Int)::Tuple{Int, Int}
-    pos <= length(bytes) || throw(ArgumentError("tls: truncated DER length"))
+#
+# Every reader takes an explicit, inclusive `stop` upper bound: the highest index
+# the tag/length/value of this element is allowed to occupy. When parsing a child
+# element inside a container, callers MUST pass that container's end (`value_end`,
+# `seq_end`, ...) rather than the buffer end, so a nested length can never escape
+# its parent and consume sibling bytes. The bound is a required argument on
+# purpose: it forces the invariant to be stated (and reviewable) at every call
+# site instead of relying on a post-hoc "did we land exactly on the boundary?"
+# check after the fact.
+function _asn1_read_length(bytes::AbstractVector{UInt8}, pos::Int, stop::Int)::Tuple{Int, Int}
+    pos <= stop || throw(ArgumentError("tls: truncated DER length"))
     first = bytes[pos]
     pos += 1
     if first < 0x80
@@ -245,30 +254,36 @@ function _asn1_read_length(bytes::AbstractVector{UInt8}, pos::Int)::Tuple{Int, I
     count = Int(first & 0x7f)
     count > 0 || throw(ArgumentError("tls: indefinite DER lengths are not supported"))
     count <= sizeof(Int) || throw(ArgumentError("tls: oversized DER length"))
-    pos + count - 1 <= length(bytes) || throw(ArgumentError("tls: truncated DER length"))
+    pos + count - 1 <= stop || throw(ArgumentError("tls: truncated DER length"))
+    # DER (X.690 §10.1) requires the minimal length encoding. The long form must
+    # not begin with a zero octet (that octet could have been dropped); rejecting
+    # it here matches what most TLS stacks do for non-canonical certificates.
+    @inbounds bytes[pos] != 0x00 || throw(ArgumentError("tls: non-minimal DER length encoding"))
     len = 0
     @inbounds for _ in 1:count
         len <= (typemax(Int) >> 8) || throw(ArgumentError("tls: oversized DER length"))
         len = (len << 8) | Int(bytes[pos])
         pos += 1
     end
+    # ...and a value < 0x80 must use the short form, never the long form.
+    len >= 0x80 || throw(ArgumentError("tls: non-minimal DER length encoding"))
     return len, pos
 end
 
-function _asn1_read_tlv(bytes::AbstractVector{UInt8}, pos::Int)::NTuple{4, Int}
-    pos <= length(bytes) || throw(ArgumentError("tls: truncated DER value"))
+function _asn1_read_tlv(bytes::AbstractVector{UInt8}, pos::Int, stop::Int)::NTuple{4, Int}
+    pos <= stop || throw(ArgumentError("tls: truncated DER value"))
     tag = bytes[pos]
     (tag & 0x1f) == 0x1f && throw(ArgumentError("tls: high-tag-number DER values are not supported"))
     pos += 1
-    len, value_start = _asn1_read_length(bytes, pos)
-    available = length(bytes) - value_start + 1
+    len, value_start = _asn1_read_length(bytes, pos, stop)
+    available = stop - value_start + 1
     len <= available || throw(ArgumentError("tls: truncated DER value"))
     value_end = value_start + len - 1
     return Int(tag), value_start, value_end, value_end + 1
 end
 
-function _asn1_expect_tlv(bytes::AbstractVector{UInt8}, pos::Int, expected_tag::UInt8)::NTuple{3, Int}
-    tag, value_start, value_end, next_pos = _asn1_read_tlv(bytes, pos)
+function _asn1_expect_tlv(bytes::AbstractVector{UInt8}, pos::Int, expected_tag::UInt8, stop::Int)::NTuple{3, Int}
+    tag, value_start, value_end, next_pos = _asn1_read_tlv(bytes, pos, stop)
     tag == expected_tag || throw(ArgumentError("tls: unexpected DER tag $(tag), expected $(expected_tag)"))
     return value_start, value_end, next_pos
 end
@@ -447,21 +462,21 @@ end
 
 function _tls_require_algorithm_identifier_null_or_absent(bytes::AbstractVector{UInt8}, pos::Int, value_end::Int)::Nothing
     pos > value_end && return nothing
-    null_start, null_end, next_pos = _asn1_expect_tlv(bytes, pos, _ASN1_NULL)
+    null_start, null_end, next_pos = _asn1_expect_tlv(bytes, pos, _ASN1_NULL, value_end)
     null_start > null_end || throw(ArgumentError("tls: malformed X.509 algorithm parameters"))
     next_pos == value_end + 1 || throw(ArgumentError("tls: malformed X.509 algorithm parameters"))
     return nothing
 end
 
 function _tls_parse_pss_hash_algorithm(bytes::AbstractVector{UInt8}, value_start::Int, value_end::Int)::UInt16
-    oid_start, oid_end, pos = _asn1_expect_tlv(bytes, value_start, _ASN1_OBJECT_IDENTIFIER)
+    oid_start, oid_end, pos = _asn1_expect_tlv(bytes, value_start, _ASN1_OBJECT_IDENTIFIER, value_end)
     hash_bits = _tls_hash_bits_from_oid(bytes, oid_start, oid_end)
     _tls_require_algorithm_identifier_null_or_absent(bytes, pos, value_end)
     return hash_bits
 end
 
 function _tls_parse_rsa_pss_signature_spec(bytes::AbstractVector{UInt8}, value_start::Int, value_end::Int)::_TLSSignatureVerifySpec
-    seq_start, seq_end, seq_next = _asn1_expect_tlv(bytes, value_start, _ASN1_SEQUENCE)
+    seq_start, seq_end, seq_next = _asn1_expect_tlv(bytes, value_start, _ASN1_SEQUENCE, value_end)
     seq_next == value_end + 1 || throw(ArgumentError("tls: malformed X.509 RSASSA-PSS parameters"))
     hash_bits = UInt16(160)
     mgf1_hash_bits = UInt16(160)
@@ -469,26 +484,26 @@ function _tls_parse_rsa_pss_signature_spec(bytes::AbstractVector{UInt8}, value_s
     trailer_field = 1
     pos = seq_start
     while pos <= seq_end
-        tag, item_start, item_end, pos = _asn1_read_tlv(bytes, pos)
+        tag, item_start, item_end, pos = _asn1_read_tlv(bytes, pos, seq_end)
         if tag == 0xa0
-            alg_start, alg_end, alg_next = _asn1_expect_tlv(bytes, item_start, _ASN1_SEQUENCE)
+            alg_start, alg_end, alg_next = _asn1_expect_tlv(bytes, item_start, _ASN1_SEQUENCE, item_end)
             alg_next == item_end + 1 || throw(ArgumentError("tls: malformed X.509 RSASSA-PSS hash parameters"))
             hash_bits = _tls_parse_pss_hash_algorithm(bytes, alg_start, alg_end)
         elseif tag == 0xa1
-            mgf_start, mgf_end, mgf_next = _asn1_expect_tlv(bytes, item_start, _ASN1_SEQUENCE)
+            mgf_start, mgf_end, mgf_next = _asn1_expect_tlv(bytes, item_start, _ASN1_SEQUENCE, item_end)
             mgf_next == item_end + 1 || throw(ArgumentError("tls: malformed X.509 RSASSA-PSS mask parameters"))
-            oid_start, oid_end, mgf_pos = _asn1_expect_tlv(bytes, mgf_start, _ASN1_OBJECT_IDENTIFIER)
+            oid_start, oid_end, mgf_pos = _asn1_expect_tlv(bytes, mgf_start, _ASN1_OBJECT_IDENTIFIER, mgf_end)
             _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_MGF1) ||
                 throw(ArgumentError("tls: unsupported X.509 RSASSA-PSS mask generator"))
-            hash_start, hash_end, mgf_pos = _asn1_expect_tlv(bytes, mgf_pos, _ASN1_SEQUENCE)
+            hash_start, hash_end, mgf_pos = _asn1_expect_tlv(bytes, mgf_pos, _ASN1_SEQUENCE, mgf_end)
             mgf_pos == mgf_end + 1 || throw(ArgumentError("tls: malformed X.509 RSASSA-PSS mask parameters"))
             mgf1_hash_bits = _tls_parse_pss_hash_algorithm(bytes, hash_start, hash_end)
         elseif tag == 0xa2
-            salt_start, salt_end, salt_next = _asn1_expect_tlv(bytes, item_start, _ASN1_INTEGER)
+            salt_start, salt_end, salt_next = _asn1_expect_tlv(bytes, item_start, _ASN1_INTEGER, item_end)
             salt_next == item_end + 1 || throw(ArgumentError("tls: malformed X.509 RSASSA-PSS salt length"))
             salt_len = _asn1_integer_value(bytes, salt_start, salt_end)
         elseif tag == 0xa3
-            trailer_start, trailer_end, trailer_next = _asn1_expect_tlv(bytes, item_start, _ASN1_INTEGER)
+            trailer_start, trailer_end, trailer_next = _asn1_expect_tlv(bytes, item_start, _ASN1_INTEGER, item_end)
             trailer_next == item_end + 1 || throw(ArgumentError("tls: malformed X.509 RSASSA-PSS trailer field"))
             trailer_field = _asn1_integer_value(bytes, trailer_start, trailer_end)
         else
@@ -502,7 +517,7 @@ function _tls_parse_rsa_pss_signature_spec(bytes::AbstractVector{UInt8}, value_s
 end
 
 function _tls_parse_certificate_signature_spec(bytes::AbstractVector{UInt8}, value_start::Int, value_end::Int)::_TLSSignatureVerifySpec
-    oid_start, oid_end, pos = _asn1_expect_tlv(bytes, value_start, _ASN1_OBJECT_IDENTIFIER)
+    oid_start, oid_end, pos = _asn1_expect_tlv(bytes, value_start, _ASN1_OBJECT_IDENTIFIER, value_end)
     if _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_SHA1_WITH_RSA_ENCRYPTION)
         # SHA-1 is parsed (digest_bits = 160) but rejected later, only for
         # signatures actually verified during chain building. This keeps SHA-1
@@ -548,25 +563,25 @@ function _tls_parse_certificate_signature_spec(bytes::AbstractVector{UInt8}, val
 end
 
 function _tls_parse_subject_public_key_info(bytes::AbstractVector{UInt8}, value_start::Int, value_end::Int)::_TLSPublicKey
-    alg_start, alg_end, pos = _asn1_expect_tlv(bytes, value_start, _ASN1_SEQUENCE)
-    bit_start, bit_end, pos = _asn1_expect_tlv(bytes, pos, _ASN1_BIT_STRING)
+    alg_start, alg_end, pos = _asn1_expect_tlv(bytes, value_start, _ASN1_SEQUENCE, value_end)
+    bit_start, bit_end, pos = _asn1_expect_tlv(bytes, pos, _ASN1_BIT_STRING, value_end)
     pos == value_end + 1 || throw(ArgumentError("tls: malformed subjectPublicKeyInfo"))
-    oid_start, oid_end, alg_pos = _asn1_expect_tlv(bytes, alg_start, _ASN1_OBJECT_IDENTIFIER)
+    oid_start, oid_end, alg_pos = _asn1_expect_tlv(bytes, alg_start, _ASN1_OBJECT_IDENTIFIER, alg_end)
     if _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_RSA_ENCRYPTION) ||
        _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_RSASSA_PSS)
         _tls_require_algorithm_identifier_null_or_absent(bytes, alg_pos, alg_end)
         key_bytes = _asn1_bit_string_bytes(bytes, bit_start, bit_end)
-        key_start, key_end, key_next = _asn1_expect_tlv(key_bytes, firstindex(key_bytes), _ASN1_SEQUENCE)
+        key_start, key_end, key_next = _asn1_expect_tlv(key_bytes, firstindex(key_bytes), _ASN1_SEQUENCE, lastindex(key_bytes))
         key_next == lastindex(key_bytes) + 1 || throw(ArgumentError("tls: malformed RSA public key"))
-        modulus_start, modulus_end, key_pos = _asn1_expect_tlv(key_bytes, key_start, _ASN1_INTEGER)
-        exponent_start, exponent_end, key_pos = _asn1_expect_tlv(key_bytes, key_pos, _ASN1_INTEGER)
+        modulus_start, modulus_end, key_pos = _asn1_expect_tlv(key_bytes, key_start, _ASN1_INTEGER, key_end)
+        exponent_start, exponent_end, key_pos = _asn1_expect_tlv(key_bytes, key_pos, _ASN1_INTEGER, key_end)
         key_pos == key_end + 1 || throw(ArgumentError("tls: malformed RSA public key"))
         modulus = _asn1_integer_bytes(key_bytes, modulus_start, modulus_end)
         _tls_check_rsa_certificate_key_size!(modulus)
         exponent = _asn1_integer_bytes(key_bytes, exponent_start, exponent_end)
         return _TLSRSAPublicKey(modulus, exponent)
     elseif _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_ID_EC_PUBLIC_KEY)
-        curve_oid_start, curve_oid_end, alg_pos = _asn1_expect_tlv(bytes, alg_pos, _ASN1_OBJECT_IDENTIFIER)
+        curve_oid_start, curve_oid_end, alg_pos = _asn1_expect_tlv(bytes, alg_pos, _ASN1_OBJECT_IDENTIFIER, alg_end)
         alg_pos == alg_end + 1 || throw(ArgumentError("tls: malformed EC public key parameters"))
         curve_id = if _asn1_oid_equals(bytes, curve_oid_start, curve_oid_end, _ASN1_OID_CURVE_P256)
             _TLS_GROUP_SECP256R1
@@ -735,7 +750,7 @@ function _tls_parse_general_names(
     value_start::Int,
     value_end::Int,
 )::_TLSParsedGeneralNames
-    seq_start, seq_end, seq_next = _asn1_expect_tlv(bytes, value_start, _ASN1_SEQUENCE)
+    seq_start, seq_end, seq_next = _asn1_expect_tlv(bytes, value_start, _ASN1_SEQUENCE, value_end)
     seq_next == value_end + 1 || throw(ArgumentError("tls: malformed subjectAltName extension"))
     dns_names = String[]
     ip_addresses = Vector{Vector{UInt8}}()
@@ -744,7 +759,7 @@ function _tls_parse_general_names(
     has_unhandled_name_types = false
     pos = seq_start
     while pos <= seq_end
-        tag, name_start, name_end, pos = _asn1_read_tlv(bytes, pos)
+        tag, name_start, name_end, pos = _asn1_read_tlv(bytes, pos, seq_end)
         if tag == _ASN1_GENERAL_NAME_RFC822
             push!(email_addresses, _asn1_ascii_string(bytes, name_start, name_end))
         elseif tag == _ASN1_GENERAL_NAME_DNS
@@ -819,12 +834,12 @@ function _tls_parse_name_constraints_subtrees!(
     uri_out::Vector{String},
     email_out::Vector{String},
 )::Nothing
-    seq_start, seq_end, seq_next = _asn1_expect_tlv(bytes, value_start, _ASN1_SEQUENCE)
+    seq_start, seq_end, seq_next = _asn1_expect_tlv(bytes, value_start, _ASN1_SEQUENCE, value_end)
     seq_next == value_end + 1 || throw(ArgumentError("tls: malformed NameConstraints extension"))
     pos = seq_start
     while pos <= seq_end
-        subtree_start, subtree_end, pos = _asn1_expect_tlv(bytes, pos, _ASN1_SEQUENCE)
-        tag, base_start, base_end, subtree_pos = _asn1_read_tlv(bytes, subtree_start)
+        subtree_start, subtree_end, pos = _asn1_expect_tlv(bytes, pos, _ASN1_SEQUENCE, seq_end)
+        tag, base_start, base_end, subtree_pos = _asn1_read_tlv(bytes, subtree_start, subtree_end)
         if tag == _ASN1_GENERAL_NAME_DNS
             domain = _asn1_ascii_string(bytes, base_start, base_end)
             _tls_valid_name_constraint_domain(domain) ||
@@ -846,7 +861,7 @@ function _tls_parse_name_constraints_subtrees!(
             throw(ArgumentError("tls: unsupported NameConstraints name form"))
         end
         while subtree_pos <= subtree_end
-            tag, field_start, field_end, subtree_pos = _asn1_read_tlv(bytes, subtree_pos)
+            tag, field_start, field_end, subtree_pos = _asn1_read_tlv(bytes, subtree_pos, subtree_end)
             if tag == 0x80
                 minimum = _asn1_integer_value(bytes, field_start, field_end)
                 minimum == 0 || throw(ArgumentError("tls: unsupported non-zero NameConstraints minimum"))
@@ -863,7 +878,7 @@ function _tls_parse_name_constraints(
     value_start::Int,
     value_end::Int,
 )::_TLSParsedNameConstraints
-    seq_start, seq_end, seq_next = _asn1_expect_tlv(bytes, value_start, _ASN1_SEQUENCE)
+    seq_start, seq_end, seq_next = _asn1_expect_tlv(bytes, value_start, _ASN1_SEQUENCE, value_end)
     seq_next == value_end + 1 || throw(ArgumentError("tls: malformed NameConstraints extension"))
     permitted_dns = String[]
     excluded_dns = String[]
@@ -876,7 +891,7 @@ function _tls_parse_name_constraints(
     saw_subtrees = false
     pos = seq_start
     while pos <= seq_end
-        tag, field_start, field_end, pos = _asn1_read_tlv(bytes, pos)
+        tag, field_start, field_end, pos = _asn1_read_tlv(bytes, pos, seq_end)
         if tag == 0xa0
             _tls_parse_name_constraints_subtrees!(bytes, field_start, field_end, permitted_dns, permitted_ip, permitted_uri, permitted_email)
             saw_subtrees = true
@@ -908,12 +923,12 @@ function _tls_parse_subject_common_name(
     common_name = ""
     pos = value_start
     while pos <= value_end
-        set_start, set_end, pos = _asn1_expect_tlv(bytes, pos, _ASN1_SET)
+        set_start, set_end, pos = _asn1_expect_tlv(bytes, pos, _ASN1_SET, value_end)
         set_pos = set_start
         while set_pos <= set_end
-            attr_start, attr_end, set_pos = _asn1_expect_tlv(bytes, set_pos, _ASN1_SEQUENCE)
-            oid_start, oid_end, attr_pos = _asn1_expect_tlv(bytes, attr_start, _ASN1_OBJECT_IDENTIFIER)
-            tag, str_start, str_end, attr_pos = _asn1_read_tlv(bytes, attr_pos)
+            attr_start, attr_end, set_pos = _asn1_expect_tlv(bytes, set_pos, _ASN1_SEQUENCE, set_end)
+            oid_start, oid_end, attr_pos = _asn1_expect_tlv(bytes, attr_start, _ASN1_OBJECT_IDENTIFIER, attr_end)
+            tag, str_start, str_end, attr_pos = _asn1_read_tlv(bytes, attr_pos, attr_end)
             attr_pos == attr_end + 1 || throw(ArgumentError("tls: malformed subject name attribute"))
             if _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_COMMON_NAME)
                 common_name = _asn1_directory_string(bytes, UInt8(tag), str_start, str_end)
@@ -924,17 +939,17 @@ function _tls_parse_subject_common_name(
 end
 
 function _tls_parse_basic_constraints(bytes::AbstractVector{UInt8}, value_start::Int, value_end::Int)::_TLSBasicConstraints
-    seq_start, seq_end, seq_next = _asn1_expect_tlv(bytes, value_start, _ASN1_SEQUENCE)
+    seq_start, seq_end, seq_next = _asn1_expect_tlv(bytes, value_start, _ASN1_SEQUENCE, value_end)
     seq_next == value_end + 1 || throw(ArgumentError("tls: malformed basic constraints extension"))
     is_ca = false
     max_path_len = -1
     pos = seq_start
     if pos <= seq_end && bytes[pos] == _ASN1_BOOLEAN
-        bool_start, bool_end, pos = _asn1_expect_tlv(bytes, pos, _ASN1_BOOLEAN)
+        bool_start, bool_end, pos = _asn1_expect_tlv(bytes, pos, _ASN1_BOOLEAN, seq_end)
         is_ca = _asn1_boolean_value(bytes, bool_start, bool_end)
     end
     if pos <= seq_end
-        int_start, int_end, pos = _asn1_expect_tlv(bytes, pos, _ASN1_INTEGER)
+        int_start, int_end, pos = _asn1_expect_tlv(bytes, pos, _ASN1_INTEGER, seq_end)
         max_path_len = _asn1_integer_value(bytes, int_start, int_end)
     end
     pos == seq_end + 1 || throw(ArgumentError("tls: malformed basic constraints extension"))
@@ -942,18 +957,18 @@ function _tls_parse_basic_constraints(bytes::AbstractVector{UInt8}, value_start:
 end
 
 function _tls_parse_key_usage(bytes::AbstractVector{UInt8}, value_start::Int, value_end::Int)::UInt16
-    bit_start, bit_end, bit_next = _asn1_expect_tlv(bytes, value_start, _ASN1_BIT_STRING)
+    bit_start, bit_end, bit_next = _asn1_expect_tlv(bytes, value_start, _ASN1_BIT_STRING, value_end)
     bit_next == value_end + 1 || throw(ArgumentError("tls: malformed key usage extension"))
     return _asn1_parse_key_usage_bits(bytes, bit_start, bit_end)
 end
 
 function _tls_parse_extended_key_usage(bytes::AbstractVector{UInt8}, value_start::Int, value_end::Int)::UInt8
-    seq_start, seq_end, seq_next = _asn1_expect_tlv(bytes, value_start, _ASN1_SEQUENCE)
+    seq_start, seq_end, seq_next = _asn1_expect_tlv(bytes, value_start, _ASN1_SEQUENCE, value_end)
     seq_next == value_end + 1 || throw(ArgumentError("tls: malformed extended key usage extension"))
     mask = UInt8(0)
     pos = seq_start
     while pos <= seq_end
-        oid_start, oid_end, pos = _asn1_expect_tlv(bytes, pos, _ASN1_OBJECT_IDENTIFIER)
+        oid_start, oid_end, pos = _asn1_expect_tlv(bytes, pos, _ASN1_OBJECT_IDENTIFIER, seq_end)
         if _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_EKU_ANY)
             mask |= _TLS_EXT_KEY_USAGE_ANY
         elseif _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_EKU_SERVER_AUTH)
@@ -966,17 +981,17 @@ function _tls_parse_extended_key_usage(bytes::AbstractVector{UInt8}, value_start
 end
 
 function _tls_parse_subject_key_identifier(bytes::AbstractVector{UInt8}, value_start::Int, value_end::Int)::Vector{UInt8}
-    key_start, key_end, key_next = _asn1_expect_tlv(bytes, value_start, _ASN1_OCTET_STRING)
+    key_start, key_end, key_next = _asn1_expect_tlv(bytes, value_start, _ASN1_OCTET_STRING, value_end)
     key_next == value_end + 1 || throw(ArgumentError("tls: malformed subject key identifier extension"))
     return copy(@view bytes[key_start:key_end])
 end
 
 function _tls_parse_authority_key_identifier(bytes::AbstractVector{UInt8}, value_start::Int, value_end::Int)::Vector{UInt8}
-    seq_start, seq_end, seq_next = _asn1_expect_tlv(bytes, value_start, _ASN1_SEQUENCE)
+    seq_start, seq_end, seq_next = _asn1_expect_tlv(bytes, value_start, _ASN1_SEQUENCE, value_end)
     seq_next == value_end + 1 || throw(ArgumentError("tls: malformed authority key identifier extension"))
     pos = seq_start
     while pos <= seq_end
-        tag, item_start, item_end, pos = _asn1_read_tlv(bytes, pos)
+        tag, item_start, item_end, pos = _asn1_read_tlv(bytes, pos, seq_end)
         if tag == _ASN1_CONTEXT_KEY_IDENTIFIER
             return copy(@view bytes[item_start:item_end])
         end
@@ -985,30 +1000,30 @@ function _tls_parse_authority_key_identifier(bytes::AbstractVector{UInt8}, value
 end
 
 function _tls_parse_der_certificate_info(cert_der::AbstractVector{UInt8})::_TLSCertificateInfo
-    cert_start, cert_end, cert_next = _asn1_expect_tlv(cert_der, firstindex(cert_der), _ASN1_SEQUENCE)
+    cert_start, cert_end, cert_next = _asn1_expect_tlv(cert_der, firstindex(cert_der), _ASN1_SEQUENCE, lastindex(cert_der))
     cert_next == lastindex(cert_der) + 1 || throw(ArgumentError("tls: malformed certificate container"))
-    tbs_start, tbs_end, tbs_next = _asn1_expect_tlv(cert_der, cert_start, _ASN1_SEQUENCE)
+    tbs_start, tbs_end, tbs_next = _asn1_expect_tlv(cert_der, cert_start, _ASN1_SEQUENCE, cert_end)
     cert_pos = tbs_next
-    outer_sig_alg_start, outer_sig_alg_end, cert_pos = _asn1_expect_tlv(cert_der, cert_pos, _ASN1_SEQUENCE)
-    signature_start, signature_end, cert_pos = _asn1_expect_tlv(cert_der, cert_pos, _ASN1_BIT_STRING)
+    outer_sig_alg_start, outer_sig_alg_end, cert_pos = _asn1_expect_tlv(cert_der, cert_pos, _ASN1_SEQUENCE, cert_end)
+    signature_start, signature_end, cert_pos = _asn1_expect_tlv(cert_der, cert_pos, _ASN1_BIT_STRING, cert_end)
     cert_pos == cert_end + 1 || throw(ArgumentError("tls: malformed certificate container"))
     outer_sig_spec = _tls_parse_certificate_signature_spec(cert_der, outer_sig_alg_start, outer_sig_alg_end)
     signature = _asn1_bit_string_bytes(cert_der, signature_start, signature_end)
     tbs_der = copy(@view cert_der[cert_start:(tbs_next - 1)])
     tbs_pos = tbs_start
     if tbs_pos <= tbs_end && cert_der[tbs_pos] == _ASN1_CONTEXT_EXPLICIT_VERSION
-        _, _, tbs_pos = _asn1_expect_tlv(cert_der, tbs_pos, _ASN1_CONTEXT_EXPLICIT_VERSION)
+        _, _, tbs_pos = _asn1_expect_tlv(cert_der, tbs_pos, _ASN1_CONTEXT_EXPLICIT_VERSION, tbs_end)
     end
-    _, _, _, tbs_pos = _asn1_read_tlv(cert_der, tbs_pos) # serial number
-    tbs_sig_alg_start, tbs_sig_alg_end, tbs_pos = _asn1_expect_tlv(cert_der, tbs_pos, _ASN1_SEQUENCE)
+    _, _, _, tbs_pos = _asn1_read_tlv(cert_der, tbs_pos, tbs_end) # serial number
+    tbs_sig_alg_start, tbs_sig_alg_end, tbs_pos = _asn1_expect_tlv(cert_der, tbs_pos, _ASN1_SEQUENCE, tbs_end)
     _tls_parse_certificate_signature_spec(cert_der, tbs_sig_alg_start, tbs_sig_alg_end)
     cert_der[tbs_sig_alg_start:tbs_sig_alg_end] == cert_der[outer_sig_alg_start:outer_sig_alg_end] ||
         throw(ArgumentError("tls: mismatched X.509 certificate signature algorithms"))
-    issuer_start, issuer_end, tbs_pos = _asn1_expect_tlv(cert_der, tbs_pos, _ASN1_SEQUENCE)
-    validity_start, validity_end, tbs_pos = _asn1_expect_tlv(cert_der, tbs_pos, _ASN1_SEQUENCE)
-    subject_start, subject_end, tbs_pos = _asn1_expect_tlv(cert_der, tbs_pos, _ASN1_SEQUENCE)
+    issuer_start, issuer_end, tbs_pos = _asn1_expect_tlv(cert_der, tbs_pos, _ASN1_SEQUENCE, tbs_end)
+    validity_start, validity_end, tbs_pos = _asn1_expect_tlv(cert_der, tbs_pos, _ASN1_SEQUENCE, tbs_end)
+    subject_start, subject_end, tbs_pos = _asn1_expect_tlv(cert_der, tbs_pos, _ASN1_SEQUENCE, tbs_end)
     common_name = _tls_parse_subject_common_name(cert_der, subject_start, subject_end)
-    spki_start, spki_end, tbs_pos = _asn1_expect_tlv(cert_der, tbs_pos, _ASN1_SEQUENCE)
+    spki_start, spki_end, tbs_pos = _asn1_expect_tlv(cert_der, tbs_pos, _ASN1_SEQUENCE, tbs_end)
     public_key = _tls_parse_subject_public_key_info(cert_der, spki_start, spki_end)
     dns_names = String[]
     ip_addresses = Vector{Vector{UInt8}}()
@@ -1020,9 +1035,9 @@ function _tls_parse_der_certificate_info(cert_der::AbstractVector{UInt8})::_TLSC
     valid_until_s = Int64(0)
     begin
         time_pos = validity_start
-        tag, value_start, value_end, time_pos = _asn1_read_tlv(cert_der, time_pos)
+        tag, value_start, value_end, time_pos = _asn1_read_tlv(cert_der, time_pos, validity_end)
         valid_from_s = _asn1_parse_x509_time(cert_der, UInt8(tag), value_start, value_end)
-        tag, value_start, value_end, time_pos = _asn1_read_tlv(cert_der, time_pos)
+        tag, value_start, value_end, time_pos = _asn1_read_tlv(cert_der, time_pos, validity_end)
         valid_until_s = _asn1_parse_x509_time(cert_der, UInt8(tag), value_start, value_end)
         time_pos == validity_end + 1 || throw(ArgumentError("tls: malformed certificate validity"))
     end
@@ -1042,20 +1057,20 @@ function _tls_parse_der_certificate_info(cert_der::AbstractVector{UInt8})::_TLSC
     permitted_email_addresses = String[]
     excluded_email_addresses = String[]
     while tbs_pos <= tbs_end
-        tag, field_start, field_end, tbs_pos = _asn1_read_tlv(cert_der, tbs_pos)
+        tag, field_start, field_end, tbs_pos = _asn1_read_tlv(cert_der, tbs_pos, tbs_end)
         if tag == _ASN1_CONTEXT_EXPLICIT_EXTENSIONS
-            exts_start, exts_end, exts_next = _asn1_expect_tlv(cert_der, field_start, _ASN1_SEQUENCE)
+            exts_start, exts_end, exts_next = _asn1_expect_tlv(cert_der, field_start, _ASN1_SEQUENCE, field_end)
             exts_next == field_end + 1 || throw(ArgumentError("tls: malformed certificate extensions"))
             ext_pos = exts_start
             while ext_pos <= exts_end
-                ext_start, ext_end, ext_pos = _asn1_expect_tlv(cert_der, ext_pos, _ASN1_SEQUENCE)
-                oid_start, oid_end, value_pos = _asn1_expect_tlv(cert_der, ext_start, _ASN1_OBJECT_IDENTIFIER)
+                ext_start, ext_end, ext_pos = _asn1_expect_tlv(cert_der, ext_pos, _ASN1_SEQUENCE, exts_end)
+                oid_start, oid_end, value_pos = _asn1_expect_tlv(cert_der, ext_start, _ASN1_OBJECT_IDENTIFIER, ext_end)
                 critical = false
                 if value_pos <= ext_end && cert_der[value_pos] == _ASN1_BOOLEAN
-                    critical_start, critical_end, value_pos = _asn1_expect_tlv(cert_der, value_pos, _ASN1_BOOLEAN)
+                    critical_start, critical_end, value_pos = _asn1_expect_tlv(cert_der, value_pos, _ASN1_BOOLEAN, ext_end)
                     critical = _asn1_boolean_value(cert_der, critical_start, critical_end)
                 end
-                octet_start, octet_end, value_pos = _asn1_expect_tlv(cert_der, value_pos, _ASN1_OCTET_STRING)
+                octet_start, octet_end, value_pos = _asn1_expect_tlv(cert_der, value_pos, _ASN1_OCTET_STRING, ext_end)
                 value_pos == ext_end + 1 || throw(ArgumentError("tls: malformed certificate extension value"))
                 if _asn1_oid_equals(cert_der, oid_start, oid_end, _ASN1_OID_SUBJECT_ALT_NAME)
                     has_san_extension = true

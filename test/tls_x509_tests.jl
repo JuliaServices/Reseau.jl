@@ -760,3 +760,47 @@ end
         end
     end
 end
+
+@testset "ASN.1 DER strictness: minimal lengths + parent-bounded TLV" begin
+    # DER (X.690 §10.1) requires the minimal definite length encoding.
+    @testset "non-minimal DER lengths are rejected" begin
+        # long form used where the short form would suffice
+        @test_throws ArgumentError TLX._asn1_read_length(UInt8[0x81, 0x05], 1, 2)
+        @test_throws ArgumentError TLX._asn1_read_length(UInt8[0x81, 0x01], 1, 2)
+        @test_throws ArgumentError TLX._asn1_read_length(UInt8[0x81, 0x7f], 1, 2)
+        # long form carrying a redundant leading zero octet
+        @test_throws ArgumentError TLX._asn1_read_length(UInt8[0x82, 0x00, 0x80], 1, 3)
+        @test_throws ArgumentError TLX._asn1_read_length(UInt8[0x83, 0x00, 0x01, 0x00], 1, 4)
+    end
+    @testset "minimal DER lengths are accepted" begin
+        @test TLX._asn1_read_length(UInt8[0x05], 1, 1) == (5, 2)               # short form
+        @test TLX._asn1_read_length(UInt8[0x7f], 1, 1) == (127, 2)             # short form boundary
+        @test TLX._asn1_read_length(UInt8[0x81, 0x80], 1, 2) == (128, 3)       # minimal long form
+        @test TLX._asn1_read_length(UInt8[0x82, 0x01, 0x00], 1, 3) == (256, 4) # minimal 2-octet long form
+    end
+
+    @testset "TLV reads are bounded by the enclosing structure, not the buffer" begin
+        # Outer OCTET STRING (tag 0x04, len 2) => value occupies positions 3..4.
+        # An inner TLV planted at pos 3 claims len 10, which would run to pos 14.
+        buf = UInt8[0x04, 0x02, 0x04, 0x0a, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        _, ovs, ove, _ = TLX._asn1_read_tlv(buf, 1, lastindex(buf))
+        @test ove == 4                                              # parent boundary
+        # Bounded by the parent end, the inner length escapes and is rejected.
+        @test_throws ArgumentError TLX._asn1_read_tlv(buf, ovs, ove)
+        @test_throws ArgumentError TLX._asn1_expect_tlv(buf, ovs, 0x04, ove)
+        # Bounded only by the buffer end (the un-bounded behavior), the same read
+        # "succeeds" by consuming sibling bytes — which is exactly what the parent
+        # bound now prevents.
+        _, _, ive, _ = TLX._asn1_read_tlv(buf, ovs, lastindex(buf))
+        @test ive == 14
+    end
+
+    @testset "a child length escaping its container is rejected end-to-end" begin
+        # SEQUENCE (len 4) whose first child OID claims len 5 — one octet past the
+        # SEQUENCE end — followed by trailing sibling bytes the child would consume
+        # if the read were bounded by the buffer rather than the SEQUENCE.
+        seq = UInt8[0x30, 0x04, 0x06, 0x05, 0xAA, 0xBB]
+        buf = vcat(seq, UInt8[0x99, 0x99, 0x99, 0x99])
+        @test_throws ArgumentError TLX._tls_parse_extended_key_usage(buf, 1, length(seq))
+    end
+end
