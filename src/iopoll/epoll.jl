@@ -53,7 +53,15 @@ mutable struct EpollBackendState <: BackendState
     epfd::Cint
     wakefd::Cint
     events::Vector{EpollEvent}
+    malloc_events::Ptr{EpollEvent}
+    wait_gc_safe::Bool
+    use_malloc_events::Bool
     @atomic wake_sig::UInt32
+end
+
+function _epoll_env_enabled(name::AbstractString, default::Bool)::Bool
+    value = strip(lowercase(get(ENV, name, default ? "1" : "0")))
+    return !(isempty(value) || value == "0" || value == "false" || value == "no" || value == "off")
 end
 
 """
@@ -80,7 +88,26 @@ function _backend_init!(state::Poller)::Int32
         @ccall close(epfd::Cint)::Cint
         return errno
     end
-    state.backend_state = EpollBackendState(epfd, efd, Vector{EpollEvent}(undef, MAX_EPOLL_EVENTS), UInt32(0))
+    wait_gc_safe = _epoll_env_enabled("RESEAU_EPOLL_WAIT_GCSAFE", false)
+    use_malloc_events = _epoll_env_enabled("RESEAU_EPOLL_MALLOC_EVENTS", false)
+    malloc_events = Ptr{EpollEvent}(C_NULL)
+    if use_malloc_events
+        malloc_events = Ptr{EpollEvent}(Base.Libc.malloc(sizeof(EpollEvent) * MAX_EPOLL_EVENTS))
+        if malloc_events == C_NULL
+            @ccall close(efd::Cint)::Cint
+            @ccall close(epfd::Cint)::Cint
+            return Int32(Base.Libc.ENOMEM)
+        end
+    end
+    state.backend_state = EpollBackendState(
+        epfd,
+        efd,
+        Vector{EpollEvent}(undef, MAX_EPOLL_EVENTS),
+        malloc_events,
+        wait_gc_safe,
+        use_malloc_events,
+        UInt32(0),
+    )
     return Int32(0)
 end
 
@@ -97,6 +124,8 @@ function _backend_close!(state::Poller)
             epoll.epfd = Cint(-1)
         end
         epoll.wakefd = Cint(-1)
+        epoll.malloc_events != C_NULL && Base.Libc.free(epoll.malloc_events)
+        epoll.malloc_events = Ptr{EpollEvent}(C_NULL)
     end
     state.backend_state = nothing
     return nothing
@@ -214,6 +243,35 @@ end
     return PollMode.T(mode)
 end
 
+@inline function _epoll_wait!(
+        epoll::EpollBackendState,
+        events::Ptr{EpollEvent},
+        maxevents::Cint,
+        waitms::Cint,
+    )::Cint
+    if epoll.wait_gc_safe
+        return @gcsafe_ccall epoll_wait(
+            epoll.epfd::Cint,
+            events::Ptr{EpollEvent},
+            maxevents::Cint,
+            waitms::Cint,
+        )::Cint
+    end
+    return @ccall epoll_wait(
+        epoll.epfd::Cint,
+        events::Ptr{EpollEvent},
+        maxevents::Cint,
+        waitms::Cint,
+    )::Cint
+end
+
+@inline function _epoll_polled_event(epoll::EpollBackendState, events::Vector{EpollEvent}, i::Int)::EpollEvent
+    if epoll.use_malloc_events
+        return unsafe_load(epoll.malloc_events, i)
+    end
+    return events[i]
+end
+
 """
 Poll epoll once and dispatch decoded events.
 """
@@ -224,15 +282,14 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
     events = epoll.events
     waitms = _epoll_wait_timeout_ms(delay_ns)
     while true
-        n = GC.@preserve events begin
-            @gcsafe_ccall epoll_wait(
-                epoll.epfd::Cint,
-                pointer(events)::Ptr{EpollEvent},
-                Cint(length(events))::Cint,
-                waitms::Cint,
-            )::Cint
+        n = if epoll.use_malloc_events
+            _epoll_wait!(epoll, epoll.malloc_events, Cint(MAX_EPOLL_EVENTS), waitms)
+        else
+            GC.@preserve events begin
+                _epoll_wait!(epoll, pointer(events), Cint(length(events)), waitms)
+            end
         end
-        if n == -1
+        if n == Cint(-1)
             errno = Int32(Base.Libc.errno())
             if errno == Int32(Base.Libc.EINTR)
                 waitms > 0 && return Int32(0)
@@ -241,7 +298,7 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
             return errno
         end
         for i in 1:n
-            ev = events[i]
+            ev = _epoll_polled_event(epoll, events, i)
             ev.events == UInt32(0) && continue
             event_data = _epoll_event_data(ev)
             if event_data == _WAKE_TOKEN
