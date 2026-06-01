@@ -115,6 +115,7 @@ jobs:
           usesh: true
           copyback: false
           prepare: |
+            pkg install -y git
             # Pretend we're running on Cirrus CI (RIP) to reuse FreeBSD testing setup
             export JULIA_VERSION="${{ matrix.version }}"
             export CIRRUS_CI="true"
