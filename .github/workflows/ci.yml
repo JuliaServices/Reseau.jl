@@ -84,6 +84,47 @@ jobs:
         with:
           files: lcov.info
           token: ${{ secrets.GITHUB_TOKEN }}
+  test-freebsd:
+    name: Julia ${{ matrix.version }} - FreeBSD ${{ matrix.release }} - ${{ matrix.arch }} - t${{ matrix.threads }} - ${{ github.event_name }}
+    runs-on: ubuntu-latest
+    env:
+      JULIA_NUM_THREADS: ${{ matrix.threads }}
+      RESEAU_RUN_TLS_TESTS: '1'
+      RESEAU_RUN_NETWORK_TESTS: '1'
+      RESEAU_TRIM_EXE_TIMEOUT_S: "60.0"
+      RESEAU_TRIM_BUNDLE: '1'
+    strategy:
+      fast-fail: false
+      matrix:
+        include:
+          - version: '1'
+            threads: 1
+            arch: "x86_64"
+            release: "15.0"
+          - version: '1'
+            threads: 2
+            arch: "x86_64"
+            release: "15.0"
+      steps:
+        - uses: actions/checkout@v6
+        - uses: vmactions/freebsd-vm@v1
+          with:
+            release: ${{ matrix.release }}
+            arch: ${{ matrix.arch }}
+            envs: 'JULIA_NUM_THREADS RESEAU_RUN_TLS_TESTS RESEAU_RUN_NETWORK_TESTS RESEAU_TRIM_EXE_TIMEOUT_S RESEAU_TRIM_BUNDLE'
+            usesh: true
+            copyback: false
+            prepare: |
+              # Pretend we're running on Cirrus CI (RIP) to reuse FreeBSD testing setup
+              export JULIA_VERSION="${{ matrix.version }}"
+              export CIRRUS_CI="true"
+              export CIRRUS_OS="freebsd"
+              export CIRRUS_WORKING_DIR="${PWD}"
+              export CIRRUS_REPO_NAME="${GITHUB_REPOSITORY}"
+              sh -c "$(fetch https://raw.githubusercontent.com/ararslan/CirrusCI.jl/master/bin/install.sh -o -)"
+            run: |
+              cirrusjl build
+              cirrusjl test
   docs:
     name: Documentation
     runs-on: ubuntu-latest
