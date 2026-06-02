@@ -96,7 +96,7 @@ jobs:
           set breakpoint pending on
           handle SIGSEGV nostop noprint pass
           set $wait_count = 0
-          break jl_gc_wait_for_the_world
+          break jl_gc_wait_for_the_world if gc_n_threads > 1
           commands
           silent
           set $wait_count = $wait_count + 1
@@ -122,7 +122,7 @@ jobs:
           bt 8
           continue
           end
-          break jl_safepoint_wait_gc
+          break jl_safepoint_wait_gc if ct != 0
           commands
           silent
           printf "\\n--- hit jl_safepoint_wait_gc ---\\n"
