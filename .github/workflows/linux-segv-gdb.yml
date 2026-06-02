@@ -121,15 +121,14 @@ jobs:
           set -euo pipefail
           export JULIA_DEPOT_PATH=/tmp/julia_depot
           export JULIA_PKG_PRECOMPILE_AUTO=0
+          echo 'Base.include(Base.__toplevel__, "/tmp/UsesHTTPOneRequest/src/UsesHTTPOneRequest.jl")' >/tmp/repro_driver.jl
+          SYSIMAGE="$(julia -e 'print(unsafe_string(Base.JLOptions().image_file))')"
           python3 - <<'PY'
           from pathlib import Path
           Path("/tmp/gdbcmds").write_text("""\
           set pagination off
           set confirm off
           set print thread-events off
-          set follow-fork-mode child
-          set follow-exec-mode same
-          set detach-on-fork on
           set $segv_count = 0
           handle SIGSEGV stop print pass
           run
@@ -144,6 +143,8 @@ jobs:
           info registers
           printf "\\n--- current thread bt ---\\n"
           bt
+          printf "\\n--- julia task probe ---\\n"
+          p jl_get_current_task()
           printf "\\n--- all threads bt ---\\n"
           thread apply all bt
           printf "\\n--- pc disasm ---\\n"
@@ -151,4 +152,4 @@ jobs:
           quit
           """)
           PY
-          gdb -q -x /tmp/gdbcmds --args julia --startup-file=no --project=/tmp/UsesHTTPOneRequest -e 'using Pkg; Pkg.precompile()'
+          gdb -q -x /tmp/gdbcmds --args julia -C native -J"$SYSIMAGE" -g1 --startup-file=no --history-file=no --project=/tmp/UsesHTTPOneRequest --output-ji=/tmp/UsesHTTPOneRequest.ji --output-incremental=yes /tmp/repro_driver.jl
