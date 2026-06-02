@@ -7,34 +7,35 @@ on:
       - codex/linux-amd64-segv-gdb
 
 jobs:
-  gdb:
+  controls:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        julia-version: ['1.11.9', '1.12.5']
     steps:
       - uses: actions/checkout@v4
-
       - uses: julia-actions/setup-julia@v2
         with:
-          version: '1.11.9'
-
-      - name: Install gdb
+          version: ${{ matrix.julia-version }}
+          arch: x64
+      - name: Host info
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gdb
-
-      - name: Build standalone adopted-thread repro
-        shell: bash
+          set -euxo pipefail
+          uname -a
+          uname -m
+          julia --version
+          julia -e 'println("Sys.ARCH=", Sys.ARCH); println("nthreads=", Threads.nthreads()); println("image=", unsafe_string(Base.JLOptions().image_file))'
+      - name: Build controls
         run: |
           set -euo pipefail
-          cat >/tmp/foreign_pkgout_gcsafe_repro.jl <<'JL'
-          module ForeignPkgoutGCSafeRepro
-
+          cat >/tmp/foreign_manual.jl <<'JL'
+          module ForeignManual
           mutable struct Ctx
               state::Threads.Atomic{Int}
               stop::Threads.Atomic{Int}
               counter::Threads.Atomic{Int}
           end
-
           function thread_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
               ctx = unsafe_pointer_to_objref(arg)::Ctx
               Threads.atomic_xchg!(ctx.state, 1)
@@ -47,9 +48,7 @@ jobs:
               Threads.atomic_xchg!(ctx.state, 2)
               return C_NULL
           end
-
           const ENTRY = @cfunction(thread_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
-
           function run()
               ctx = Ctx(Threads.Atomic{Int}(0), Threads.Atomic{Int}(0), Threads.Atomic{Int}(0))
               thread = Ref{UInt}(0)
@@ -73,449 +72,160 @@ jobs:
               end
               return nothing
           end
-
           if ccall(:jl_generating_output, Cint, ()) == 1
               run()
           end
-
           end
           JL
 
-      - name: Run standalone repro without gdb
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo 'Base.include(Base.__toplevel__, "/tmp/foreign_pkgout_gcsafe_repro.jl")' >/tmp/repro_driver.jl
-          SYSIMAGE="$(julia -e 'print(unsafe_string(Base.JLOptions().image_file))')"
-          set +e
-          for i in 1 2 3 4 5; do
-              echo "--- bare run $i ---"
-              julia -C native -J"$SYSIMAGE" -g1 --startup-file=no --history-file=no --output-ji="/tmp/ForeignPkgoutGCSafeRepro-$i.ji" --output-incremental=yes /tmp/repro_driver.jl
-              status=$?
-              echo "bare status $i = $status"
-          done
-          set -e
-
-      - name: Run standalone repro under passthrough gdb
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo 'Base.include(Base.__toplevel__, "/tmp/foreign_pkgout_gcsafe_repro.jl")' >/tmp/repro_driver.jl
-          SYSIMAGE="$(julia -e 'print(unsafe_string(Base.JLOptions().image_file))')"
-          python3 - <<'PY'
-          from pathlib import Path
-          Path("/tmp/gdbpasscmds").write_text("""\
-          set pagination off
-          set confirm off
-          set print thread-events off
-          handle SIGSEGV nostop noprint pass
-          run
-          printf "\\n--- passthrough gdb stopped/exited after run ---\\n"
-          p $_siginfo
-          quit
-          """)
-          PY
-          gdb -q -x /tmp/gdbpasscmds --args julia -C native -J"$SYSIMAGE" -g1 --startup-file=no --history-file=no --output-ji=/tmp/ForeignPkgoutGCSafeRepro-pass.ji --output-incremental=yes /tmp/repro_driver.jl
-
-      - name: Run standalone repro under filtered gdb
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo 'Base.include(Base.__toplevel__, "/tmp/foreign_pkgout_gcsafe_repro.jl")' >/tmp/repro_driver.jl
-          SYSIMAGE="$(julia -e 'print(unsafe_string(Base.JLOptions().image_file))')"
-          python3 - <<'PY'
-          from pathlib import Path
-          Path("/tmp/gdbpurefiltercmds").write_text("""\
-          set pagination off
-          set confirm off
-          set print thread-events off
-          handle SIGSEGV stop noprint pass
-          set $sig_count = 0
-          set $safepoint_count = 0
-          catch signal SIGSEGV
-          commands
-          silent
-          set $sig_count = $sig_count + 1
-          set $fault = (unsigned long)$_siginfo._sifields._sigfault.si_addr
-          set $sp = (unsigned long)jl_safepoint_pages
-          set $limit = $sp + (unsigned long)jl_page_size * 4
-          if $fault >= $sp && $fault < $limit
-            set $safepoint_count = $safepoint_count + 1
-            continue
+          cat >/tmp/foreign_native.jl <<'JL'
+          module ForeignNative
+          mutable struct Ctx
+              state::Threads.Atomic{Int}
+              stop::Threads.Atomic{Int}
+              counter::Threads.Atomic{Int}
           end
-          printf "\\n--- pure filtered gdb non-safepoint SIGSEGV ---\\n"
-          printf "sig_count=%d safepoint_count=%d\\n", $sig_count, $safepoint_count
-          p $_siginfo
-          p jl_gc_running
-          p/x jl_safepoint_pages
-          p jl_page_size
-          info registers
-          bt 30
-          thread apply all bt 16
-          quit
-          end
-          run
-          printf "\\n--- pure filtered gdb exited normally ---\\n"
-          printf "sig_count=%d safepoint_count=%d\\n", $sig_count, $safepoint_count
-          p $_siginfo
-          quit
-          """)
-          PY
-          gdb -q -x /tmp/gdbpurefiltercmds --args julia -C native -J"$SYSIMAGE" -g1 --startup-file=no --history-file=no --output-ji=/tmp/ForeignPkgoutGCSafeRepro-filter.ji --output-incremental=yes /tmp/repro_driver.jl
-
-      - name: Run standalone repro under gdb
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo 'Base.include(Base.__toplevel__, "/tmp/foreign_pkgout_gcsafe_repro.jl")' >/tmp/repro_driver.jl
-          SYSIMAGE="$(julia -e 'print(unsafe_string(Base.JLOptions().image_file))')"
-          python3 - <<'PY'
-          from pathlib import Path
-          Path("/tmp/gdbcmds").write_text("""\
-          set pagination off
-          set confirm off
-          set print thread-events off
-          set breakpoint pending on
-          handle SIGSEGV nostop noprint pass
-          set $wait_count = 0
-          break jl_gc_wait_for_the_world if gc_n_threads > 1
-          commands
-          silent
-          set $wait_count = $wait_count + 1
-          printf "\\n--- hit jl_gc_wait_for_the_world %d ---\\n", $wait_count
-          p gc_n_threads
-          p/x gc_all_tls_states
-          p gc_all_tls_states[0]->gc_state
-          p gc_all_tls_states[1]->gc_state
-          p/x gc_all_tls_states[0]->safepoint
-          p/x gc_all_tls_states[1]->safepoint
-          bt 8
-          continue
-          end
-          break jl_set_gc_and_wait
-          commands
-          silent
-          printf "\\n--- hit jl_set_gc_and_wait ---\\n"
-          p jl_gc_running
-          p/x ct
-          p ct->ptls->gc_state
-          p ct->tid
-          p/x ct->ptls->safepoint
-          bt 8
-          continue
-          end
-          break jl_safepoint_end_gc
-          commands
-          silent
-          printf "\\n--- hit jl_safepoint_end_gc ---\\n"
-          p jl_gc_running
-          bt 8
-          continue
-          end
-          break sigdie_handler
-          commands
-          silent
-          printf "\\n--- hit sigdie_handler ---\\n"
-          p *info
-          p/x info->_sifields._sigfault.si_addr
-          p jl_gc_running
-          p/x (void*)jl_get_current_task()
-          bt 12
-          thread apply all bt 8
-          quit
-          end
-          run
-          printf "\\n--- process stopped/exited after run ---\\n"
-          p $_siginfo
-          thread apply all bt 8
-          quit
-          """)
-          PY
-          gdb -q -x /tmp/gdbcmds --args julia -C native -J"$SYSIMAGE" -g1 --startup-file=no --history-file=no --output-ji=/tmp/ForeignPkgoutGCSafeRepro.ji --output-incremental=yes /tmp/repro_driver.jl
-
-      - name: Build HTTP one-request package-output repro
-        shell: bash
-        run: |
-          set -euo pipefail
-          git clone --depth 1 https://github.com/JuliaWeb/HTTP.jl /tmp/HTTP.jl
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path("/tmp/HTTP.jl/src/HTTP.jl")
-          text = path.read_text()
-          old = '\nif ccall(:jl_generating_output, Cint, ()) == 1\n    include("precompile.jl")\nend\n'
-          if old not in text:
-              raise SystemExit("HTTP precompile block not found")
-          path.write_text(text.replace(old, '\n# HTTP package precompile workload disabled for this root-cause repro.\n'))
-          PY
-          mkdir -p /tmp/UsesHTTPOneRequest/src
-          cat >/tmp/UsesHTTPOneRequest/Project.toml <<'TOML'
-          name = "UsesHTTPOneRequest"
-          uuid = "11111111-2222-4333-8444-555555555555"
-          version = "0.1.0"
-
-          [deps]
-          HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
-          Reseau = "802f3686-a58f-41ce-bb0c-3c43c75bba36"
-          TOML
-          cat >/tmp/UsesHTTPOneRequest/src/UsesHTTPOneRequest.jl <<'JL'
-          module UsesHTTPOneRequest
-
-          using HTTP
-          using Reseau
-
-          function run()
-              server = HTTP.serve!("127.0.0.1", 0; listenany=true) do _request
-                  return HTTP.Response(200, "ok")
+          function thread_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
+              ctx = unsafe_pointer_to_objref(arg)::Ctx
+              Threads.atomic_xchg!(ctx.state, 1)
+              while Threads.atomic_cas!(ctx.stop, 0, 0) == 0
+                  @ccall gc_safe=true usleep(Cuint(1000)::Cuint)::Cint
+                  Threads.atomic_add!(ctx.counter, 1)
               end
-              try
-                  url = "http://" * HTTP.server_addr(server) * "/"
-                  response = HTTP.get(url; connect_timeout=1.0, request_timeout=5.0, response_header_timeout=5.0, read_idle_timeout=5.0)
-                  @assert response.status == 200
-                  @assert String(response.body) == "ok"
-              finally
-                  HTTP.forceclose(server)
-                  Reseau.IOPoll.shutdown!()
+              Threads.atomic_xchg!(ctx.state, 2)
+              return C_NULL
+          end
+          const ENTRY = @cfunction(thread_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
+          function run()
+              ctx = Ctx(Threads.Atomic{Int}(0), Threads.Atomic{Int}(0), Threads.Atomic{Int}(0))
+              thread = Ref{UInt}(0)
+              GC.@preserve ctx begin
+                  ret = @ccall pthread_create(
+                      thread::Ref{UInt},
+                      C_NULL::Ptr{Cvoid},
+                      ENTRY::Ptr{Cvoid},
+                      pointer_from_objref(ctx)::Ptr{Cvoid},
+                  )::Cint
+                  ret == 0 || error("pthread_create failed: $ret")
+                  while Threads.atomic_cas!(ctx.state, 1, 1) != 1
+                      yield()
+                  end
+                  for _ in 1:2_000
+                      Vector{Any}(undef, 10_000)
+                      GC.gc(false)
+                  end
+                  Threads.atomic_xchg!(ctx.stop, 1)
+                  @ccall pthread_join(thread[]::UInt, C_NULL::Ptr{Cvoid})::Cint
               end
               return nothing
           end
-
           if ccall(:jl_generating_output, Cint, ()) == 1
               run()
           end
-
           end
           JL
-          export JULIA_PKG_PRECOMPILE_AUTO=0
-          julia --project=/tmp/UsesHTTPOneRequest --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(path=pwd()); Pkg.develop(path="/tmp/HTTP.jl"); Pkg.instantiate(); Pkg.status()'
 
-      - name: Build HTTP one-request repro against Reseau main
-        shell: bash
-        run: |
-          set -euo pipefail
-          cp -R /tmp/UsesHTTPOneRequest /tmp/UsesHTTPOneRequestMain
-          rm -f /tmp/UsesHTTPOneRequestMain/Manifest.toml
-          git clone https://github.com/JuliaServices/Reseau.jl /tmp/Reseau-main
-          git -C /tmp/Reseau-main checkout 5bb8aa7e071a57ee68119708d9de54dff790265b
-          export JULIA_PKG_PRECOMPILE_AUTO=0
-          julia --project=/tmp/UsesHTTPOneRequestMain --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(path="/tmp/Reseau-main"); Pkg.develop(path="/tmp/HTTP.jl"); Pkg.instantiate(); Pkg.status()'
+          cat >/tmp/spawn_native.jl <<'JL'
+          module SpawnNative
+          mutable struct Ctx
+              state::Threads.Atomic{Int}
+              stop::Threads.Atomic{Int}
+              counter::Threads.Atomic{Int}
+          end
+          function worker(ctx::Ctx)
+              Threads.atomic_xchg!(ctx.state, 1)
+              while Threads.atomic_cas!(ctx.stop, 0, 0) == 0
+                  @ccall gc_safe=true usleep(Cuint(1000)::Cuint)::Cint
+                  Threads.atomic_add!(ctx.counter, 1)
+              end
+              Threads.atomic_xchg!(ctx.state, 2)
+              return nothing
+          end
+          function run()
+              Threads.nthreads() >= 2 || error("run with at least two Julia threads")
+              ctx = Ctx(Threads.Atomic{Int}(0), Threads.Atomic{Int}(0), Threads.Atomic{Int}(0))
+              task = Threads.@spawn worker(ctx)
+              while Threads.atomic_cas!(ctx.state, 1, 1) != 1
+                  yield()
+              end
+              for _ in 1:2_000
+                  Vector{Any}(undef, 10_000)
+                  GC.gc(false)
+              end
+              Threads.atomic_xchg!(ctx.stop, 1)
+              wait(task)
+              return nothing
+          end
+          if ccall(:jl_generating_output, Cint, ()) == 1
+              run()
+          end
+          end
+          JL
 
-      - name: Run HTTP one-request repro against Reseau main without gdb
-        shell: bash
-        env:
-          JULIA_PKG_PRECOMPILE_AUTO: "0"
+          cat >/tmp/foreign_manual_runtime_driver.jl <<'JL'
+          include("/tmp/foreign_manual.jl")
+          ForeignManual.run()
+          JL
+          cat >/tmp/foreign_manual_pkgout_driver.jl <<'JL'
+          Base.include(Base.__toplevel__, "/tmp/foreign_manual.jl")
+          JL
+          cat >/tmp/foreign_native_runtime_driver.jl <<'JL'
+          include("/tmp/foreign_native.jl")
+          ForeignNative.run()
+          JL
+          cat >/tmp/foreign_native_pkgout_driver.jl <<'JL'
+          Base.include(Base.__toplevel__, "/tmp/foreign_native.jl")
+          JL
+          cat >/tmp/spawn_native_runtime_driver.jl <<'JL'
+          include("/tmp/spawn_native.jl")
+          SpawnNative.run()
+          JL
+          cat >/tmp/spawn_native_pkgout_driver.jl <<'JL'
+          Base.include(Base.__toplevel__, "/tmp/spawn_native.jl")
+          JL
+      - name: Run controls
         run: |
-          set -euo pipefail
-          echo 'Base.include(Base.__toplevel__, "/tmp/UsesHTTPOneRequestMain/src/UsesHTTPOneRequest.jl")' >/tmp/uses_http_main_driver.jl
-          SYSIMAGE="$(julia -e 'print(unsafe_string(Base.JLOptions().image_file))')"
           set +e
-          for i in 1 2 3; do
-              echo "--- HTTP main bare run $i ---"
-              julia --project=/tmp/UsesHTTPOneRequestMain -C native -J"$SYSIMAGE" -g1 --startup-file=no --history-file=no --output-ji="/tmp/UsesHTTPOneRequest-main-$i.ji" --output-incremental=yes /tmp/uses_http_main_driver.jl
-              status=$?
-              echo "HTTP main bare status $i = $status"
-          done
-          set -e
-
-      - name: Run HTTP one-request repro against Reseau main under filtered gdb
-        shell: bash
-        env:
-          JULIA_PKG_PRECOMPILE_AUTO: "0"
-        run: |
-          set -euo pipefail
-          echo 'Base.include(Base.__toplevel__, "/tmp/UsesHTTPOneRequestMain/src/UsesHTTPOneRequest.jl")' >/tmp/uses_http_main_driver.jl
           SYSIMAGE="$(julia -e 'print(unsafe_string(Base.JLOptions().image_file))')"
-          python3 - <<'PY'
-          from pathlib import Path
-          Path("/tmp/gdbhttpmainfiltercmds").write_text("""\
-          set pagination off
-          set confirm off
-          set print thread-events off
-          handle SIGSEGV stop noprint pass
-          set $sig_count = 0
-          set $safepoint_count = 0
-          catch signal SIGSEGV
-          commands
-          silent
-          set $sig_count = $sig_count + 1
-          set $fault = (unsigned long)$_siginfo._sifields._sigfault.si_addr
-          set $sp = (unsigned long)jl_safepoint_pages
-          set $limit = $sp + (unsigned long)jl_page_size * 4
-          if $fault >= $sp && $fault < $limit
-            set $safepoint_count = $safepoint_count + 1
-            continue
-          end
-          printf "\\n--- main filtered gdb non-safepoint SIGSEGV ---\\n"
-          printf "sig_count=%d safepoint_count=%d\\n", $sig_count, $safepoint_count
-          p $_siginfo
-          p jl_gc_running
-          p/x jl_safepoint_pages
-          p jl_page_size
-          set $curtask = (void*)jl_get_current_task()
-          p/x $curtask
-          if $curtask != 0
-            p ((jl_task_t*)$curtask)->ptls->gc_state
-            p ((jl_task_t*)$curtask)->tid
-            p/x ((jl_task_t*)$curtask)->ptls->safepoint
-          end
-          info registers
-          bt 30
-          x/32gx $rsp
-          thread apply all bt 16
-          quit
-          end
-          run
-          printf "\\n--- main filtered HTTP gdb exited normally ---\\n"
-          printf "sig_count=%d safepoint_count=%d\\n", $sig_count, $safepoint_count
-          p $_siginfo
-          quit
-          """)
-          PY
-          gdb -q -x /tmp/gdbhttpmainfiltercmds --args julia --project=/tmp/UsesHTTPOneRequestMain -C native -J"$SYSIMAGE" -g1 --startup-file=no --history-file=no --output-ji=/tmp/UsesHTTPOneRequest-main-filter-gdb.ji --output-incremental=yes /tmp/uses_http_main_driver.jl
+          run_normal() {
+              label="$1"
+              driver="$2"
+              threads="$3"
+              echo "=== normal $label ==="
+              for i in 1 2 3 4 5; do
+                  if [ "$threads" = "2" ]; then
+                      timeout 20s julia -t2 -C native -g1 --startup-file=no --history-file=no "$driver"
+                  else
+                      timeout 20s julia -C native -g1 --startup-file=no --history-file=no "$driver"
+                  fi
+                  status=$?
+                  echo "STATUS normal $label $i $status"
+              done
+          }
+          run_pkgout() {
+              label="$1"
+              driver="$2"
+              threads="$3"
+              echo "=== pkgout $label ==="
+              for i in 1 2 3 4 5; do
+                  if [ "$threads" = "2" ]; then
+                      timeout 20s julia -t2 -C native -J"$SYSIMAGE" -g1 --startup-file=no --history-file=no --output-ji="/tmp/$label-$i.ji" --output-incremental=yes "$driver"
+                  else
+                      timeout 20s julia -C native -J"$SYSIMAGE" -g1 --startup-file=no --history-file=no --output-ji="/tmp/$label-$i.ji" --output-incremental=yes "$driver"
+                  fi
+                  status=$?
+                  echo "STATUS pkgout $label $i $status"
+              done
+          }
 
-      - name: Run HTTP one-request repro without gdb
-        shell: bash
-        env:
-          JULIA_PKG_PRECOMPILE_AUTO: "0"
-          RESEAU_FORCE_NATIVE_POLLER_DURING_PKGOUTPUT: "1"
-        run: |
-          set -euo pipefail
-          echo 'Base.include(Base.__toplevel__, "/tmp/UsesHTTPOneRequest/src/UsesHTTPOneRequest.jl")' >/tmp/uses_http_driver.jl
-          SYSIMAGE="$(julia -e 'print(unsafe_string(Base.JLOptions().image_file))')"
-          set +e
-          for i in 1 2 3; do
-              echo "--- HTTP bare run $i ---"
-              julia --project=/tmp/UsesHTTPOneRequest -C native -J"$SYSIMAGE" -g1 --startup-file=no --history-file=no --output-ji="/tmp/UsesHTTPOneRequest-$i.ji" --output-incremental=yes /tmp/uses_http_driver.jl
-              status=$?
-              echo "HTTP bare status $i = $status"
-          done
-          set -e
-
-      - name: Run HTTP one-request repro under filtered gdb
-        shell: bash
-        env:
-          JULIA_PKG_PRECOMPILE_AUTO: "0"
-          RESEAU_FORCE_NATIVE_POLLER_DURING_PKGOUTPUT: "1"
-        run: |
-          set -euo pipefail
-          echo 'Base.include(Base.__toplevel__, "/tmp/UsesHTTPOneRequest/src/UsesHTTPOneRequest.jl")' >/tmp/uses_http_driver.jl
-          SYSIMAGE="$(julia -e 'print(unsafe_string(Base.JLOptions().image_file))')"
-          python3 - <<'PY'
-          from pathlib import Path
-          Path("/tmp/gdbhttpfiltercmds").write_text("""\
-          set pagination off
-          set confirm off
-          set print thread-events off
-          handle SIGSEGV stop noprint pass
-          set $sig_count = 0
-          set $safepoint_count = 0
-          catch signal SIGSEGV
-          commands
-          silent
-          set $sig_count = $sig_count + 1
-          set $fault = (unsigned long)$_siginfo._sifields._sigfault.si_addr
-          set $sp = (unsigned long)jl_safepoint_pages
-          set $limit = $sp + (unsigned long)jl_page_size * 4
-          if $fault >= $sp && $fault < $limit
-            set $safepoint_count = $safepoint_count + 1
-            continue
-          end
-          printf "\\n--- filtered gdb non-safepoint SIGSEGV ---\\n"
-          printf "sig_count=%d safepoint_count=%d\\n", $sig_count, $safepoint_count
-          p $_siginfo
-          p jl_gc_running
-          p/x jl_safepoint_pages
-          p jl_page_size
-          set $curtask = (void*)jl_get_current_task()
-          p/x $curtask
-          if $curtask != 0
-            p ((jl_task_t*)$curtask)->ptls->gc_state
-            p ((jl_task_t*)$curtask)->tid
-            p/x ((jl_task_t*)$curtask)->ptls->safepoint
-          end
-          info registers
-          bt 30
-          x/32gx $rsp
-          thread apply all bt 16
-          quit
-          end
-          run
-          printf "\\n--- filtered HTTP gdb exited normally ---\\n"
-          printf "sig_count=%d safepoint_count=%d\\n", $sig_count, $safepoint_count
-          p $_siginfo
-          quit
-          """)
-          PY
-          gdb -q -x /tmp/gdbhttpfiltercmds --args julia --project=/tmp/UsesHTTPOneRequest -C native -J"$SYSIMAGE" -g1 --startup-file=no --history-file=no --output-ji=/tmp/UsesHTTPOneRequest-filter-gdb.ji --output-incremental=yes /tmp/uses_http_driver.jl
-
-      - name: Run HTTP one-request repro under gdb
-        shell: bash
-        env:
-          JULIA_PKG_PRECOMPILE_AUTO: "0"
-          RESEAU_FORCE_NATIVE_POLLER_DURING_PKGOUTPUT: "1"
-        run: |
-          set -euo pipefail
-          echo 'Base.include(Base.__toplevel__, "/tmp/UsesHTTPOneRequest/src/UsesHTTPOneRequest.jl")' >/tmp/uses_http_driver.jl
-          SYSIMAGE="$(julia -e 'print(unsafe_string(Base.JLOptions().image_file))')"
-          python3 - <<'PY'
-          from pathlib import Path
-          Path("/tmp/gdbhttpcmds").write_text("""\
-          set pagination off
-          set confirm off
-          set print thread-events off
-          set breakpoint pending on
-          handle SIGSEGV stop noprint pass
-          set $sig_count = 0
-          catch signal SIGSEGV
-          commands
-          silent
-          set $sig_count = $sig_count + 1
-          set $fault = (unsigned long)$_siginfo._sifields._sigfault.si_addr
-          set $sp = (unsigned long)jl_safepoint_pages
-          set $limit = $sp + (unsigned long)jl_page_size * 4
-          if $fault >= $sp && $fault < $limit
-            continue
-          end
-          printf "\\n--- non-safepoint SIGSEGV %d ---\\n", $sig_count
-          p $_siginfo
-          p jl_gc_running
-          p/x (void*)jl_get_current_task()
-          bt 20
-          thread apply all bt 12
-          quit
-          end
-          break sigdie_handler
-          commands
-          silent
-          printf "\\n--- hit sigdie_handler in HTTP repro ---\\n"
-          p *info
-          p/x info->_sifields._sigfault.si_addr
-          p jl_gc_running
-          p/x (void*)jl_get_current_task()
-          bt 20
-          thread apply all bt 12
-          quit
-          end
-          set $set_count = 0
-          break jl_set_gc_and_wait
-          commands
-          silent
-          set $set_count = $set_count + 1
-          if $set_count <= 5
-            printf "\\n--- HTTP hit jl_set_gc_and_wait %d ---\\n", $set_count
-            p jl_gc_running
-            p/x ct
-            p ct->ptls->gc_state
-            p ct->tid
-            p/x ct->ptls->safepoint
-            bt 8
-          end
-          continue
-          end
-          run
-          printf "\\n--- HTTP gdb stopped/exited after run ---\\n"
-          p $_siginfo
-          thread apply all bt 8
-          quit
-          """)
-          PY
-          gdb -q -x /tmp/gdbhttpcmds --args julia --project=/tmp/UsesHTTPOneRequest -C native -J"$SYSIMAGE" -g1 --startup-file=no --history-file=no --output-ji=/tmp/UsesHTTPOneRequest-gdb.ji --output-incremental=yes /tmp/uses_http_driver.jl
+          run_normal foreign_manual /tmp/foreign_manual_runtime_driver.jl 1
+          run_pkgout foreign_manual /tmp/foreign_manual_pkgout_driver.jl 1
+          if julia --startup-file=no -e 'VERSION >= v"1.12" || exit(7)'; then
+              run_normal foreign_native /tmp/foreign_native_runtime_driver.jl 1
+              run_pkgout foreign_native /tmp/foreign_native_pkgout_driver.jl 1
+              run_normal spawn_native /tmp/spawn_native_runtime_driver.jl 2
+              run_pkgout spawn_native /tmp/spawn_native_pkgout_driver.jl 2
+          else
+              echo "native gc_safe syntax unavailable on $(julia --version)"
+          fi
+          exit 0
