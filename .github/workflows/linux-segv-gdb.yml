@@ -93,95 +93,28 @@ jobs:
           set pagination off
           set confirm off
           set print thread-events off
-          set breakpoint pending on
-          handle SIGSEGV nostop noprint pass
-          break jl_set_gc_and_wait
-          commands
-          silent
-          printf "\\n--- hit jl_set_gc_and_wait ---\\n"
-          p jl_gc_running
-          p/x (void*)jl_get_current_task()
-          python
-          import gdb
-          for cmd in [
-              'p ((jl_task_t*)jl_get_current_task())->ptls->gc_state',
-              'p ((jl_task_t*)jl_get_current_task())->tid',
-              'p ((jl_task_t*)jl_get_current_task())->ptls->safepoint',
-          ]:
-              print(cmd)
-              try:
-                  print(gdb.execute(cmd, to_string=True))
-              except Exception as exc:
-                  print("ERR", exc)
-          end
-          bt
-          continue
-          end
-          break sigdie_handler
-          commands
-          silent
-          printf "\\n--- hit sigdie_handler ---\\n"
-          p *info
-          p/x info->_sifields._sigfault.si_addr
-          p jl_gc_running
-          p/x (void*)jl_get_current_task()
-          python
-          import gdb
-          for cmd in [
-              'p ((jl_task_t*)jl_get_current_task())->ptls->gc_state',
-              'p ((jl_task_t*)jl_get_current_task())->tid',
-              'p ((jl_task_t*)jl_get_current_task())->ptls->safepoint',
-          ]:
-              print(cmd)
-              try:
-                  print(gdb.execute(cmd, to_string=True))
-              except Exception as exc:
-                  print("ERR", exc)
-          end
-          bt
-          thread apply all bt
-          quit
-          end
+          handle SIGSEGV stop print pass
           run
-          printf "\\n--- stopped without breakpoint ---\\n"
-          printf "\\n--- siginfo ---\\n"
-          p $_siginfo
-          printf "\\n--- fault addr ---\\n"
-          p/x $_siginfo._sifields._sigfault.si_addr
-          printf "\\n--- safepoint globals ---\\n"
-          p/x jl_safepoint_pages
-          p jl_page_size
-          p jl_gc_running
-          printf "\\n--- julia task probe ---\\n"
-          p/x (void*)jl_get_current_task()
-          python
-          import gdb
-          for cmd in [
-              'p ((jl_task_t*)jl_get_current_task())->ptls->gc_state',
-              'p ((jl_task_t*)jl_get_current_task())->tid',
-              'p ((jl_task_t*)jl_get_current_task())->ptls->safepoint',
-          ]:
-              print(cmd)
-              try:
-                  print(gdb.execute(cmd, to_string=True))
-              except Exception as exc:
-                  print("ERR", exc)
+          set $segv_count = 0
+          while $segv_count < 12
+            set $segv_count = $segv_count + 1
+            printf "\\n--- SIGSEGV stop %d ---\\n", $segv_count
+            p $_siginfo
+            p/x $_siginfo._sifields._sigfault.si_addr
+            p/x jl_safepoint_pages
+            p jl_page_size
+            p jl_gc_running
+            p/x (void*)jl_get_current_task()
+            p ((jl_task_t*)jl_get_current_task())->ptls->gc_state
+            p ((jl_task_t*)jl_get_current_task())->tid
+            p ((jl_task_t*)jl_get_current_task())->ptls->safepoint
+            p ((jl_task_t*)jl_get_current_task())->ptls->signal_stack
+            p ((jl_task_t*)jl_get_current_task())->ptls->signal_stack_size
+            info registers
+            bt
+            thread apply all bt 8
+            continue
           end
-          printf "\\n--- registers ---\\n"
-          info registers
-          printf "\\n--- current thread bt ---\\n"
-          bt
-          printf "\\n--- continuing once ---\\n"
-          continue
-          printf "\\n--- second stop or exit ---\\n"
-          p $_siginfo
-          p/x $_siginfo._sifields._sigfault.si_addr
-          p/x (void*)jl_get_current_task()
-          bt
-          printf "\\n--- all threads bt ---\\n"
-          thread apply all bt
-          printf "\\n--- pc disasm ---\\n"
-          x/16i $pc-32
           quit
           """)
           PY
