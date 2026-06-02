@@ -71,6 +71,11 @@ jobs:
           cat >/tmp/gvisor-mwe/run_case.jl <<'JL'
           using Pkg
 
+          write("Project.toml", """
+          [preferences.HTTP]
+          precompile_workload = false
+          """)
+
           case = get(ENV, "REPRO_CASE", "")
           if case == "reseau-1.1.3"
               Pkg.add([
@@ -89,7 +94,7 @@ jobs:
           else
               error("unknown REPRO_CASE=$case")
           end
-          Pkg.precompile()
+          Pkg.instantiate()
           JL
 
       - name: Run MWE matrix under gVisor
@@ -111,7 +116,7 @@ jobs:
                   -v "/tmp/gvisor-case-${case}":/app \
                   -w /app \
                   julia:1.12.6 \
-                  julia --project=. --startup-file=no --history-file=no run_case.jl
+                  timeout 240s julia --project=. --startup-file=no --history-file=no run_case.jl
               setup_status=$?
               set -e
               echo "=== case ${case}: instantiate status ${setup_status} ==="
@@ -126,7 +131,7 @@ jobs:
                   -v "/tmp/gvisor-case-${case}":/app \
                   -w /app \
                   julia:1.12.6 \
-                  timeout "${seconds}s" julia -t1 --project=. --startup-file=no --history-file=no mwe.jl
+                  timeout "${seconds}s" julia -t1 --compiled-modules=no --project=. --startup-file=no --history-file=no mwe.jl
               status=$?
               set -e
               echo "=== case ${case}: status ${status} ==="
