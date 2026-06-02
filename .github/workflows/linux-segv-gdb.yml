@@ -93,28 +93,70 @@ jobs:
           set pagination off
           set confirm off
           set print thread-events off
-          handle SIGSEGV stop print pass
-          run
-          set $segv_count = 0
-          while $segv_count < 12
-            set $segv_count = $segv_count + 1
-            printf "\\n--- SIGSEGV stop %d ---\\n", $segv_count
-            p $_siginfo
-            p/x $_siginfo._sifields._sigfault.si_addr
-            p/x jl_safepoint_pages
-            p jl_page_size
-            p jl_gc_running
-            p/x (void*)jl_get_current_task()
-            p ((jl_task_t*)jl_get_current_task())->ptls->gc_state
-            p ((jl_task_t*)jl_get_current_task())->tid
-            p ((jl_task_t*)jl_get_current_task())->ptls->safepoint
-            p ((jl_task_t*)jl_get_current_task())->ptls->signal_stack
-            p ((jl_task_t*)jl_get_current_task())->ptls->signal_stack_size
-            info registers
-            bt
-            thread apply all bt 8
-            continue
+          set breakpoint pending on
+          handle SIGSEGV nostop noprint pass
+          set $wait_count = 0
+          break jl_gc_wait_for_the_world
+          commands
+          silent
+          set $wait_count = $wait_count + 1
+          printf "\\n--- hit jl_gc_wait_for_the_world %d ---\\n", $wait_count
+          p gc_n_threads
+          p/x gc_all_tls_states
+          p gc_all_tls_states[0]->gc_state
+          p gc_all_tls_states[1]->gc_state
+          p/x gc_all_tls_states[0]->safepoint
+          p/x gc_all_tls_states[1]->safepoint
+          bt 8
+          continue
           end
+          break jl_set_gc_and_wait
+          commands
+          silent
+          printf "\\n--- hit jl_set_gc_and_wait ---\\n"
+          p jl_gc_running
+          p/x ct
+          p ct->ptls->gc_state
+          p ct->tid
+          p/x ct->ptls->safepoint
+          bt 8
+          continue
+          end
+          break jl_safepoint_wait_gc
+          commands
+          silent
+          printf "\\n--- hit jl_safepoint_wait_gc ---\\n"
+          p jl_gc_running
+          p/x ct
+          p ct->ptls->gc_state
+          p ct->tid
+          bt 8
+          continue
+          end
+          break jl_safepoint_end_gc
+          commands
+          silent
+          printf "\\n--- hit jl_safepoint_end_gc ---\\n"
+          p jl_gc_running
+          bt 8
+          continue
+          end
+          break sigdie_handler
+          commands
+          silent
+          printf "\\n--- hit sigdie_handler ---\\n"
+          p *info
+          p/x info->_sifields._sigfault.si_addr
+          p jl_gc_running
+          p/x (void*)jl_get_current_task()
+          bt 12
+          thread apply all bt 8
+          quit
+          end
+          run
+          printf "\\n--- process stopped/exited after run ---\\n"
+          p $_siginfo
+          thread apply all bt 8
           quit
           """)
           PY
