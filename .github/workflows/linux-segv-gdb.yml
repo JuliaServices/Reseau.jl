@@ -122,14 +122,16 @@ jobs:
           bt 8
           continue
           end
-          break jl_safepoint_wait_gc if ct != 0
+          break jl_safepoint_wait_gc
           commands
           silent
           printf "\\n--- hit jl_safepoint_wait_gc ---\\n"
           p jl_gc_running
-          p/x ct
-          p ct->ptls->gc_state
-          p ct->tid
+          p/x (void*)jl_get_current_task()
+          if jl_get_current_task() != 0
+            p ((jl_task_t*)jl_get_current_task())->ptls->gc_state
+            p ((jl_task_t*)jl_get_current_task())->tid
+          end
           bt 8
           continue
           end
