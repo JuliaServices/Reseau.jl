@@ -247,8 +247,11 @@ jobs:
         run: |
           set -euo pipefail
           cp -R /tmp/UsesHTTPOneRequest /tmp/UsesHTTPOneRequestMain
+          rm -f /tmp/UsesHTTPOneRequestMain/Manifest.toml
+          git clone https://github.com/JuliaServices/Reseau.jl /tmp/Reseau-main
+          git -C /tmp/Reseau-main checkout 5bb8aa7e071a57ee68119708d9de54dff790265b
           export JULIA_PKG_PRECOMPILE_AUTO=0
-          julia --project=/tmp/UsesHTTPOneRequestMain --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(PackageSpec(url="https://github.com/JuliaServices/Reseau.jl", rev="5bb8aa7e071a57ee68119708d9de54dff790265b")); Pkg.develop(path="/tmp/HTTP.jl"); Pkg.instantiate(); Pkg.status()'
+          julia --project=/tmp/UsesHTTPOneRequestMain --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(path="/tmp/Reseau-main"); Pkg.develop(path="/tmp/HTTP.jl"); Pkg.instantiate(); Pkg.status()'
 
       - name: Run HTTP one-request repro against Reseau main without gdb
         shell: bash
