@@ -2,6 +2,9 @@ name: Linux Segv GDB
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - codex/linux-amd64-segv-gdb
 
 jobs:
   gdb:
