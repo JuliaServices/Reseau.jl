@@ -93,6 +93,7 @@ jobs:
           set pagination off
           set confirm off
           set print thread-events off
+          set breakpoint pending on
           handle SIGSEGV nostop noprint pass
           break jl_set_gc_and_wait
           commands
