@@ -86,7 +86,6 @@ jobs:
                   @assert String(resp.body) == "hello"
               finally
                   HTTP.forceclose(server)
-                  HTTP.Reseau.IOPoll.shutdown!()
               end
               return nothing
           end
