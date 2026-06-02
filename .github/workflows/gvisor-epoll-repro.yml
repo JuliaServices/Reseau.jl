@@ -1,0 +1,141 @@
+name: gVisor epoll repro
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/linux-amd64-segv-gdb
+
+jobs:
+  repro:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install runsc
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCH="$(uname -m)"
+          URL="https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}"
+          wget -q "${URL}/runsc" "${URL}/runsc.sha512" \
+              "${URL}/containerd-shim-runsc-v1" "${URL}/containerd-shim-runsc-v1.sha512"
+          sha512sum -c runsc.sha512 -c containerd-shim-runsc-v1.sha512
+          rm -f *.sha512
+          chmod a+rx runsc containerd-shim-runsc-v1
+          sudo mv runsc containerd-shim-runsc-v1 /usr/local/bin
+          sudo /usr/local/bin/runsc install
+          sudo systemctl restart docker || sudo service docker restart
+          docker run --rm --runtime=runsc hello-world
+          docker run --rm --runtime=runsc ubuntu:24.04 dmesg | head -n 20 || true
+
+      - name: Prepare MWE
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/gvisor-mwe
+          cat >/tmp/gvisor-mwe/mwe.jl <<'JL'
+          using Pkg
+          using HTTP
+
+          @info "environment" julia=string(VERSION) os=Sys.KERNEL arch=Sys.ARCH threads=Threads.nthreads()
+          deps = Dict(v.name => v for (_, v) in Pkg.dependencies())
+          @info "packages" HTTP=get(deps, "HTTP", nothing).version Reseau=get(deps, "Reseau", nothing).version
+          @info "kernel" uname=readchomp(`uname -a`)
+
+          server = HTTP.serve!(_ -> HTTP.Response(200, "ok"), "127.0.0.1", 8765)
+          client = HTTP.Client()
+          try
+              i = 0
+              while true
+                  i += 1
+                  HTTP.get(client, "http://127.0.0.1:8765/"; request_timeout=5, retry=false)
+                  rand(100_000)
+                  i % 1000 == 0 && @info "progress" requests=i
+              end
+          finally
+              try
+                  HTTP.forceclose(server)
+              catch err
+                  @warn "forceclose failed" err
+              end
+              try
+                  @eval using Reseau
+                  Reseau.IOPoll.shutdown!()
+              catch err
+                  @warn "Reseau shutdown failed" err
+              end
+          end
+          JL
+          cat >/tmp/gvisor-mwe/run_case.jl <<'JL'
+          using Pkg
+
+          case = get(ENV, "REPRO_CASE", "")
+          if case == "reseau-1.1.3"
+              Pkg.add([
+                  Pkg.PackageSpec(name="HTTP", version="2.0.0"),
+                  Pkg.PackageSpec(name="Reseau", url="https://github.com/JuliaServices/Reseau.jl", rev="165e3ac"),
+              ])
+          elseif case == "reseau-1.1.4"
+              Pkg.add([
+                  Pkg.PackageSpec(name="HTTP", version="2.0.0"),
+                  Pkg.PackageSpec(name="Reseau", url="https://github.com/JuliaServices/Reseau.jl", rev="b15028fc2c4ca80b908cee7fc83ff0cf9c61cc28"),
+              ])
+          elseif case == "current-branch"
+              Pkg.add(Pkg.PackageSpec(name="HTTP", version="2.0.0"))
+              Pkg.develop(Pkg.PackageSpec(path="/pkg"))
+              Pkg.resolve()
+          else
+              error("unknown REPRO_CASE=$case")
+          end
+          Pkg.precompile()
+          JL
+
+      - name: Run MWE matrix under gVisor
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_case() {
+              local case="$1"
+              local seconds="$2"
+              echo "=== case ${case}: instantiate ==="
+              rm -rf "/tmp/gvisor-case-${case}"
+              mkdir -p "/tmp/gvisor-case-${case}"
+              cp /tmp/gvisor-mwe/mwe.jl /tmp/gvisor-mwe/run_case.jl "/tmp/gvisor-case-${case}/"
+              set +e
+              docker run --runtime=runsc --rm \
+                  -e REPRO_CASE="${case}" \
+                  -e JULIA_PKG_PRECOMPILE_AUTO=0 \
+                  -v "$PWD":/pkg:ro \
+                  -v "/tmp/gvisor-case-${case}":/app \
+                  -w /app \
+                  julia:1.12.6 \
+                  julia --project=. --startup-file=no --history-file=no run_case.jl
+              setup_status=$?
+              set -e
+              echo "=== case ${case}: instantiate status ${setup_status} ==="
+              if [ "${setup_status}" -ne 0 ]; then
+                  return 0
+              fi
+
+              echo "=== case ${case}: run ${seconds}s ==="
+              set +e
+              docker run --runtime=runsc --rm \
+                  -e JULIA_PKG_PRECOMPILE_AUTO=0 \
+                  -v "/tmp/gvisor-case-${case}":/app \
+                  -w /app \
+                  julia:1.12.6 \
+                  timeout "${seconds}s" julia -t1 --project=. --startup-file=no --history-file=no mwe.jl
+              status=$?
+              set -e
+              echo "=== case ${case}: status ${status} ==="
+              if [ "${status}" -eq 124 ]; then
+                  echo "case ${case}: survived until timeout"
+              fi
+              return 0
+          }
+
+          run_case reseau-1.1.3 180
+          run_case reseau-1.1.4 90
+          run_case current-branch 180
