@@ -106,12 +106,15 @@ jobs:
               local seconds="$2"
               echo "=== case ${case}: instantiate ==="
               rm -rf "/tmp/gvisor-case-${case}"
+              rm -rf "/tmp/gvisor-depot-${case}"
               mkdir -p "/tmp/gvisor-case-${case}"
+              mkdir -p "/tmp/gvisor-depot-${case}"
               cp /tmp/gvisor-mwe/mwe.jl /tmp/gvisor-mwe/run_case.jl "/tmp/gvisor-case-${case}/"
               set +e
               docker run --runtime=runsc --rm \
                   -e REPRO_CASE="${case}" \
                   -e JULIA_PKG_PRECOMPILE_AUTO=0 \
+                  -v "/tmp/gvisor-depot-${case}":/root/.julia \
                   -v "$PWD":/pkg:ro \
                   -v "/tmp/gvisor-case-${case}":/app \
                   -w /app \
@@ -128,6 +131,7 @@ jobs:
               set +e
               docker run --runtime=runsc --rm \
                   -e JULIA_PKG_PRECOMPILE_AUTO=0 \
+                  -v "/tmp/gvisor-depot-${case}":/root/.julia \
                   -v "/tmp/gvisor-case-${case}":/app \
                   -w /app \
                   julia:1.12.6 \
