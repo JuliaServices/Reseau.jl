@@ -129,7 +129,7 @@ function init!()::Poller
         @atomic new_state.running = true
         POLLER[] = new_state
         try
-            if _is_generating_output()
+            if _is_generating_output() && get(ENV, "RESEAU_FORCE_NATIVE_POLLER_DURING_PKGOUTPUT", "0") != "1"
                 new_state.poller_task = errormonitor(@async _poller_task_entry(new_state))
             else
                 _spawn_detached_thread(

@@ -186,3 +186,146 @@ jobs:
           """)
           PY
           gdb -q -x /tmp/gdbcmds --args julia -C native -J"$SYSIMAGE" -g1 --startup-file=no --history-file=no --output-ji=/tmp/ForeignPkgoutGCSafeRepro.ji --output-incremental=yes /tmp/repro_driver.jl
+
+      - name: Build HTTP one-request package-output repro
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/JuliaWeb/HTTP.jl /tmp/HTTP.jl
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("/tmp/HTTP.jl/src/HTTP.jl")
+          text = path.read_text()
+          old = '\nif ccall(:jl_generating_output, Cint, ()) == 1\n    include("precompile.jl")\nend\n'
+          if old not in text:
+              raise SystemExit("HTTP precompile block not found")
+          path.write_text(text.replace(old, '\n# HTTP package precompile workload disabled for this root-cause repro.\n'))
+          PY
+          mkdir -p /tmp/UsesHTTPOneRequest/src
+          cat >/tmp/UsesHTTPOneRequest/Project.toml <<'TOML'
+          name = "UsesHTTPOneRequest"
+          uuid = "11111111-2222-4333-8444-555555555555"
+          version = "0.1.0"
+
+          [deps]
+          HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
+          Reseau = "802f3686-a58f-41ce-bb0c-3c43c75bba36"
+          TOML
+          cat >/tmp/UsesHTTPOneRequest/src/UsesHTTPOneRequest.jl <<'JL'
+          module UsesHTTPOneRequest
+
+          using HTTP
+          using Reseau
+
+          function run()
+              server = HTTP.serve!("127.0.0.1", 0; listenany=true) do _request
+                  return HTTP.Response(200, "ok")
+              end
+              try
+                  url = "http://" * HTTP.server_addr(server) * "/"
+                  response = HTTP.get(url; connect_timeout=1.0, request_timeout=5.0, response_header_timeout=5.0, read_idle_timeout=5.0)
+                  @assert response.status == 200
+                  @assert String(response.body) == "ok"
+              finally
+                  HTTP.forceclose(server)
+                  Reseau.IOPoll.shutdown!()
+              end
+              return nothing
+          end
+
+          if ccall(:jl_generating_output, Cint, ()) == 1
+              run()
+          end
+
+          end
+          JL
+          export JULIA_PKG_PRECOMPILE_AUTO=0
+          julia --project=/tmp/UsesHTTPOneRequest --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(path=pwd()); Pkg.develop(path="/tmp/HTTP.jl"); Pkg.instantiate(); Pkg.status()'
+
+      - name: Run HTTP one-request repro without gdb
+        shell: bash
+        env:
+          JULIA_PKG_PRECOMPILE_AUTO: "0"
+          RESEAU_FORCE_NATIVE_POLLER_DURING_PKGOUTPUT: "1"
+        run: |
+          set -euo pipefail
+          set +e
+          for i in 1 2 3; do
+              echo "--- HTTP bare run $i ---"
+              julia --project=/tmp/UsesHTTPOneRequest -C native -g1 --startup-file=no --history-file=no --output-ji="/tmp/UsesHTTPOneRequest-$i.ji" --output-incremental=yes /tmp/UsesHTTPOneRequest/src/UsesHTTPOneRequest.jl
+              status=$?
+              echo "HTTP bare status $i = $status"
+          done
+          set -e
+
+      - name: Run HTTP one-request repro under gdb
+        shell: bash
+        env:
+          JULIA_PKG_PRECOMPILE_AUTO: "0"
+          RESEAU_FORCE_NATIVE_POLLER_DURING_PKGOUTPUT: "1"
+        run: |
+          set -euo pipefail
+          SYSIMAGE="$(julia -e 'print(unsafe_string(Base.JLOptions().image_file))')"
+          python3 - <<'PY'
+          from pathlib import Path
+          Path("/tmp/gdbhttpcmds").write_text("""\
+          set pagination off
+          set confirm off
+          set print thread-events off
+          set breakpoint pending on
+          handle SIGSEGV stop noprint pass
+          set $sig_count = 0
+          catch signal SIGSEGV
+          commands
+          silent
+          set $sig_count = $sig_count + 1
+          set $fault = (unsigned long)$_siginfo._sifields._sigfault.si_addr
+          set $sp = (unsigned long)jl_safepoint_pages
+          set $limit = $sp + (unsigned long)jl_page_size * 4
+          if $fault >= $sp && $fault < $limit
+            continue
+          end
+          printf "\\n--- non-safepoint SIGSEGV %d ---\\n", $sig_count
+          p $_siginfo
+          p jl_gc_running
+          p/x (void*)jl_get_current_task()
+          bt 20
+          thread apply all bt 12
+          quit
+          end
+          break sigdie_handler
+          commands
+          silent
+          printf "\\n--- hit sigdie_handler in HTTP repro ---\\n"
+          p *info
+          p/x info->_sifields._sigfault.si_addr
+          p jl_gc_running
+          p/x (void*)jl_get_current_task()
+          bt 20
+          thread apply all bt 12
+          quit
+          end
+          set $set_count = 0
+          break jl_set_gc_and_wait
+          commands
+          silent
+          set $set_count = $set_count + 1
+          if $set_count <= 5
+            printf "\\n--- HTTP hit jl_set_gc_and_wait %d ---\\n", $set_count
+            p jl_gc_running
+            p/x ct
+            p ct->ptls->gc_state
+            p ct->tid
+            p/x ct->ptls->safepoint
+            bt 8
+          end
+          continue
+          end
+          run
+          printf "\\n--- HTTP gdb stopped/exited after run ---\\n"
+          p $_siginfo
+          thread apply all bt 8
+          quit
+          """)
+          PY
+          gdb -q -x /tmp/gdbhttpcmds --args julia --project=/tmp/UsesHTTPOneRequest -C native -J"$SYSIMAGE" -g1 --startup-file=no --history-file=no --output-ji=/tmp/UsesHTTPOneRequest-gdb.ji --output-incremental=yes /tmp/UsesHTTPOneRequest/src/UsesHTTPOneRequest.jl
