@@ -93,9 +93,56 @@ jobs:
           set pagination off
           set confirm off
           set print thread-events off
-          handle SIGSEGV stop print pass
+          handle SIGSEGV nostop noprint pass
+          break jl_set_gc_and_wait
+          commands
+          silent
+          printf "\\n--- hit jl_set_gc_and_wait ---\\n"
+          p jl_gc_running
+          p/x (void*)jl_get_current_task()
+          python
+          import gdb
+          for cmd in [
+              'p ((jl_task_t*)jl_get_current_task())->ptls->gc_state',
+              'p ((jl_task_t*)jl_get_current_task())->tid',
+              'p ((jl_task_t*)jl_get_current_task())->ptls->safepoint',
+          ]:
+              print(cmd)
+              try:
+                  print(gdb.execute(cmd, to_string=True))
+              except Exception as exc:
+                  print("ERR", exc)
+          end
+          bt
+          continue
+          end
+          break sigdie_handler
+          commands
+          silent
+          printf "\\n--- hit sigdie_handler ---\\n"
+          p *info
+          p/x info->_sifields._sigfault.si_addr
+          p jl_gc_running
+          p/x (void*)jl_get_current_task()
+          python
+          import gdb
+          for cmd in [
+              'p ((jl_task_t*)jl_get_current_task())->ptls->gc_state',
+              'p ((jl_task_t*)jl_get_current_task())->tid',
+              'p ((jl_task_t*)jl_get_current_task())->ptls->safepoint',
+          ]:
+              print(cmd)
+              try:
+                  print(gdb.execute(cmd, to_string=True))
+              except Exception as exc:
+                  print("ERR", exc)
+          end
+          bt
+          thread apply all bt
+          quit
+          end
           run
-          printf "\\n--- first stop ---\\n"
+          printf "\\n--- stopped without breakpoint ---\\n"
           printf "\\n--- siginfo ---\\n"
           p $_siginfo
           printf "\\n--- fault addr ---\\n"
