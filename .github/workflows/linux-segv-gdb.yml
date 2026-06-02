@@ -81,6 +81,42 @@ jobs:
           end
           JL
 
+      - name: Run standalone repro without gdb
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'Base.include(Base.__toplevel__, "/tmp/foreign_pkgout_gcsafe_repro.jl")' >/tmp/repro_driver.jl
+          SYSIMAGE="$(julia -e 'print(unsafe_string(Base.JLOptions().image_file))')"
+          set +e
+          for i in 1 2 3 4 5; do
+              echo "--- bare run $i ---"
+              julia -C native -J"$SYSIMAGE" -g1 --startup-file=no --history-file=no --output-ji="/tmp/ForeignPkgoutGCSafeRepro-$i.ji" --output-incremental=yes /tmp/repro_driver.jl
+              status=$?
+              echo "bare status $i = $status"
+          done
+          set -e
+
+      - name: Run standalone repro under passthrough gdb
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'Base.include(Base.__toplevel__, "/tmp/foreign_pkgout_gcsafe_repro.jl")' >/tmp/repro_driver.jl
+          SYSIMAGE="$(julia -e 'print(unsafe_string(Base.JLOptions().image_file))')"
+          python3 - <<'PY'
+          from pathlib import Path
+          Path("/tmp/gdbpasscmds").write_text("""\
+          set pagination off
+          set confirm off
+          set print thread-events off
+          handle SIGSEGV nostop noprint pass
+          run
+          printf "\\n--- passthrough gdb stopped/exited after run ---\\n"
+          p $_siginfo
+          quit
+          """)
+          PY
+          gdb -q -x /tmp/gdbpasscmds --args julia -C native -J"$SYSIMAGE" -g1 --startup-file=no --history-file=no --output-ji=/tmp/ForeignPkgoutGCSafeRepro-pass.ji --output-incremental=yes /tmp/repro_driver.jl
+
       - name: Run standalone repro under gdb
         shell: bash
         run: |
