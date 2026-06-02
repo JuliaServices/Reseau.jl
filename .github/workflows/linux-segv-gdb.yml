@@ -22,106 +22,70 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gdb
 
-      - name: Build repro tree
+      - name: Build standalone adopted-thread repro
         shell: bash
         run: |
           set -euo pipefail
+          cat >/tmp/foreign_pkgout_gcsafe_repro.jl <<'JL'
+          module ForeignPkgoutGCSafeRepro
 
-          python3 - <<'PY'
-          import shutil
-          import subprocess
-          import textwrap
-          from pathlib import Path
+          mutable struct Ctx
+              state::Threads.Atomic{Int}
+              stop::Threads.Atomic{Int}
+              counter::Threads.Atomic{Int}
+          end
 
-          shutil.copytree(Path.cwd(), "/tmp/Reseau", dirs_exist_ok=True)
-          shutil.rmtree("/tmp/Reseau/.git", ignore_errors=True)
-
-          p = Path("/tmp/Reseau/src/iopoll/runtime.jl")
-          s = p.read_text()
-          old = (
-              "            if _is_generating_output()\n"
-              "                new_state.poller_task = errormonitor(@async _poller_task_entry(new_state))\n"
-              "            else\n"
-          )
-          if old not in s:
-              raise SystemExit("forced-native patch did not match runtime.jl")
-          s = s.replace(old, "", 1)
-          s = s.replace("            end\n        catch\n", "        catch\n", 1)
-          p.write_text(s)
-
-          subprocess.run(
-              ["git", "clone", "--depth", "1", "https://github.com/JuliaWeb/HTTP.jl", "/tmp/HTTP"],
-              check=True,
-          )
-          p = Path("/tmp/HTTP/src/precompile.jl")
-          s = p.read_text()
-          needle = "function _precompile_workload_enabled()::Bool\n"
-          if needle not in s:
-              raise SystemExit("HTTP precompile gate did not match")
-          p.write_text(s.replace(needle, needle + "    return false\n", 1))
-
-          pkg = Path("/tmp/UsesHTTPOneRequest")
-          (pkg / "src").mkdir(parents=True, exist_ok=True)
-          (pkg / "Project.toml").write_text(textwrap.dedent("""\
-          name = "UsesHTTPOneRequest"
-          uuid = "b6cf8096-f78a-4b4f-82d7-bb177ce7e9ad"
-          version = "0.1.0"
-
-          [deps]
-          HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
-          """))
-          (pkg / "src" / "UsesHTTPOneRequest.jl").write_text(textwrap.dedent("""\
-          module UsesHTTPOneRequest
-
-          using HTTP
-          using Reseau
-
-          function _one_request_workload()
-              server = HTTP.serve!("127.0.0.1", 0; listenany = true) do _req
-                  return HTTP.Response(200, "hello")
+          function thread_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
+              ctx = unsafe_pointer_to_objref(arg)::Ctx
+              Threads.atomic_xchg!(ctx.state, 1)
+              while Threads.atomic_cas!(ctx.stop, 0, 0) == 0
+                  gc_state = @ccall jl_gc_safe_enter()::Int8
+                  @ccall usleep(Cuint(1000)::Cuint)::Cint
+                  @ccall jl_gc_safe_leave(gc_state::Int8)::Cvoid
+                  Threads.atomic_add!(ctx.counter, 1)
               end
-              try
-                  addr = HTTP.server_addr(server)
-                  resp = HTTP.get("http://$(addr)/")
-                  @assert resp.status == 200
-                  @assert String(resp.body) == "hello"
-              finally
-                  HTTP.forceclose(server)
-                  Reseau.IOPoll.shutdown!()
+              Threads.atomic_xchg!(ctx.state, 2)
+              return C_NULL
+          end
+
+          const ENTRY = @cfunction(thread_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
+
+          function run()
+              ctx = Ctx(Threads.Atomic{Int}(0), Threads.Atomic{Int}(0), Threads.Atomic{Int}(0))
+              thread = Ref{UInt}(0)
+              GC.@preserve ctx begin
+                  ret = @ccall pthread_create(
+                      thread::Ref{UInt},
+                      C_NULL::Ptr{Cvoid},
+                      ENTRY::Ptr{Cvoid},
+                      pointer_from_objref(ctx)::Ptr{Cvoid},
+                  )::Cint
+                  ret == 0 || error("pthread_create failed: $ret")
+                  while Threads.atomic_cas!(ctx.state, 1, 1) != 1
+                      yield()
+                  end
+                  for _ in 1:2_000
+                      Vector{Any}(undef, 10_000)
+                      GC.gc(false)
+                  end
+                  Threads.atomic_xchg!(ctx.stop, 1)
+                  @ccall pthread_join(thread[]::UInt, C_NULL::Ptr{Cvoid})::Cint
               end
               return nothing
           end
 
           if ccall(:jl_generating_output, Cint, ()) == 1
-              _one_request_workload()
+              run()
           end
 
           end
-          """))
-          PY
+          JL
 
-      - name: Precompile dependencies outside gdb
+      - name: Run standalone repro under gdb
         shell: bash
         run: |
           set -euo pipefail
-          export JULIA_DEPOT_PATH=/tmp/julia_depot
-          export JULIA_PKG_PRECOMPILE_AUTO=0
-          julia --startup-file=no --project=/tmp/UsesHTTPOneRequest -e '
-            using Pkg
-            Pkg.develop(Pkg.PackageSpec(path="/tmp/Reseau"))
-            Pkg.develop(Pkg.PackageSpec(path="/tmp/HTTP"))
-            Pkg.instantiate()
-            using HTTP
-            println(:deps_ready)
-          '
-
-      - name: Run tiny repro under gdb
-        shell: bash
-        run: |
-          set -euo pipefail
-          export JULIA_DEPOT_PATH=/tmp/julia_depot
-          export JULIA_PKG_PRECOMPILE_AUTO=0
-          echo 'Base.include(Base.__toplevel__, "/tmp/UsesHTTPOneRequest/src/UsesHTTPOneRequest.jl")' >/tmp/repro_driver.jl
+          echo 'Base.include(Base.__toplevel__, "/tmp/foreign_pkgout_gcsafe_repro.jl")' >/tmp/repro_driver.jl
           SYSIMAGE="$(julia -e 'print(unsafe_string(Base.JLOptions().image_file))')"
           python3 - <<'PY'
           from pathlib import Path
@@ -129,12 +93,9 @@ jobs:
           set pagination off
           set confirm off
           set print thread-events off
-          set $segv_count = 0
           handle SIGSEGV stop print pass
           run
           printf "\\n--- first stop ---\\n"
-          printf "segv_count="
-          p ++$segv_count
           printf "\\n--- siginfo ---\\n"
           p $_siginfo
           printf "\\n--- fault addr ---\\n"
@@ -142,8 +103,22 @@ jobs:
           printf "\\n--- safepoint globals ---\\n"
           p/x jl_safepoint_pages
           p jl_page_size
+          p jl_gc_running
           printf "\\n--- julia task probe ---\\n"
           p/x (void*)jl_get_current_task()
+          python
+          import gdb
+          for cmd in [
+              'p ((jl_task_t*)jl_get_current_task())->ptls->gc_state',
+              'p ((jl_task_t*)jl_get_current_task())->tid',
+              'p ((jl_task_t*)jl_get_current_task())->ptls->safepoint',
+          ]:
+              print(cmd)
+              try:
+                  print(gdb.execute(cmd, to_string=True))
+              except Exception as exc:
+                  print("ERR", exc)
+          end
           printf "\\n--- registers ---\\n"
           info registers
           printf "\\n--- current thread bt ---\\n"
@@ -162,4 +137,4 @@ jobs:
           quit
           """)
           PY
-          gdb -q -x /tmp/gdbcmds --args julia -C native -J"$SYSIMAGE" -g1 --startup-file=no --history-file=no --project=/tmp/UsesHTTPOneRequest --output-ji=/tmp/UsesHTTPOneRequest.ji --output-incremental=yes /tmp/repro_driver.jl
+          gdb -q -x /tmp/gdbcmds --args julia -C native -J"$SYSIMAGE" -g1 --startup-file=no --history-file=no --output-ji=/tmp/ForeignPkgoutGCSafeRepro.ji --output-incremental=yes /tmp/repro_driver.jl
