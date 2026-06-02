@@ -117,6 +117,52 @@ jobs:
           PY
           gdb -q -x /tmp/gdbpasscmds --args julia -C native -J"$SYSIMAGE" -g1 --startup-file=no --history-file=no --output-ji=/tmp/ForeignPkgoutGCSafeRepro-pass.ji --output-incremental=yes /tmp/repro_driver.jl
 
+      - name: Run standalone repro under filtered gdb
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'Base.include(Base.__toplevel__, "/tmp/foreign_pkgout_gcsafe_repro.jl")' >/tmp/repro_driver.jl
+          SYSIMAGE="$(julia -e 'print(unsafe_string(Base.JLOptions().image_file))')"
+          python3 - <<'PY'
+          from pathlib import Path
+          Path("/tmp/gdbpurefiltercmds").write_text("""\
+          set pagination off
+          set confirm off
+          set print thread-events off
+          handle SIGSEGV stop noprint pass
+          set $sig_count = 0
+          set $safepoint_count = 0
+          catch signal SIGSEGV
+          commands
+          silent
+          set $sig_count = $sig_count + 1
+          set $fault = (unsigned long)$_siginfo._sifields._sigfault.si_addr
+          set $sp = (unsigned long)jl_safepoint_pages
+          set $limit = $sp + (unsigned long)jl_page_size * 4
+          if $fault >= $sp && $fault < $limit
+            set $safepoint_count = $safepoint_count + 1
+            continue
+          end
+          printf "\\n--- pure filtered gdb non-safepoint SIGSEGV ---\\n"
+          printf "sig_count=%d safepoint_count=%d\\n", $sig_count, $safepoint_count
+          p $_siginfo
+          p jl_gc_running
+          p/x jl_safepoint_pages
+          p jl_page_size
+          info registers
+          bt 30
+          thread apply all bt 16
+          quit
+          end
+          run
+          printf "\\n--- pure filtered gdb exited normally ---\\n"
+          printf "sig_count=%d safepoint_count=%d\\n", $sig_count, $safepoint_count
+          p $_siginfo
+          quit
+          """)
+          PY
+          gdb -q -x /tmp/gdbpurefiltercmds --args julia -C native -J"$SYSIMAGE" -g1 --startup-file=no --history-file=no --output-ji=/tmp/ForeignPkgoutGCSafeRepro-filter.ji --output-incremental=yes /tmp/repro_driver.jl
+
       - name: Run standalone repro under gdb
         shell: bash
         run: |
