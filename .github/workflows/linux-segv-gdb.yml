@@ -249,10 +249,12 @@ jobs:
           RESEAU_FORCE_NATIVE_POLLER_DURING_PKGOUTPUT: "1"
         run: |
           set -euo pipefail
+          echo 'Base.include(Base.__toplevel__, "/tmp/UsesHTTPOneRequest/src/UsesHTTPOneRequest.jl")' >/tmp/uses_http_driver.jl
+          SYSIMAGE="$(julia -e 'print(unsafe_string(Base.JLOptions().image_file))')"
           set +e
           for i in 1 2 3; do
               echo "--- HTTP bare run $i ---"
-              julia --project=/tmp/UsesHTTPOneRequest -C native -g1 --startup-file=no --history-file=no --output-ji="/tmp/UsesHTTPOneRequest-$i.ji" --output-incremental=yes /tmp/UsesHTTPOneRequest/src/UsesHTTPOneRequest.jl
+              julia --project=/tmp/UsesHTTPOneRequest -C native -J"$SYSIMAGE" -g1 --startup-file=no --history-file=no --output-ji="/tmp/UsesHTTPOneRequest-$i.ji" --output-incremental=yes /tmp/uses_http_driver.jl
               status=$?
               echo "HTTP bare status $i = $status"
           done
@@ -265,6 +267,7 @@ jobs:
           RESEAU_FORCE_NATIVE_POLLER_DURING_PKGOUTPUT: "1"
         run: |
           set -euo pipefail
+          echo 'Base.include(Base.__toplevel__, "/tmp/UsesHTTPOneRequest/src/UsesHTTPOneRequest.jl")' >/tmp/uses_http_driver.jl
           SYSIMAGE="$(julia -e 'print(unsafe_string(Base.JLOptions().image_file))')"
           python3 - <<'PY'
           from pathlib import Path
@@ -328,4 +331,4 @@ jobs:
           quit
           """)
           PY
-          gdb -q -x /tmp/gdbhttpcmds --args julia --project=/tmp/UsesHTTPOneRequest -C native -J"$SYSIMAGE" -g1 --startup-file=no --history-file=no --output-ji=/tmp/UsesHTTPOneRequest-gdb.ji --output-incremental=yes /tmp/UsesHTTPOneRequest/src/UsesHTTPOneRequest.jl
+          gdb -q -x /tmp/gdbhttpcmds --args julia --project=/tmp/UsesHTTPOneRequest -C native -J"$SYSIMAGE" -g1 --startup-file=no --history-file=no --output-ji=/tmp/UsesHTTPOneRequest-gdb.ji --output-incremental=yes /tmp/uses_http_driver.jl
