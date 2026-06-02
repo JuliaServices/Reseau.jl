@@ -1,0 +1,235 @@
+name: gVisor pure epoll repro
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/linux-amd64-segv-gdb
+
+jobs:
+  repro:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install runsc
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCH="$(uname -m)"
+          URL="https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}"
+          wget -q "${URL}/runsc" "${URL}/runsc.sha512" \
+              "${URL}/containerd-shim-runsc-v1" "${URL}/containerd-shim-runsc-v1.sha512"
+          sha512sum -c runsc.sha512 -c containerd-shim-runsc-v1.sha512
+          rm -f *.sha512
+          chmod a+rx runsc containerd-shim-runsc-v1
+          sudo mv runsc containerd-shim-runsc-v1 /usr/local/bin
+          sudo /usr/local/bin/runsc install
+          sudo systemctl restart docker || sudo service docker restart
+          docker run --rm --runtime=runsc hello-world
+
+      - name: Prepare pure epoll MWE
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/gvisor-pure
+          cat >/tmp/gvisor-pure/pure_epoll_repro.jl <<'JL'
+          const EPOLLIN = UInt32(0x001)
+          const EPOLL_CTL_ADD = Cint(1)
+          const EPOLL_CLOEXEC = Cint(0x80000)
+          const EFD_NONBLOCK = Cint(0x800)
+          const EFD_CLOEXEC = Cint(0x80000)
+          const MAX_EVENTS = Cint(16)
+
+          @static if Sys.ARCH == :x86_64 || Sys.ARCH == :i686
+          struct EpollEvent
+              events::UInt32
+              data_lo::UInt32
+              data_hi::UInt32
+          end
+          @inline function epoll_event(events::UInt32, data::UInt64)
+              return EpollEvent(events, UInt32(data & UInt64(0xffff_ffff)), UInt32(data >> 32))
+          end
+          else
+          struct EpollEvent
+              events::UInt32
+              _pad::UInt32
+              data::UInt64
+          end
+          @inline epoll_event(events::UInt32, data::UInt64) = EpollEvent(events, UInt32(0), data)
+          end
+
+          mutable struct Ctx
+              mode::Int32
+              timeout_ms::Cint
+              epfd::Cint
+              efd::Cint
+              events::Ptr{EpollEvent}
+              readbuf::Ptr{UInt64}
+              ready::Threads.Atomic{Int}
+              stop::Threads.Atomic{Int}
+              polls::Threads.Atomic{Int}
+              events_seen::Threads.Atomic{Int}
+              errors::Threads.Atomic{Int}
+          end
+
+          function drain_eventfd(ctx::Ctx)
+              while true
+                  n = @ccall read(ctx.efd::Cint, ctx.readbuf::Ptr{UInt64}, Csize_t(8)::Csize_t)::Cssize_t
+                  n == Cssize_t(8) && continue
+                  if n == Cssize_t(-1)
+                      errno = Base.Libc.errno()
+                      (errno == Base.Libc.EAGAIN || errno == Base.Libc.EINTR) && return nothing
+                      Threads.atomic_add!(ctx.errors, 1)
+                  end
+                  return nothing
+              end
+          end
+
+          function thread_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
+              ctx = unsafe_pointer_to_objref(arg)::Ctx
+              Threads.atomic_xchg!(ctx.ready, 1)
+              while Threads.atomic_cas!(ctx.stop, 0, 0) == 0
+                  n = if ctx.mode == 1
+                      @ccall gc_safe = true epoll_wait(
+                          ctx.epfd::Cint,
+                          ctx.events::Ptr{EpollEvent},
+                          MAX_EVENTS::Cint,
+                          ctx.timeout_ms::Cint,
+                      )::Cint
+                  else
+                      @ccall epoll_wait(
+                          ctx.epfd::Cint,
+                          ctx.events::Ptr{EpollEvent},
+                          MAX_EVENTS::Cint,
+                          ctx.timeout_ms::Cint,
+                      )::Cint
+                  end
+                  Threads.atomic_add!(ctx.polls, 1)
+                  if n == Cint(-1)
+                      errno = Base.Libc.errno()
+                      errno == Base.Libc.EINTR && continue
+                      Threads.atomic_add!(ctx.errors, 1)
+                      continue
+                  end
+                  if n > Cint(0)
+                      Threads.atomic_add!(ctx.events_seen, Int(n))
+                      drain_eventfd(ctx)
+                  end
+              end
+              return C_NULL
+          end
+
+          const ENTRY = @cfunction(thread_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
+
+          function checked(name, value)
+              value == -1 && error("$name failed errno=$(Base.Libc.errno())")
+              return value
+          end
+
+          function run()
+              mode_name = get(ENV, "PURE_EPOLL_MODE", "foreign-gcsafe-event")
+              seconds = parse(Int, get(ENV, "PURE_EPOLL_SECONDS", "120"))
+              wake = parse(Bool, get(ENV, "PURE_EPOLL_WAKE", "true"))
+              timeout_ms = parse(Cint, get(ENV, "PURE_EPOLL_TIMEOUT_MS", "25"))
+              mode = mode_name == "foreign-gcsafe-event" || mode_name == "foreign-gcsafe-timeout" ? Int32(1) : Int32(0)
+              wake = mode_name == "foreign-gcsafe-timeout" ? false : wake
+
+              @info "environment" julia=string(VERSION) os=Sys.KERNEL arch=Sys.ARCH threads=Threads.nthreads()
+              @info "kernel" uname=readchomp(`uname -a`)
+              @info "case" mode=mode_name wake timeout_ms seconds
+
+              epfd = checked("epoll_create1", @ccall epoll_create1(EPOLL_CLOEXEC::Cint)::Cint)
+              efd = checked("eventfd", @ccall eventfd(UInt32(0)::Cuint, (EFD_CLOEXEC | EFD_NONBLOCK)::Cint)::Cint)
+              ev = Ref(epoll_event(EPOLLIN, UInt64(1)))
+              checked("epoll_ctl", @ccall epoll_ctl(epfd::Cint, EPOLL_CTL_ADD::Cint, efd::Cint, ev::Ref{EpollEvent})::Cint)
+
+              events_raw = Base.Libc.malloc(sizeof(EpollEvent) * Int(MAX_EVENTS))
+              read_raw = Base.Libc.malloc(8)
+              ctx = Ctx(
+                  mode,
+                  timeout_ms,
+                  epfd,
+                  efd,
+                  Base.unsafe_convert(Ptr{EpollEvent}, events_raw),
+                  Base.unsafe_convert(Ptr{UInt64}, read_raw),
+                  Threads.Atomic{Int}(0),
+                  Threads.Atomic{Int}(0),
+                  Threads.Atomic{Int}(0),
+                  Threads.Atomic{Int}(0),
+                  Threads.Atomic{Int}(0),
+              )
+              thread = Ref{UInt}(0)
+              one = Ref{UInt64}(1)
+
+              GC.@preserve ctx one ev begin
+                  ret = @ccall pthread_create(
+                      thread::Ref{UInt},
+                      C_NULL::Ptr{Cvoid},
+                      ENTRY::Ptr{Cvoid},
+                      pointer_from_objref(ctx)::Ptr{Cvoid},
+                  )::Cint
+                  ret == 0 || error("pthread_create failed: $ret")
+                  while Threads.atomic_cas!(ctx.ready, 1, 1) != 1
+                      yield()
+                  end
+
+                  deadline = time() + seconds
+                  i = 0
+                  while time() < deadline
+                      i += 1
+                      if wake
+                          n = @ccall write(efd::Cint, one::Ref{UInt64}, Csize_t(8)::Csize_t)::Cssize_t
+                          if n == Cssize_t(-1)
+                              errno = Base.Libc.errno()
+                              (errno == Base.Libc.EAGAIN || errno == Base.Libc.EINTR) || error("eventfd write failed errno=$errno")
+                          end
+                      end
+                      Vector{Any}(undef, 100_000)
+                      GC.gc(false)
+                      if i % 1000 == 0
+                          @info "progress" loops=i polls=Threads.atomic_cas!(ctx.polls, 0, 0) events=Threads.atomic_cas!(ctx.events_seen, 0, 0) errors=Threads.atomic_cas!(ctx.errors, 0, 0)
+                      end
+                  end
+                  Threads.atomic_xchg!(ctx.stop, 1)
+                  _ = @ccall write(efd::Cint, one::Ref{UInt64}, Csize_t(8)::Csize_t)::Cssize_t
+                  @ccall pthread_join(thread[]::UInt, C_NULL::Ptr{Cvoid})::Cint
+              end
+
+              @info "done" polls=Threads.atomic_cas!(ctx.polls, 0, 0) events=Threads.atomic_cas!(ctx.events_seen, 0, 0) errors=Threads.atomic_cas!(ctx.errors, 0, 0)
+              @ccall close(efd::Cint)::Cint
+              @ccall close(epfd::Cint)::Cint
+              Base.Libc.free(events_raw)
+              Base.Libc.free(read_raw)
+              return nothing
+          end
+
+          run()
+          JL
+
+      - name: Run pure epoll cases under gVisor
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_case() {
+              local case="$1"
+              local seconds="$2"
+              echo "=== pure case ${case}: run ${seconds}s ==="
+              set +e
+              docker run --runtime=runsc --rm \
+                  -e PURE_EPOLL_MODE="${case}" \
+                  -e PURE_EPOLL_SECONDS="${seconds}" \
+                  -v /tmp/gvisor-pure:/app \
+                  -w /app \
+                  julia:1.12.6 \
+                  timeout "$((seconds + 30))s" julia -t1 --startup-file=no --history-file=no pure_epoll_repro.jl
+              status=$?
+              set -e
+              echo "=== pure case ${case}: status ${status} ==="
+              return 0
+          }
+
+          run_case foreign-gcsafe-event 120
+          run_case foreign-gcsafe-timeout 60
+          run_case foreign-unsafe-event 120
