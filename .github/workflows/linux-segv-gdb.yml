@@ -1,0 +1,147 @@
+name: Linux Segv GDB
+
+on:
+  workflow_dispatch:
+
+jobs:
+  gdb:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.11.9'
+
+      - name: Install gdb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gdb
+
+      - name: Build repro tree
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import shutil
+          import subprocess
+          import textwrap
+          from pathlib import Path
+
+          shutil.copytree(Path.cwd(), "/tmp/Reseau", dirs_exist_ok=True)
+          shutil.rmtree("/tmp/Reseau/.git", ignore_errors=True)
+
+          p = Path("/tmp/Reseau/src/iopoll/runtime.jl")
+          s = p.read_text()
+          old = (
+              "            if _is_generating_output()\n"
+              "                new_state.poller_task = errormonitor(@async _poller_task_entry(new_state))\n"
+              "            else\n"
+          )
+          if old not in s:
+              raise SystemExit("forced-native patch did not match runtime.jl")
+          s = s.replace(old, "", 1)
+          s = s.replace("            end\n        catch\n", "        catch\n", 1)
+          p.write_text(s)
+
+          subprocess.run(
+              ["git", "clone", "--depth", "1", "https://github.com/JuliaWeb/HTTP.jl", "/tmp/HTTP"],
+              check=True,
+          )
+          p = Path("/tmp/HTTP/src/precompile.jl")
+          s = p.read_text()
+          needle = "function _precompile_workload_enabled()::Bool\n"
+          if needle not in s:
+              raise SystemExit("HTTP precompile gate did not match")
+          p.write_text(s.replace(needle, needle + "    return false\n", 1))
+
+          pkg = Path("/tmp/UsesHTTPOneRequest")
+          (pkg / "src").mkdir(parents=True, exist_ok=True)
+          (pkg / "Project.toml").write_text(textwrap.dedent("""\
+          name = "UsesHTTPOneRequest"
+          uuid = "b6cf8096-f78a-4b4f-82d7-bb177ce7e9ad"
+          version = "0.1.0"
+
+          [deps]
+          HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
+          """))
+          (pkg / "src" / "UsesHTTPOneRequest.jl").write_text(textwrap.dedent("""\
+          module UsesHTTPOneRequest
+
+          using HTTP
+
+          function _one_request_workload()
+              server = HTTP.serve!("127.0.0.1", 0; listenany = true) do _req
+                  return HTTP.Response(200, "hello")
+              end
+              try
+                  addr = HTTP.server_addr(server)
+                  resp = HTTP.get("http://$(addr)/")
+                  @assert resp.status == 200
+                  @assert String(resp.body) == "hello"
+              finally
+                  HTTP.forceclose(server)
+                  HTTP.Reseau.IOPoll.shutdown!()
+              end
+              return nothing
+          end
+
+          if ccall(:jl_generating_output, Cint, ()) == 1
+              _one_request_workload()
+          end
+
+          end
+          """))
+          PY
+
+      - name: Precompile dependencies outside gdb
+        shell: bash
+        run: |
+          set -euo pipefail
+          export JULIA_DEPOT_PATH=/tmp/julia_depot
+          export JULIA_PKG_PRECOMPILE_AUTO=0
+          julia --startup-file=no --project=/tmp/UsesHTTPOneRequest -e '
+            using Pkg
+            Pkg.develop(Pkg.PackageSpec(path="/tmp/Reseau"))
+            Pkg.develop(Pkg.PackageSpec(path="/tmp/HTTP"))
+            Pkg.instantiate()
+            using HTTP
+            println(:deps_ready)
+          '
+
+      - name: Run tiny repro under gdb
+        shell: bash
+        run: |
+          set -euo pipefail
+          export JULIA_DEPOT_PATH=/tmp/julia_depot
+          export JULIA_PKG_PRECOMPILE_AUTO=0
+          python3 - <<'PY'
+          from pathlib import Path
+          Path("/tmp/gdbcmds").write_text("""\
+          set pagination off
+          set confirm off
+          set print thread-events off
+          set $segv_count = 0
+          handle SIGSEGV stop print pass
+          run
+          printf "\\n--- stopped ---\\n"
+          printf "segv_count="
+          p ++$segv_count
+          printf "\\n--- siginfo ---\\n"
+          p $_siginfo
+          printf "\\n--- fault addr ---\\n"
+          p/x $_siginfo._sifields._sigfault.si_addr
+          printf "\\n--- registers ---\\n"
+          info registers
+          printf "\\n--- current thread bt ---\\n"
+          bt
+          printf "\\n--- all threads bt ---\\n"
+          thread apply all bt
+          printf "\\n--- pc disasm ---\\n"
+          x/16i $pc-32
+          quit
+          """)
+          PY
+          gdb -q -x /tmp/gdbcmds --args julia --startup-file=no --project=/tmp/UsesHTTPOneRequest -e 'using Pkg; Pkg.precompile()'
