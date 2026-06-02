@@ -4,6 +4,7 @@ Global singleton state for the runtime poller.
 const POLLER = Ref{Poller}()
 const POLLER_LOCK = ReentrantLock()
 const _POLLER_THREAD_ENTRY_C = Ref{Ptr{Cvoid}}(C_NULL)
+const _SHUTDOWN_ATEXIT_REGISTERED = Ref(false)
 const _pthread_t = UInt
 
 @inline function _is_generating_output()::Bool
@@ -121,17 +122,22 @@ function init!()::Poller
             (@atomic state.running) && return state
         end
         _runtime_supported() || throw(ArgumentError("iopoll backend is currently supported on macOS, Linux, and Windows"))
+        _register_shutdown_atexit!()
         new_state = Poller()
         errno = _backend_init!(new_state)
         errno == Int32(0) || _throw_errno("iopoll backend init", errno)
         @atomic new_state.running = true
         POLLER[] = new_state
         try
-            _spawn_detached_thread(
-                "reseau-iopoll-poller",
-                _POLLER_THREAD_ENTRY_C,
-                new_state,
-            )
+            if _is_generating_output()
+                new_state.poller_task = errormonitor(@async _poller_task_entry(new_state))
+            else
+                _spawn_detached_thread(
+                    "reseau-iopoll-poller",
+                    _POLLER_THREAD_ENTRY_C,
+                    new_state,
+                )
+            end
         catch
             @atomic :release new_state.running = false
             _backend_close!(new_state)
@@ -180,10 +186,26 @@ function shutdown!()
             wake_errno = _backend_wake!(state)
             wake_errno == Int32(0) || _throw_errno("iopoll wake", wake_errno)
             wait(state.shutdown_event)
+            if state.poller_task !== nothing
+                wait(state.poller_task::Task)
+                state.poller_task = nothing
+            end
         end
         _backend_close!(state)
     finally
         unlock(POLLER_LOCK)
+    end
+    return nothing
+end
+
+function _register_shutdown_atexit!()
+    _SHUTDOWN_ATEXIT_REGISTERED[] && return nothing
+    _SHUTDOWN_ATEXIT_REGISTERED[] = true
+    atexit() do
+        try
+            shutdown!()
+        catch
+        end
     end
     return nothing
 end
@@ -378,20 +400,36 @@ function _notify_all_waiters!(state::Poller)
     return nothing
 end
 
-function _poller_thread_main!(state::Poller)
+function _poller_thread_main!(state::Poller, task_backed::Bool = false)
     while @atomic state.running
         delay_ns = _poll_delay_ns(state)
         errno = _backend_poll_once!(state, delay_ns)
         @atomic :release state.poll_until_ns = Int64(0)
+        (@atomic :acquire state.running) || break
         _drain_expired_time_entries!(state, Int64(time_ns()))
-        errno == Int32(0) && continue
+        if errno == Int32(0)
+            task_backed && yield()
+            continue
+        end
         if errno == Int32(Base.Libc.EINTR)
+            task_backed && yield()
             continue
         end
         _notify_all_waiters!(state)
         @atomic :release state.running = false
+        task_backed && yield()
     end
     notify(state.shutdown_event)
+    return nothing
+end
+
+function _poller_task_entry(state::Poller)
+    try
+        _poller_thread_main!(state, true)
+    catch
+        _notify_all_waiters!(state)
+        notify(state.shutdown_event)
+    end
     return nothing
 end
 
@@ -408,19 +446,10 @@ end
 
 function __init__()
     _POLLER_THREAD_ENTRY_C[] = @cfunction(_poller_thread_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
-    if _is_generating_output()
-        POLLER[] = Poller()
-    elseif _runtime_supported()
-        @static if Sys.iswindows()
-            # Avoid eager foreign-thread startup during module load on Windows.
-            # Runtime initialization remains lazy via `init!()` at first use.
-            POLLER[] = Poller()
-        else
-            init!()
-        end
-    else
-        POLLER[] = Poller()
-    end
+    _register_shutdown_atexit!()
+    # Avoid eager foreign-thread startup during module load. Runtime
+    # initialization remains lazy via `init!()` at first use.
+    POLLER[] = Poller()
     @assert isassigned(POLLER)
     return nothing
 end
