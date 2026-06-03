@@ -170,7 +170,7 @@ end
     if !Base.get_bool_env("RESEAU_RUN_TRIM_TESTS", true)
         println("[trim] skip RESEAU_RUN_TRIM_TESTS=false: user requested to skip trim compilation tests")
         @test true
-    if !_TRIM_SUPPORTED
+    elseif !_TRIM_SUPPORTED
         println("[trim] skip Julia < 1.12: JuliaC trim compilation is unavailable")
         @test true
     elseif _TRIM_PRE_RELEASE
