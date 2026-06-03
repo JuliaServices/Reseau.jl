@@ -160,12 +160,19 @@ function shutdown!()
         isassigned(POLLER) || return nothing
         state = POLLER[]
         registrations = Registration[]
+        timers = TimerState[]
         stop_requested = false
         lock(state.lock)
         try
             append!(registrations, values(state.registrations))
+            _discard_stale_time_entries_locked!(state)
+            for entry in state.time_heap
+                entry.kind == TimeEntryKind.TIMER || continue
+                push!(timers, entry.timer::TimerState)
+            end
             empty!(state.registrations)
             empty!(state.registrations_by_token)
+            empty!(state.time_heap)
             if @atomic :acquire state.running
                 @atomic :release state.running = false
                 stop_requested = true
@@ -175,6 +182,9 @@ function shutdown!()
         end
         for registration in registrations
             _notify_registration!(registration, PollMode.READWRITE, PollWakeReason.CANCELED)
+        end
+        for timer in timers
+            _close_timer!(timer)
         end
         if stop_requested
             wake_errno = _backend_wake!(state)
