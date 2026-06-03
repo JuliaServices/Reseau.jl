@@ -321,7 +321,6 @@ mutable struct Poller
     time_heap::Vector{TimeEntry}
     shutdown_event::Base.Threads.Event
     backend_state::Union{Nothing, BackendState}
-    poller_task::Union{Nothing, Task}
     @atomic next_token::UInt64
     @atomic poll_until_ns::Int64
     @atomic running::Bool
@@ -334,7 +333,6 @@ function Poller()
         Dict{UInt64, Registration}(),
         TimeEntry[],
         Base.Threads.Event(),
-        nothing,
         nothing,
         UInt64(0),
         Int64(0),

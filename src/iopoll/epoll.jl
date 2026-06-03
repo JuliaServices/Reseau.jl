@@ -224,10 +224,9 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
     epoll = backend::EpollBackendState
     events = epoll.events
     waitms = _epoll_wait_timeout_ms(delay_ns)
-    # gVisor can crash when its userspace epoll implementation writes into the
-    # event buffer while this foreign poller thread is in a GC-safe ccall. Keep
-    # the wait GC-unsafe, but cap each sleep so this detached thread cannot
-    # block Julia GC indefinitely while the poller is idle.
+    # Some userspace Linux environments mis-handle Julia's safepoint fault while
+    # a foreign poller thread is in a GC-safe wait. Keep epoll_wait GC-unsafe,
+    # but cap each sleep so the poller cannot block Julia GC indefinitely.
     waitms = waitms < 0 ? MAX_GC_UNSAFE_EPOLL_WAIT_MS : min(waitms, MAX_GC_UNSAFE_EPOLL_WAIT_MS)
     while true
         n = GC.@preserve events begin

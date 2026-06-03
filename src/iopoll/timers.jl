@@ -350,21 +350,19 @@ section small and avoids lock-ordering problems with descriptor-local locks in
 `IOPoll`.
 """
 function _drain_expired_time_entries!(state::Poller, now_ns::Int64)
-    while true
-        entry = nothing
-        lock(state.lock)
-        try
+    expired = TimeEntry[]
+    lock(state.lock)
+    try
+        while true
             entry = _time_peek_locked(state)
-            if entry !== nothing && entry.deadline_ns <= now_ns
-                entry = _time_pop_locked!(state)
-            else
-                entry = nothing
-            end
-        finally
-            unlock(state.lock)
+            (entry === nothing || entry.deadline_ns > now_ns) && break
+            push!(expired, _time_pop_locked!(state))
         end
-        entry === nothing && break
-        _fire_time_entry!(entry::TimeEntry)
+    finally
+        unlock(state.lock)
+    end
+    for entry in expired
+        _fire_time_entry!(entry)
     end
     return nothing
 end

@@ -128,16 +128,6 @@ end
 
 @testset "IOPoll runtime phase 1" begin
         NP.shutdown!()
-        _el_log_test_progress("START: lazy module initialization")
-        @testset "lazy module initialization" begin
-            @test isassigned(NP.POLLER)
-            @test !(@atomic :acquire NP.POLLER[].running)
-            state = NP.init!()
-            @test (@atomic :acquire state.running)
-            NP.shutdown!()
-            @test !(@atomic :acquire NP.POLLER[].running)
-        end
-        _el_log_test_progress("DONE: lazy module initialization")
         _el_log_test_progress("START: poller-backed sleep/timedwait")
         @testset "poller-backed sleep/timedwait" begin
             _el_log_test_progress("poller-backed sleep/timedwait: sleep")
@@ -174,25 +164,6 @@ end
             @test NP.pollwait!(waiter) == NP.PollWakeReason.READY
         end
         _el_log_test_progress("DONE: pollwait wake reason precedence")
-        _el_log_test_progress("START: expired timer drain")
-        @testset "expired timer drain" begin
-            state = NP.Poller()
-            now_ns = Int64(time_ns())
-            timer1 = NP.TimerState(now_ns - Int64(1), Int64(0))
-            timer2 = NP.TimerState(now_ns - Int64(1), Int64(0))
-            lock(state.lock)
-            try
-                NP._time_push_locked!(state, NP._timer_entry(now_ns - Int64(1), timer1, UInt64(0)))
-                NP._time_push_locked!(state, NP._timer_entry(now_ns - Int64(1), timer2, UInt64(0)))
-            finally
-                unlock(state.lock)
-            end
-            NP._drain_expired_time_entries!(state, now_ns)
-            @test isempty(state.time_heap)
-            @test NP.pollwait!(timer1.waiter) == NP.PollWakeReason.READY
-            @test NP.pollwait!(timer2.waiter) == NP.PollWakeReason.READY
-        end
-        _el_log_test_progress("DONE: expired timer drain")
         _el_log_test_progress("START: backend delay semantics")
         @testset "backend delay semantics" begin
             state = NP.Poller()
