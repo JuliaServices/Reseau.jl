@@ -424,6 +424,24 @@ end
             end
         end
         _el_log_test_progress("DONE: shutdown-safe control paths")
+        _el_log_test_progress("START: shutdown wakes timer waiters")
+        @testset "shutdown wakes timer waiters" begin
+            NP.shutdown!()
+            timer = NP.TimerState()
+            @test NP.schedule_timer!(timer, Int64(time_ns()) + Int64(60_000_000_000))
+            timer_task = errormonitor(@async NP.waittimer(timer))
+            try
+                NP.shutdown!()
+                @test _el_wait_task_done(timer_task, 1.0) != :timed_out
+                @test fetch(timer_task) === false
+                @test (@atomic :acquire timer.closed)
+                @test (@atomic :acquire timer.deadline_ns) == Int64(0)
+            finally
+                timer_task isa Task && istaskdone(timer_task) && wait(timer_task)
+                NP.shutdown!()
+            end
+        end
+        _el_log_test_progress("DONE: shutdown wakes timer waiters")
         _el_log_test_progress("START: shutdown cancels active waiters and timers")
         @testset "shutdown cancels active waiters and timers" begin
             fd0, fd1 = _el_socketpair_stream()
