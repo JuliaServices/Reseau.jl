@@ -19,7 +19,7 @@ end
 end
 
 @inline function _runtime_supported()::Bool
-    return Sys.isapple() || Sys.islinux() || Sys.iswindows()
+    return Sys.isapple() || Sys.islinux() || Sys.iswindows() || Sys.isfreebsd()
 end
 
 function _new_registration(fd::Cint, token::UInt64, mode::PollMode.T)::Registration

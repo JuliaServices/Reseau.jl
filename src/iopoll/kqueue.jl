@@ -1,8 +1,8 @@
-@static if Sys.isapple()
+@static if Sys.isbsd()
 
 const EVFILT_READ = Int16(-1)
 const EVFILT_WRITE = Int16(-2)
-const EVFILT_USER = Int16(-10)
+const EVFILT_USER = Sys.isfreebsd() ? Int16(-11) : Int16(-10)
 const EV_ADD = UInt16(0x0001)
 const EV_DELETE = UInt16(0x0002)
 const EV_ENABLE = UInt16(0x0004)
@@ -17,7 +17,7 @@ const WAKE_IDENT = UInt(1)
 const MAX_KQUEUE_EVENTS = 64
 
 """
-Mirror of Darwin's `struct kevent`.
+Mirror of `struct kevent`.
 """
 struct Kevent
     ident::UInt
@@ -26,6 +26,9 @@ struct Kevent
     fflags::UInt32
     data::Int
     udata::Ptr{Cvoid}
+    @static if Sys.isfreebsd()
+        ext::NTuple{4,UInt64}
+    end
 end
 
 """
@@ -55,7 +58,11 @@ end
         data::Int,
         udata::Ptr{Cvoid},
     )
-    return Kevent(ident, filter, flags, fflags, data, udata)
+    @static if Sys.isfreebsd()
+        return Kevent(ident, filter, flags, fflags, data, udata, ntuple(_ -> UInt64(0), 4))
+    else
+        return Kevent(ident, filter, flags, fflags, data, udata)
+    end
 end
 
 function _fcntl(fd::Cint, cmd::Cint)::Cint
