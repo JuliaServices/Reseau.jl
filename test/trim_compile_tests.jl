@@ -108,6 +108,16 @@ function _trim_use_bundle()::Bool
     return get(ENV, "RESEAU_TRIM_BUNDLE", default) == "1"
 end
 
+function _trim_compiler_available()::Bool
+    julia_cc = strip(get(ENV, "JULIA_CC", ""))
+    !isempty(julia_cc) && return true
+    @static if Sys.iswindows()
+        return true
+    else
+        return Sys.which("gcc") !== nothing || Sys.which("clang") !== nothing
+    end
+end
+
 function _trim_output_path(dir::String, output_name::String)::String
     path = joinpath(dir, output_name)
     isfile(path) && return path
@@ -175,6 +185,9 @@ end
         @test true
     elseif _TRIM_PRE_RELEASE
         println("[trim] skip prerelease Julia: trim verifier behavior is not stable yet")
+        @test true
+    elseif !_trim_compiler_available()
+        @warn "Reseau trim compile tests are being skipped." reason = "no C compiler found" action = "install gcc/clang or set JULIA_CC to run trim compilation tests"
         @test true
     else
         project_path = normpath(joinpath(@__DIR__, ".."))
