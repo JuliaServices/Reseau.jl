@@ -10,7 +10,6 @@ const EPOLL_CLOEXEC = Cint(0x80000)
 const EFD_NONBLOCK = Cint(0x800)
 const EFD_CLOEXEC = Cint(0x80000)
 const MAX_EPOLL_EVENTS = 128
-const MAX_GC_UNSAFE_EPOLL_WAIT_MS = Cint(25)
 const _WAKE_TOKEN = UInt64(0)
 
 # Mirror of Linux `struct epoll_event`.
@@ -53,7 +52,13 @@ Typed epoll backend state attached to the shared poller.
 mutable struct EpollBackendState <: BackendState
     epfd::Cint
     wakefd::Cint
-    events::Vector{EpollEvent}
+    # C-allocated (Base.Libc.malloc) event buffer with room for MAX_EPOLL_EVENTS.
+    # Keeping this off the julia heap lets `epoll_wait` run as a GC-safe
+    # ccall: the kernel (or gVisor's userspace epoll, which crashes when it
+    # writes into julia-heap memory while this foreign thread sits in a
+    # GC-safe ccall) only ever touches plain C memory, and the GC never has
+    # to wait for the poller thread. Freed in `_backend_close!`.
+    events::Ptr{EpollEvent}
     @atomic wake_sig::UInt32
 end
 
@@ -81,7 +86,13 @@ function _backend_init!(state::Poller)::Int32
         @ccall close(epfd::Cint)::Cint
         return errno
     end
-    state.backend_state = EpollBackendState(epfd, efd, Vector{EpollEvent}(undef, MAX_EPOLL_EVENTS), UInt32(0))
+    events = convert(Ptr{EpollEvent}, Base.Libc.malloc(MAX_EPOLL_EVENTS * sizeof(EpollEvent)))
+    if events == C_NULL
+        @ccall close(efd::Cint)::Cint
+        @ccall close(epfd::Cint)::Cint
+        return Int32(Base.Libc.ENOMEM)
+    end
+    state.backend_state = EpollBackendState(epfd, efd, events, UInt32(0))
     return Int32(0)
 end
 
@@ -98,6 +109,10 @@ function _backend_close!(state::Poller)
             epoll.epfd = Cint(-1)
         end
         epoll.wakefd = Cint(-1)
+        if epoll.events != C_NULL
+            Base.Libc.free(epoll.events)
+            epoll.events = Ptr{EpollEvent}(C_NULL)
+        end
     end
     state.backend_state = nothing
     return nothing
@@ -223,21 +238,23 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
     backend isa EpollBackendState || return Int32(Base.Libc.ENOSYS)
     epoll = backend::EpollBackendState
     events = epoll.events
+    events == C_NULL && return Int32(Base.Libc.EBADF)
     waitms = _epoll_wait_timeout_ms(delay_ns)
-    # gVisor can crash when its userspace epoll implementation writes into the
-    # event buffer while this foreign poller thread is in a GC-safe ccall. Keep
-    # the wait GC-unsafe, but cap each sleep so this detached thread cannot
-    # block Julia GC indefinitely while the poller is idle.
-    waitms = waitms < 0 ? MAX_GC_UNSAFE_EPOLL_WAIT_MS : min(waitms, MAX_GC_UNSAFE_EPOLL_WAIT_MS)
+    # The wait runs as a GC-safe ccall so the GC never has to stop the world
+    # on this detached thread: a blocked poller used to add its full wait
+    # timeout to every GC pause, which roughly doubled GC pauses and made all
+    # package loading after the poller started ~3.5x slower. The event buffer
+    # is C-allocated (see EpollBackendState), so neither the kernel nor
+    # gVisor's userspace epoll ever writes into julia-heap memory while the
+    # thread is GC-safe, and no timeout cap is needed - an idle poller just
+    # sleeps until the wake eventfd fires.
     while true
-        n = GC.@preserve events begin
-            @ccall epoll_wait(
-                epoll.epfd::Cint,
-                pointer(events)::Ptr{EpollEvent},
-                Cint(length(events))::Cint,
-                waitms::Cint,
-            )::Cint
-        end
+        n = @gcsafe_ccall epoll_wait(
+            epoll.epfd::Cint,
+            events::Ptr{EpollEvent},
+            Cint(MAX_EPOLL_EVENTS)::Cint,
+            waitms::Cint,
+        )::Cint
         if n == Cint(-1)
             errno = Int32(Base.Libc.errno())
             if errno == Int32(Base.Libc.EINTR)
@@ -247,7 +264,7 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
             return errno
         end
         for i in 1:n
-            ev = events[i]
+            ev = unsafe_load(events, i)
             ev.events == UInt32(0) && continue
             event_data = _epoll_event_data(ev)
             if event_data == _WAKE_TOKEN
