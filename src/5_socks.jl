@@ -1,7 +1,8 @@
 """
     SOCKS
 
-Internal SOCKS client helpers layered on `TCP.Conn`.
+Internal SOCKS5 (RFC 1928) client helpers layered on `TCP.Conn`, including
+username/password authentication (RFC 1929).
 """
 module SOCKS
 
@@ -118,6 +119,17 @@ function _read_exact!(conn::TCP.Conn, n::Integer)::Vector{UInt8}
     return buf
 end
 
+function _parse_decimal_port(text::String)::Union{Nothing, UInt16}
+    isempty(text) && return nothing
+    n = 0
+    for ch in text
+        '0' <= ch <= '9' || return nothing
+        n = 10 * n + Int(ch - '0')
+        n > 0xffff && return nothing
+    end
+    return UInt16(n)
+end
+
 function _parse_target(address::AbstractString)::Tuple{String, UInt16}
     text = String(address)
     host, port_text = try
@@ -128,13 +140,22 @@ function _parse_target(address::AbstractString)::Tuple{String, UInt16}
         throw(TargetAddressError("invalid SOCKS target address", text))
     end
     isempty(host) && throw(TargetAddressError("SOCKS target host must not be empty", text))
-    port = tryparse(Int, port_text)
+    port = _parse_decimal_port(port_text)
     port === nothing && throw(TargetAddressError("invalid SOCKS target port", text))
-    1 <= port <= 0xffff || throw(TargetAddressError("SOCKS target port out of range", text))
+    port == 0 && throw(TargetAddressError("SOCKS target port out of range", text))
+    # Zone-scoped IPv6 literals are rejected before the inet_pton-based literal
+    # parse: a remote proxy cannot resolve a client-local zone, and macOS
+    # inet_pton accepts "fe80::1%en0" while embedding the zone index into the
+    # address bytes. '%' never appears in a valid FQDN either.
+    occursin('%', host) && throw(TargetAddressError("SOCKS target host must not contain a zone", text))
     if HostResolvers._parse_ipv4_literal(host) === nothing && HostResolvers._parse_ipv6_literal(host) === nothing
         length(codeunits(host)) <= 255 || throw(TargetAddressError("SOCKS target FQDN is too long", text))
+        # Bracketed-but-invalid IPv6 literals must not leak to the proxy as a
+        # domain name; ':' never appears in a valid FQDN.
+        occursin(':', host) &&
+            throw(TargetAddressError("SOCKS target host must be an IP literal or hostname", text))
     end
-    return host, UInt16(port)
+    return host, port
 end
 
 @inline function _append_port!(buf::Vector{UInt8}, port::UInt16)::Nothing
@@ -176,16 +197,14 @@ function _read_bound_addr!(conn::TCP.Conn, atyp::UInt8)::BoundAddr
         return BoundAddr(host, port)
     elseif atyp == _ADDR_IPV6
         data = _read_exact!(conn, 18)
-        addr = TCP.SocketAddrV6((
-                data[1], data[2], data[3], data[4],
-                data[5], data[6], data[7], data[8],
-                data[9], data[10], data[11], data[12],
-                data[13], data[14], data[15], data[16],
-            ),
-            0,
+        ip = (
+            data[1], data[2], data[3], data[4],
+            data[5], data[6], data[7], data[8],
+            data[9], data[10], data[11], data[12],
+            data[13], data[14], data[15], data[16],
         )
         port = (UInt16(data[17]) << 8) | UInt16(data[18])
-        return BoundAddr(TCP._format_ipv6(addr.ip), port)
+        return BoundAddr(TCP._format_ipv6(ip), port)
     elseif atyp == _ADDR_FQDN
         len = Int(_read_exact!(conn, 1)[1])
         data = _read_exact!(conn, len + 2)
@@ -198,6 +217,23 @@ end
 
 @inline function _auth_enabled(username)::Bool
     return username !== nothing
+end
+
+function _validate_credentials(
+        username::Union{Nothing, AbstractString},
+        password::Union{Nothing, AbstractString},
+    )::Nothing
+    if username === nothing
+        password === nothing || throw(AuthenticationError("SOCKS password provided without a username"))
+        return nothing
+    end
+    username_len = length(codeunits(username))
+    username_len >= 1 || throw(AuthenticationError("SOCKS username must not be empty"))
+    username_len <= 255 || throw(AuthenticationError("SOCKS username is too long"))
+    if password !== nothing
+        length(codeunits(password)) <= 255 || throw(AuthenticationError("SOCKS password is too long"))
+    end
+    return nothing
 end
 
 function _write_greeting!(conn::TCP.Conn, has_auth::Bool)::Nothing
@@ -266,8 +302,25 @@ end
 """
     connect!(conn, target_address; username=nothing, password=nothing, deadline_ns=0)
 
-Perform a SOCKS5 CONNECT handshake over `conn` and return the proxy bound
-address. On success, `conn` is the established stream to `target_address`.
+Perform a SOCKS5 (RFC 1928) CONNECT handshake over `conn` and return the proxy
+bound address as a `BoundAddr`. On success, `conn` is the established stream to
+`target_address`, a `"host:port"` (or `"[ipv6]:port"`) string.
+
+When `username` is provided, username/password authentication (RFC 1929) is
+offered alongside no-auth and performed if the proxy selects it. `username`
+must be 1-255 bytes, `password` at most 255 bytes, and a `password` without a
+`username` is rejected.
+
+A nonzero `deadline_ns` (absolute monotonic nanoseconds on the `time_ns()`
+clock) sets the read and write deadlines on `conn` for the duration of the
+handshake and clears them on exit, overwriting any deadlines previously set on
+`conn`. With `deadline_ns == 0`, existing deadlines are left untouched.
+
+Target and credential validation failures (`TargetAddressError`,
+`AuthenticationError`) are thrown before any proxy I/O. During the handshake,
+`AuthenticationError`, `ReplyError`, `ProtocolError`, `EOFError`, or
+`TCP.DeadlineExceededError` may be thrown; after any error the proxy stream
+state is indeterminate and `conn` should be closed.
 """
 function connect!(
         conn::TCP.Conn,
@@ -279,6 +332,7 @@ function connect!(
     deadline = Int64(deadline_ns)
     target = String(target_address)
     host, port = _parse_target(target)
+    _validate_credentials(username, password)
     if deadline != 0
         TCP.set_deadline!(conn, deadline)
     end

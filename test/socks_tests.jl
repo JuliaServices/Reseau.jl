@@ -114,7 +114,11 @@ function _socks_with_proxy(server_handler::Function, client_handler::Function)
     return nothing
 end
 
-function _socks_expect_no_proxy_bytes(target::String)::Nothing
+function _socks_expect_no_proxy_bytes(
+        target::String;
+        errtype::Type{<:Exception} = SK.TargetAddressError,
+        kwargs...,
+    )::Nothing
     IP.shutdown!()
     listener = nothing
     client = nothing
@@ -139,7 +143,7 @@ function _socks_expect_no_proxy_bytes(target::String)::Nothing
             end
         end)
         client = NC.connect(NC.loopback_addr(Int(laddr.port)))
-        @test_throws SK.TargetAddressError SK.connect!(client, target)
+        @test_throws errtype SK.connect!(client, target; kwargs...)
         _socks_wait_task!(server_task)
         @test fetch(server_task) == :no_bytes
     finally
@@ -231,6 +235,7 @@ end
 
 @testset "SOCKS5 parses bound reply addresses" begin
     cases = (
+        (UInt8(0x01), UInt8[0xc0, 0xa8, 0x01, 0x0a, 0x1f, 0x90], "192.168.1.10:8080"),
         (UInt8(0x03), UInt8[0x0b, codeunits("bound.local")..., 0x1f, 0x90], "bound.local:8080"),
         (UInt8(0x04), UInt8[
                 0x00, 0x00, 0x00, 0x00,
@@ -251,6 +256,7 @@ end
             conn -> begin
                 bound = SK.connect!(conn, "example.com:80")
                 @test string(bound) == expected
+                @test sprint(show, bound) == expected
             end,
         )
     end
@@ -294,6 +300,24 @@ end
     _socks_expect_no_proxy_bytes("example.com")
     long_host = repeat("a", 256)
     _socks_expect_no_proxy_bytes("$long_host:80")
+    # bracketed-but-invalid IPv6 literals must not be sent as FQDN targets
+    _socks_expect_no_proxy_bytes("[fe80::1%en0]:80")
+    _socks_expect_no_proxy_bytes("[1:2:3]:80")
+    _socks_expect_no_proxy_bytes(":80")
+    _socks_expect_no_proxy_bytes("example.com:")
+    _socks_expect_no_proxy_bytes("example.com:0")
+    _socks_expect_no_proxy_bytes("example.com:65536")
+    # strict decimal ports only
+    _socks_expect_no_proxy_bytes("example.com:0x50")
+    _socks_expect_no_proxy_bytes("example.com:+80")
+    _socks_expect_no_proxy_bytes("example.com: 80")
+end
+
+@testset "SOCKS5 validates credentials before proxy I/O" begin
+    _socks_expect_no_proxy_bytes("example.com:80"; errtype = SK.AuthenticationError, username = "")
+    _socks_expect_no_proxy_bytes("example.com:80"; errtype = SK.AuthenticationError, username = repeat("u", 256))
+    _socks_expect_no_proxy_bytes("example.com:80"; errtype = SK.AuthenticationError, username = "user", password = repeat("p", 256))
+    _socks_expect_no_proxy_bytes("example.com:80"; errtype = SK.AuthenticationError, password = "pass")
 end
 
 @testset "SOCKS5 handshake observes connection deadline" begin
@@ -306,4 +330,193 @@ end
             @test_throws NC.DeadlineExceededError SK.connect!(conn, "example.com:80"; deadline_ns)
         end,
     )
+end
+
+function _socks_read_auth_request!(conn::NC.Conn)::Tuple{String, String}
+    header = _socks_read_exact!(conn, 2)
+    @test header[1] == 0x01
+    username = String(_socks_read_exact!(conn, Int(header[2])))
+    plen = Int(_socks_read_exact!(conn, 1)[1])
+    password = String(_socks_read_exact!(conn, plen))
+    return username, password
+end
+
+@testset "SOCKS5 username/password rejection surfaces AuthenticationError" begin
+    # proxy rejects the credentials
+    _socks_with_proxy(
+        conn -> begin
+            @test _socks_read_greeting!(conn) == UInt8[0x00, 0x02]
+            write(conn, UInt8[0x05, 0x02])
+            _socks_read_auth_request!(conn)
+            write(conn, UInt8[0x01, 0x01])
+        end,
+        conn -> begin
+            @test_throws SK.AuthenticationError SK.connect!(conn, "example.com:80"; username = "user", password = "pass")
+        end,
+    )
+    # proxy replies with a bad subnegotiation version
+    _socks_with_proxy(
+        conn -> begin
+            @test _socks_read_greeting!(conn) == UInt8[0x00, 0x02]
+            write(conn, UInt8[0x05, 0x02])
+            _socks_read_auth_request!(conn)
+            write(conn, UInt8[0x02, 0x00])
+        end,
+        conn -> begin
+            @test_throws SK.AuthenticationError SK.connect!(conn, "example.com:80"; username = "user", password = "pass")
+        end,
+    )
+end
+
+@testset "SOCKS5 unsupported method selections surface AuthenticationError" begin
+    # proxy demands username/password when only no-auth was offered
+    _socks_with_proxy(
+        conn -> begin
+            @test _socks_read_greeting!(conn) == UInt8[0x00]
+            write(conn, UInt8[0x05, 0x02])
+        end,
+        conn -> begin
+            @test_throws SK.AuthenticationError SK.connect!(conn, "example.com:80")
+        end,
+    )
+    # proxy selects a method that was never offered
+    _socks_with_proxy(
+        conn -> begin
+            @test _socks_read_greeting!(conn) == UInt8[0x00, 0x02]
+            write(conn, UInt8[0x05, 0x01])
+        end,
+        conn -> begin
+            @test_throws SK.AuthenticationError SK.connect!(conn, "example.com:80"; username = "user", password = "pass")
+        end,
+    )
+end
+
+@testset "SOCKS5 malformed proxy responses surface ProtocolError" begin
+    # wrong version in the method selection reply
+    _socks_with_proxy(
+        conn -> begin
+            _socks_read_greeting!(conn)
+            write(conn, UInt8[0x04, 0x00])
+        end,
+        conn -> begin
+            @test_throws SK.ProtocolError SK.connect!(conn, "example.com:80")
+        end,
+    )
+    # wrong version in the connect reply
+    _socks_with_proxy(
+        conn -> begin
+            _socks_read_greeting!(conn)
+            write(conn, UInt8[0x05, 0x00])
+            _socks_read_connect_request!(conn)
+            write(conn, UInt8[0x04, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        end,
+        conn -> begin
+            @test_throws SK.ProtocolError SK.connect!(conn, "example.com:80")
+        end,
+    )
+    # non-zero reserved byte in the connect reply
+    _socks_with_proxy(
+        conn -> begin
+            _socks_read_greeting!(conn)
+            write(conn, UInt8[0x05, 0x00])
+            _socks_read_connect_request!(conn)
+            write(conn, UInt8[0x05, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        end,
+        conn -> begin
+            @test_throws SK.ProtocolError SK.connect!(conn, "example.com:80")
+        end,
+    )
+    # unknown bound address type in the connect reply
+    _socks_with_proxy(
+        conn -> begin
+            _socks_read_greeting!(conn)
+            write(conn, UInt8[0x05, 0x00])
+            _socks_read_connect_request!(conn)
+            write(conn, UInt8[0x05, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        end,
+        conn -> begin
+            @test_throws SK.ProtocolError SK.connect!(conn, "example.com:80")
+        end,
+    )
+end
+
+@testset "SOCKS5 proxy EOF mid-handshake throws EOFError" begin
+    _socks_with_proxy(
+        conn -> begin
+            _socks_read_greeting!(conn)
+        end,
+        conn -> begin
+            @test_throws EOFError SK.connect!(conn, "example.com:80")
+        end,
+    )
+end
+
+@testset "SOCKS5 credentials offered but proxy selects no-auth" begin
+    _socks_with_proxy(
+        conn -> begin
+            @test _socks_read_greeting!(conn) == UInt8[0x00, 0x02]
+            write(conn, UInt8[0x05, 0x00])
+            _socks_read_connect_request!(conn)
+            _socks_write_success!(conn)
+        end,
+        conn -> begin
+            bound = SK.connect!(conn, "example.com:80"; username = "user", password = "pass")
+            @test string(bound) == "0.0.0.0:0"
+        end,
+    )
+end
+
+@testset "SOCKS5 username without password sends empty password" begin
+    _socks_with_proxy(
+        conn -> begin
+            @test _socks_read_greeting!(conn) == UInt8[0x00, 0x02]
+            write(conn, UInt8[0x05, 0x02])
+            @test _socks_read_auth_request!(conn) == ("user", "")
+            write(conn, UInt8[0x01, 0x00])
+            _socks_read_connect_request!(conn)
+            _socks_write_success!(conn)
+        end,
+        conn -> begin
+            bound = SK.connect!(conn, "example.com:80"; username = "user")
+            @test string(bound) == "0.0.0.0:0"
+        end,
+    )
+end
+
+@testset "SOCKS5 boundary length credentials and FQDN" begin
+    long_user = repeat("u", 255)
+    long_pass = repeat("p", 255)
+    _socks_with_proxy(
+        conn -> begin
+            @test _socks_read_greeting!(conn) == UInt8[0x00, 0x02]
+            write(conn, UInt8[0x05, 0x02])
+            @test _socks_read_auth_request!(conn) == (long_user, long_pass)
+            write(conn, UInt8[0x01, 0x00])
+            _socks_read_connect_request!(conn)
+            _socks_write_success!(conn)
+        end,
+        conn -> begin
+            bound = SK.connect!(conn, "example.com:80"; username = long_user, password = long_pass)
+            @test string(bound) == "0.0.0.0:0"
+        end,
+    )
+
+    long_host = repeat("a", 255)
+    seen = Channel{_SocksRequest}(1)
+    _socks_with_proxy(
+        conn -> begin
+            @test _socks_read_greeting!(conn) == UInt8[0x00]
+            write(conn, UInt8[0x05, 0x00])
+            put!(seen, _socks_read_connect_request!(conn))
+            _socks_write_success!(conn)
+        end,
+        conn -> begin
+            bound = SK.connect!(conn, "$long_host:80")
+            @test string(bound) == "0.0.0.0:0"
+        end,
+    )
+    req = take!(seen)
+    @test req.atyp == 0x03
+    @test req.host == long_host
+    @test req.port == UInt16(80)
 end
