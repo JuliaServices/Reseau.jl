@@ -518,6 +518,22 @@ end
                 @test occursin("lookup failed", bad_host_err.err)
             end
         end
+        @testset "system resolver worker shutdown and restart" begin
+            ND.shutdown!()
+            @test ND._addrinfo_live_threads() == 0
+            try
+                @test !isempty(ND.resolve_tcp_addrs("tcp", "localhost:0"))
+                @test ND._addrinfo_live_threads() > 0
+                ND.shutdown!()
+                @test ND._addrinfo_live_threads() == 0
+
+                @test !isempty(ND.resolve_tcp_addrs("tcp", "localhost:0"))
+                @test ND._addrinfo_live_threads() > 0
+            finally
+                ND.shutdown!()
+            end
+            @test ND._addrinfo_live_threads() == 0
+        end
         @testset "connect/listen by address strings (ipv4)" begin
             IP.shutdown!()
             listener = nothing

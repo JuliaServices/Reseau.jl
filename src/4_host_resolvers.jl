@@ -400,6 +400,8 @@ const _ADDRINFO_POOL_CAPACITY = 64
 const _ADDRINFO_THREAD_ENTRY_C = Ref{Ptr{Cvoid}}(C_NULL)
 const _ADDRINFO_POOL_LOCK = ReentrantLock()
 const _ADDRINFO_STARTED_THREADS = Ref{Int}(0)
+const _ADDRINFO_EXIT_COND = Threads.Condition()
+const _ADDRINFO_LIVE_THREADS = Ref{Int}(0)
 
 mutable struct _AddrInfoFuture
     notify::Threads.Condition
@@ -482,6 +484,36 @@ function _run_addrinfo_future!(future::_AddrInfoFuture)::Nothing
     return nothing
 end
 
+function _addrinfo_worker_started!()::Nothing
+    lock(_ADDRINFO_EXIT_COND)
+    try
+        _ADDRINFO_LIVE_THREADS[] += 1
+    finally
+        unlock(_ADDRINFO_EXIT_COND)
+    end
+    return nothing
+end
+
+function _addrinfo_worker_stopped!()::Nothing
+    lock(_ADDRINFO_EXIT_COND)
+    try
+        _ADDRINFO_LIVE_THREADS[] = max(_ADDRINFO_LIVE_THREADS[] - 1, 0)
+        notify(_ADDRINFO_EXIT_COND)
+    finally
+        unlock(_ADDRINFO_EXIT_COND)
+    end
+    return nothing
+end
+
+function _addrinfo_live_threads()::Int
+    lock(_ADDRINFO_EXIT_COND)
+    try
+        return _ADDRINFO_LIVE_THREADS[]
+    finally
+        unlock(_ADDRINFO_EXIT_COND)
+    end
+end
+
 function _addrinfo_worker_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
     work_queue = unsafe_pointer_to_objref(arg)::Channel{_AddrInfoFuture}
     try
@@ -489,6 +521,8 @@ function _addrinfo_worker_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
             _run_addrinfo_future!(future)
         end
     catch
+    finally
+        _addrinfo_worker_stopped!()
     end
     return C_NULL
 end
@@ -503,13 +537,39 @@ function _ensure_addrinfo_pool!()::Channel{_AddrInfoFuture}
         work_queue = _ADDRINFO_WORK_QUEUE[]
         while _ADDRINFO_STARTED_THREADS[] < _ADDRINFO_POOL_SIZE
             next_idx = _ADDRINFO_STARTED_THREADS[] + 1
-            IOPoll._spawn_detached_thread("reseau-getaddrinfo-$next_idx", _ADDRINFO_THREAD_ENTRY_C, work_queue)
+            _addrinfo_worker_started!()
+            try
+                IOPoll._spawn_detached_thread("reseau-getaddrinfo-$next_idx", _ADDRINFO_THREAD_ENTRY_C, work_queue)
+            catch
+                _addrinfo_worker_stopped!()
+                rethrow()
+            end
             _ADDRINFO_STARTED_THREADS[] = next_idx
         end
         return work_queue
     finally
         unlock(_ADDRINFO_POOL_LOCK)
     end
+end
+
+function shutdown!(timeout::Real = 5.0)::Nothing
+    lock(_ADDRINFO_POOL_LOCK)
+    try
+        if isassigned(_ADDRINFO_WORK_QUEUE)
+            work_queue = _ADDRINFO_WORK_QUEUE[]
+            isopen(work_queue) && close(work_queue)
+        end
+        _ADDRINFO_WORK_QUEUE[] = Channel{_AddrInfoFuture}(_ADDRINFO_POOL_CAPACITY)
+        _ADDRINFO_STARTED_THREADS[] = 0
+    finally
+        unlock(_ADDRINFO_POOL_LOCK)
+    end
+    Base.timedwait(
+        () -> _addrinfo_live_threads() == 0,
+        Float64(timeout);
+        pollint=0.01,
+    )
+    return nothing
 end
 
 function _wait_addrinfo_future!(future::_AddrInfoFuture)::Cint
@@ -529,6 +589,7 @@ function __init__()
     _ADDRINFO_THREAD_ENTRY_C[] = @cfunction(_addrinfo_worker_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
     _ADDRINFO_WORK_QUEUE[] = Channel{_AddrInfoFuture}(_ADDRINFO_POOL_CAPACITY)
     _ADDRINFO_STARTED_THREADS[] = 0
+    _ADDRINFO_LIVE_THREADS[] = 0
 end
 
 @static if Sys.iswindows()

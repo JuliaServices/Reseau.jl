@@ -317,6 +317,10 @@ function _pc_run_host_resolvers_workload!()
             listener === nothing || close(listener)
         catch
         end
+        try
+            ND.shutdown!()
+        catch
+        end
         IP.shutdown!()
     end
     return nothing
