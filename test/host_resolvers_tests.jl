@@ -348,6 +348,17 @@ end
             @test ND._split_host_zone("%$parser_zone") == ("%$parser_zone", "")
             @test_throws ND.AddressError ND._split_host_zone("fe80::1%")
 
+            # zone-scoped literals are rejected by the raw parser on every
+            # platform; macOS inet_pton would otherwise accept them and embed
+            # the zone index into the address bytes
+            @test ND._parse_ipv6_literal("fe80::1%en0") === nothing
+            @test ND._parse_ipv6_literal("fe80::1%7") === nothing
+            @test ND._parse_ipv6_literal("::1%lo0") === nothing
+            @test ND._parse_ipv6_literal("fe80::1") == (
+                0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+            )
+
             @test ND._scope_id_from_zone("") == UInt32(0)
             @test ND._scope_id_from_zone("7") == UInt32(7)
             if zone !== nothing

@@ -142,6 +142,13 @@ Reseau.SocketOps
 Reseau.IOPoll
 Reseau.IOPoll.PollMode
 Reseau.HostResolvers
+Reseau.SOCKS
+Reseau.SOCKS.BoundAddr
+Reseau.SOCKS.TargetAddressError
+Reseau.SOCKS.ProtocolError
+Reseau.SOCKS.AuthenticationError
+Reseau.SOCKS.ReplyError
+Reseau.SOCKS.connect!
 ```
 
 ## Docstring Index
