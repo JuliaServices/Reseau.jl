@@ -195,6 +195,7 @@ end
             ("iopoll_runtime_trim_safe.jl", "iopoll_runtime_trim_safe"),
             ("socket_ops_trim_safe.jl", "socket_ops_trim_safe"),
             ("tcp_trim_safe.jl", "tcp_trim_safe"),
+            ("socks_trim_safe.jl", "socks_trim_safe"),
             ("host_resolvers_trim_safe.jl", "host_resolvers_trim_safe"),
             ("host_resolvers_system_trim_safe.jl", "host_resolvers_system_trim_safe"),
             ("tls_trim_safe.jl", "tls_trim_safe"),
