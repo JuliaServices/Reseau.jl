@@ -143,10 +143,9 @@ function _parse_target(address::AbstractString)::Tuple{String, UInt16}
     port = _parse_decimal_port(port_text)
     port === nothing && throw(TargetAddressError("invalid SOCKS target port", text))
     port == 0 && throw(TargetAddressError("SOCKS target port out of range", text))
-    # Zone-scoped IPv6 literals are rejected before the inet_pton-based literal
-    # parse: a remote proxy cannot resolve a client-local zone, and macOS
-    # inet_pton accepts "fe80::1%en0" while embedding the zone index into the
-    # address bytes. '%' never appears in a valid FQDN either.
+    # A remote proxy cannot resolve a client-local zone, so zone-scoped IPv6
+    # literals get a specific error up front; '%' never appears in a valid IP
+    # literal (_parse_ipv6_literal rejects zones) or FQDN.
     occursin('%', host) && throw(TargetAddressError("SOCKS target host must not contain a zone", text))
     if HostResolvers._parse_ipv4_literal(host) === nothing && HostResolvers._parse_ipv6_literal(host) === nothing
         length(codeunits(host)) <= 255 || throw(TargetAddressError("SOCKS target FQDN is too long", text))

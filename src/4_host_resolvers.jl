@@ -855,6 +855,11 @@ end
 
 function _parse_ipv6_literal(host::AbstractString)::Union{Nothing, NTuple{16, UInt8}}
     h = String(host)
+    # Zone-scoped literals ("fe80::1%en0") are rejected so results are
+    # platform-independent: macOS inet_pton accepts them and embeds the zone
+    # index into the address bytes, while Linux and Windows reject them.
+    # Callers that support zones split them off first via _split_host_zone.
+    occursin('%', h) && return nothing
     bytes = Vector{UInt8}(undef, 16)
     rc = GC.@preserve bytes begin
         @gcsafe_ccall inet_pton(
