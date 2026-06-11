@@ -35,6 +35,7 @@ function _ip_socketpair_stream()
         client >= 0 && SO.close_socket_nothrow(client)
         listener >= 0 && SO.close_socket_nothrow(listener)
     end
+end
 
 function _ip_close_fd(fd::Cint)
     fd < 0 && return nothing
@@ -184,7 +185,10 @@ end
             try
                 IP._set_nonblocking!(ipfd.sysfd)
                 IP.register!(ipfd)
-                IP.set_read_deadline!(ipfd, time_ns() + 100_000_000)
+                # Far-future deadline: it only exists so a live rseq can be
+                # captured and later fired stale. A short deadline races the
+                # test's own setup and can legitimately expire the waiter.
+                IP.set_read_deadline!(ipfd, time_ns() + 5_000_000_000)
                 stale_rseq = @atomic :acquire ipfd.pd.rseq
                 wait_started = Channel{Nothing}(1)
                 wait_task = errormonitor(Threads.@spawn begin
@@ -352,4 +356,3 @@ end
             end
         end
     end
-end

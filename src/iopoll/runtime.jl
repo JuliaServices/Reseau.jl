@@ -153,6 +153,11 @@ Returns `nothing`.
 
 Waiting registrations are notified so blocked Julia tasks can observe close or
 shutdown on their next state check instead of remaining parked forever.
+
+The backend wake is the only thing that gets a parked poller thread out of its
+(possibly indefinite) backend wait, so `_backend_close!` must stay strictly
+ordered after `wait(state.shutdown_event)`: tearing down backend resources
+while the poller thread can still touch them would race the poll loop.
 """
 function shutdown!()
     lock(POLLER_LOCK)
@@ -187,6 +192,9 @@ function shutdown!()
             _close_timer!(timer)
         end
         if stop_requested
+            # If the wake fails the poller thread may stay parked indefinitely;
+            # throwing here, before `_backend_close!`, intentionally leaks the
+            # backend rather than freeing memory the kernel may still write.
             wake_errno = _backend_wake!(state)
             wake_errno == Int32(0) || _throw_errno("iopoll wake", wake_errno)
             wait(state.shutdown_event)
@@ -410,8 +418,13 @@ function _poller_thread_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
     try
         _poller_thread_main!(state)
     catch
-        _notify_all_waiters!(state)
-        notify(state.shutdown_event)
+        # Never strand `shutdown!`: even if waiter notification itself throws,
+        # the shutdown event must fire so `wait(state.shutdown_event)` returns.
+        try
+            _notify_all_waiters!(state)
+        finally
+            notify(state.shutdown_event)
+        end
     end
     return C_NULL
 end

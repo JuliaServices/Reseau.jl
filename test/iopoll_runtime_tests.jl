@@ -487,4 +487,60 @@ end
             end
         end
         _el_log_test_progress("DONE: shutdown cancels active waiters and timers")
+        _el_log_test_progress("START: expired-entry drain fires without allocating")
+        @testset "expired-entry drain fires without allocating" begin
+            state = NP.Poller()
+            t1 = NP.TimerState()
+            t2 = NP.TimerState()
+            now = Int64(time_ns())
+            for (timer, offset) in ((t1, Int64(-2_000_000)), (t2, Int64(-1_000_000)))
+                @atomic :release timer.deadline_ns = now + offset
+                seq = @atomic timer.seq += UInt64(1)
+                entry = NP._timer_entry(now + offset, timer, seq)
+                lock(state.lock)
+                try
+                    NP._time_push_locked!(state, entry)
+                finally
+                    unlock(state.lock)
+                end
+            end
+            NP._drain_expired_time_entries!(state, now)
+            @test isempty(state.time_heap)
+            @test (@atomic :acquire t1.deadline_ns) == Int64(0)
+            @test (@atomic :acquire t2.deadline_ns) == Int64(0)
+            # Fired-but-unparked waiters latch NOTIFIED; check the latch
+            # directly so a drain regression fails instead of parking forever.
+            @test (@atomic :acquire t1.waiter.state) == NP.PollWaiterState.NOTIFIED
+            @test (@atomic :acquire t2.waiter.state) == NP.PollWaiterState.NOTIFIED
+            # The drain runs on the detached poller thread every cycle, and
+            # allocating there has crashed under gVisor's sandbox. Coverage
+            # instrumentation adds allocations, so only assert without it.
+            drained = NP._drain_expired_time_entries!(state, Int64(time_ns()))
+            @test drained === nothing
+            if Base.JLOptions().code_coverage == 0
+                allocs = @allocated NP._drain_expired_time_entries!(state, Int64(time_ns()))
+                @test allocs == 0
+            end
+        end
+        _el_log_test_progress("DONE: expired-entry drain fires without allocating")
+        _el_log_test_progress("START: shutdown wakes an idle poller promptly")
+        @testset "shutdown wakes an idle poller promptly" begin
+            NP.shutdown!()
+            state = NP.init!()
+            @test @atomic state.running
+            # Let the poller thread commit to its uncapped backend wait: with
+            # no registrations and no timers there is no poll timeout at all,
+            # so shutdown completing is exactly the backend wake working.
+            sleep(0.1)
+            shutdown_task = errormonitor(Threads.@spawn begin
+                NP.shutdown!()
+                return nothing
+            end)
+            @test _el_wait_task_done(shutdown_task, 10.0) != :timed_out
+            if istaskdone(shutdown_task)
+                wait(shutdown_task)
+                @test !(@atomic state.running)
+            end
+        end
+        _el_log_test_progress("DONE: shutdown wakes an idle poller promptly")
     end
