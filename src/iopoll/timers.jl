@@ -112,6 +112,26 @@ function _time_peek_locked(state::Poller)
     return state.time_heap[1]
 end
 
+# Wake coalescing contract. The backend wake latch (`wake_sig`) lets
+# concurrent wakers skip redundant backend wakes, and losing the latch CAS is
+# only safe because of two invariants:
+#
+# 1. A set latch implies the backend wake token is still undelivered (the
+#    eventfd / EVFILT_USER event / IOCP packet stays readable until consumed),
+#    so the poller cannot block again without first consuming it.
+# 2. Wakers publish the state they want the poller to observe under
+#    `state.lock` *before* attempting the wake (heap pushes here,
+#    `running = false` in `shutdown!`), and the poller re-acquires
+#    `state.lock` every cycle between consuming a wake and sleeping again
+#    (`_poll_delay_ns`, the expired-entry drain) — so state published before a
+#    failed CAS is always observed before the next sleep.
+#
+# The `poll_until_ns` read below is protected the same way: the poller stores
+# it under `state.lock` in `_poll_delay_ns`, so a waker whose heap push was
+# not seen by the poller's latest peek necessarily reads the sleep horizon
+# that peek committed, and wakes if its deadline is earlier. `0` doubles as
+# "no horizon committed" and "sleeping without a timeout"; both must wake
+# unconditionally.
 @inline function _maybe_wake_for_earlier_time!(state::Poller, new_earliest::Int64)
     new_earliest > 0 || return nothing
     poll_until_ns = @atomic :acquire state.poll_until_ns
@@ -345,26 +365,25 @@ end
 Remove all expired time entries from the heap and dispatch them to their
 deadline or timer fire path.
 
-The heap lock is not held across fire callbacks. That keeps the critical
-section small and avoids lock-ordering problems with descriptor-local locks in
-`IOPoll`.
+Entries are popped and fired one at a time. The heap lock is still never held
+across fire callbacks (avoiding lock-ordering problems with descriptor-local
+locks in `IOPoll`), and the loop allocates nothing: it runs on the poller
+thread every cycle, and allocating on that thread has crashed under gVisor's
+sandbox.
 """
 function _drain_expired_time_entries!(state::Poller, now_ns::Int64)
-    expired = TimeEntry[]
-    lock(state.lock)
-    try
-        while true
-            entry = _time_peek_locked(state)
-            (entry === nothing || entry.deadline_ns > now_ns) && break
-            push!(expired, _time_pop_locked!(state))
+    while true
+        local entry::TimeEntry
+        lock(state.lock)
+        try
+            head = _time_peek_locked(state)
+            (head === nothing || head.deadline_ns > now_ns) && return nothing
+            entry = _time_pop_locked!(state)
+        finally
+            unlock(state.lock)
         end
-    finally
-        unlock(state.lock)
-    end
-    for entry in expired
         _fire_time_entry!(entry)
     end
-    return nothing
 end
 
 """

@@ -10,7 +10,6 @@ const EPOLL_CLOEXEC = Cint(0x80000)
 const EFD_NONBLOCK = Cint(0x800)
 const EFD_CLOEXEC = Cint(0x80000)
 const MAX_EPOLL_EVENTS = 128
-const MAX_GC_UNSAFE_EPOLL_WAIT_MS = Cint(25)
 const _WAKE_TOKEN = UInt64(0)
 
 # Mirror of Linux `struct epoll_event`.
@@ -53,7 +52,13 @@ Typed epoll backend state attached to the shared poller.
 mutable struct EpollBackendState <: BackendState
     epfd::Cint
     wakefd::Cint
-    events::Vector{EpollEvent}
+    # C-allocated (`Libc.malloc`) buffer with room for MAX_EPOLL_EVENTS
+    # entries, freed in `_backend_close!`. The buffer must live off the Julia
+    # heap: `epoll_wait` runs as a GC-safe ccall, so the GC can run while the
+    # kernel fills the buffer, and gVisor's userspace epoll has crashed
+    # writing into Julia-heap memory during concurrent GC. Plain C memory
+    # keeps event delivery entirely outside GC-managed pages.
+    events::Ptr{EpollEvent}
     @atomic wake_sig::UInt32
 end
 
@@ -81,12 +86,23 @@ function _backend_init!(state::Poller)::Int32
         @ccall close(epfd::Cint)::Cint
         return errno
     end
-    state.backend_state = EpollBackendState(epfd, efd, Vector{EpollEvent}(undef, MAX_EPOLL_EVENTS), UInt32(0))
+    events = convert(Ptr{EpollEvent}, Base.Libc.malloc(MAX_EPOLL_EVENTS * sizeof(EpollEvent)))
+    if events == C_NULL
+        @ccall close(efd::Cint)::Cint
+        @ccall close(epfd::Cint)::Cint
+        return Int32(Base.Libc.ENOMEM)
+    end
+    state.backend_state = EpollBackendState(epfd, efd, events, UInt32(0))
     return Int32(0)
 end
 
 """
 Close epoll backend resources.
+
+Only safe after the poller thread has exited (`shutdown!` waits on
+`shutdown_event` before calling this): the backend wait has no timeout cap,
+so the thread can be parked in `epoll_wait` indefinitely, and freeing the
+event buffer under a live wait would hand the kernel a dangling pointer.
 """
 function _backend_close!(state::Poller)
     backend = state.backend_state
@@ -98,6 +114,10 @@ function _backend_close!(state::Poller)
             epoll.epfd = Cint(-1)
         end
         epoll.wakefd = Cint(-1)
+        if epoll.events != C_NULL
+            Base.Libc.free(epoll.events)
+            epoll.events = Ptr{EpollEvent}(C_NULL)
+        end
     end
     state.backend_state = nothing
     return nothing
@@ -163,6 +183,12 @@ end
 
 """
 Wake a blocking epoll_wait via eventfd.
+
+The write stays a plain (GC-unsafe) ccall on purpose: the eventfd is
+EFD_NONBLOCK so the write cannot stall GC, and keeping the thread GC-unsafe
+means the kernel never reads the Julia-heap `Ref` while the GC runs — the
+same gVisor hazard the C-allocated event buffer avoids on the wait side.
+See `_maybe_wake_for_earlier_time!` for the wake coalescing contract.
 """
 function _backend_wake!(state::Poller)::Int32
     backend = state.backend_state
@@ -173,7 +199,7 @@ function _backend_wake!(state::Poller)::Int32
     ok || return Int32(0)
     one = Ref{UInt64}(1)
     while true
-        n = @gcsafe_ccall write(
+        n = @ccall write(
             epoll.wakefd::Cint,
             one::Ref{UInt64},
             Csize_t(sizeof(UInt64))::Csize_t,
@@ -223,22 +249,27 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
     backend isa EpollBackendState || return Int32(Base.Libc.ENOSYS)
     epoll = backend::EpollBackendState
     events = epoll.events
+    events == C_NULL && return Int32(Base.Libc.EBADF)
     waitms = _epoll_wait_timeout_ms(delay_ns)
-    # gVisor can crash when its userspace epoll implementation writes into the
-    # event buffer while this foreign poller thread is in a GC-safe ccall. Keep
-    # the wait GC-unsafe, but cap each sleep so this detached thread cannot
-    # block Julia GC indefinitely while the poller is idle.
-    waitms = waitms < 0 ? MAX_GC_UNSAFE_EPOLL_WAIT_MS : min(waitms, MAX_GC_UNSAFE_EPOLL_WAIT_MS)
+    # The wait runs as a GC-safe ccall so a blocked poller never stalls
+    # stop-the-world: a GC-unsafe wait added its remaining timeout to every GC
+    # pause, and the 25ms cap that used to bound the stall taxed every
+    # collection while forcing an idle poller to wake 40 times a second. The
+    # event buffer is C memory (see `EpollBackendState`), so neither the
+    # kernel nor gVisor's userspace epoll touches the Julia heap while the GC
+    # runs, and no cap is needed: an idle poller sleeps until the wake eventfd
+    # fires, matching the kqueue and IOCP backends.
     while true
-        n = GC.@preserve events begin
-            @ccall epoll_wait(
-                epoll.epfd::Cint,
-                pointer(events)::Ptr{EpollEvent},
-                Cint(length(events))::Cint,
-                waitms::Cint,
-            )::Cint
-        end
+        n = @gcsafe_ccall epoll_wait(
+            epoll.epfd::Cint,
+            events::Ptr{EpollEvent},
+            Cint(MAX_EPOLL_EVENTS)::Cint,
+            waitms::Cint,
+        )::Cint
         if n == Cint(-1)
+            # Relies on the GC-safe transition back (which can block on a
+            # running collection) not clobbering errno; futex waits on
+            # glibc/musl do not touch it.
             errno = Int32(Base.Libc.errno())
             if errno == Int32(Base.Libc.EINTR)
                 waitms > 0 && return Int32(0)
@@ -247,16 +278,19 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
             return errno
         end
         for i in 1:n
-            ev = events[i]
+            ev = unsafe_load(events, i)
             ev.events == UInt32(0) && continue
             event_data = _epoll_event_data(ev)
             if event_data == _WAKE_TOKEN
                 # Match the IOCP wake path: once the eventfd wake is consumed,
                 # always drain it and clear the coalescing latch. Leaving the
                 # latch set after a zero-timeout poll can suppress the next
-                # real wake and strand later timers/deadline updates.
+                # real wake and strand later timers/deadline updates. The
+                # drain stays a plain ccall: the counter is known nonzero, so
+                # the read cannot block, and the kernel must not write the
+                # Julia-heap `Ref` while this thread is GC-safe.
                 one = Ref{UInt64}(0)
-                _ = @gcsafe_ccall read(
+                _ = @ccall read(
                     epoll.wakefd::Cint,
                     one::Ref{UInt64},
                     Csize_t(sizeof(UInt64))::Csize_t,
