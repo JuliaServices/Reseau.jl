@@ -6,7 +6,11 @@ const _TRIM_SUPPORTED = VERSION >= v"1.12.0-rc1"
 const _TRIM_PRE_RELEASE = !isempty(VERSION.prerelease)
 const _JULIAC_ENTRYPOINT_EXPR = "using JuliaC; if isdefined(JuliaC, :main); JuliaC.main(ARGS); else JuliaC._main_cli(ARGS); end"
 
-function _run_trim_compile(project_path::String, script_path::String, output_name::String; timeout_s::Float64 = 120.0, bundle_dir::Union{Nothing, String} = nothing)
+# Single-threaded Windows CI runners compile these cases at ~60-70s each
+# (healthy multi-threaded runners take ~35s), so a 120s budget was a
+# near-miss that flaked on slow runners. The wait returns as soon as the
+# process exits, so a generous budget costs nothing when healthy.
+function _run_trim_compile(project_path::String, script_path::String, output_name::String; timeout_s::Float64 = 240.0, bundle_dir::Union{Nothing, String} = nothing)
     julia_exe = joinpath(Sys.BINDIR, Base.julia_exename())
     cmd = if bundle_dir === nothing
         `$julia_exe --startup-file=no --history-file=no --code-coverage=none --project=$project_path -e $(_JULIAC_ENTRYPOINT_EXPR) -- --output-exe $output_name --project=$project_path --experimental --trim=safe $script_path`
@@ -37,9 +41,33 @@ function _run_command_with_timeout(cmd::Cmd; timeout_s::Float64, log_label::Stri
     catch
         ""
     finally
-        rm(output_path; force = true)
+        # A killed process tree can briefly keep the redirect target locked
+        # on Windows (unlink EBUSY); never let temp cleanup error the testset.
+        try
+            rm(output_path; force = true)
+        catch
+        end
     end
     return exit_code, output, timed_out
+end
+
+# `kill(proc)` only terminates the direct child, but juliac spawns workers
+# that inherit the stdout/stderr redirect. On Windows the survivors keep the
+# redirect file locked and keep consuming CPU under later test cases, so
+# terminate the whole tree there before killing the direct child.
+function _kill_process_tree!(proc::Base.Process)
+    @static if Sys.iswindows()
+        try
+            pid = getpid(proc)
+            pid > 0 && run(pipeline(ignorestatus(`taskkill /T /F /PID $pid`); stdout = devnull, stderr = devnull))
+        catch
+        end
+    end
+    try
+        kill(proc)
+    catch
+    end
+    return nothing
 end
 
 function _wait_process_with_timeout!(proc::Base.Process; timeout_s::Float64, log_label::String)
@@ -50,10 +78,7 @@ function _wait_process_with_timeout!(proc::Base.Process; timeout_s::Float64, log
         now = time()
         if now - started_at >= timeout_s
             timed_out = true
-            try
-                kill(proc)
-            catch
-            end
+            _kill_process_tree!(proc)
             break
         end
         if now >= next_log_at
