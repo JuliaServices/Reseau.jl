@@ -103,6 +103,39 @@ function _spawn_detached_thread(
     return nothing
 end
 
+mutable struct PollerAtexitGuard
+    @atomic registered::Bool
+end
+
+const _POLLER_ATEXIT_GUARD = PollerAtexitGuard(false)
+
+"""
+    _ensure_poller_atexit_shutdown!()
+
+Register (exactly once) an `atexit` hook that stops the poller thread on process
+exit.
+
+The poller runs on a detached OS thread that blocks indefinitely in the backend
+wait. During package precompilation (and sysimage generation) Julia builds an
+output image after the `@compile_workload` body runs; a still-running detached
+poller thread keeps the worker process from terminating, which manifests
+downstream as `Pkg.precompile()` hanging forever. A workload only has to perform
+one blocking loopback I/O to lazily start the thread. Reseau's own workloads stop
+the poller explicitly, but arbitrary downstream workloads cannot be expected to
+call an internal shutdown API, so we make teardown automatic.
+
+The hook is only registered while generating output. At normal runtime the
+process owns its own exit sequencing and we avoid mutating its `atexit` chain.
+"""
+function _ensure_poller_atexit_shutdown!()
+    _is_generating_output() || return nothing
+    # Only the task that flips the guard from `false` installs the single hook.
+    _, won = @atomicreplace(_POLLER_ATEXIT_GUARD.registered, false => true)
+    won || return nothing
+    atexit(shutdown!)
+    return nothing
+end
+
 """
     init!()
 
@@ -127,6 +160,11 @@ function init!()::Poller
         @atomic new_state.running = true
         POLLER[] = new_state
         try
+            # Register the teardown hook before the thread exists: if anything in
+            # this block throws, the `catch` closes the backend, and that must
+            # never race a live poller thread. `shutdown!` tolerates being armed
+            # for a poller that never started.
+            _ensure_poller_atexit_shutdown!()
             _spawn_detached_thread(
                 "reseau-iopoll-poller",
                 _POLLER_THREAD_ENTRY_C,
@@ -431,6 +469,11 @@ end
 
 function __init__()
     _POLLER_THREAD_ENTRY_C[] = @cfunction(_poller_thread_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
+    # `atexit` registrations never survive into a new process, but the guard flag
+    # is plain mutable state that can be baked `true` into the precompile image of
+    # this package (or a sysimage). Reset it on every load so a fresh process,
+    # including a downstream precompile worker, always re-registers the hook.
+    @atomic :release _POLLER_ATEXIT_GUARD.registered = false
     if _is_generating_output()
         POLLER[] = Poller()
     elseif _runtime_supported()

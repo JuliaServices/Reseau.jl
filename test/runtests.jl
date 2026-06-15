@@ -37,6 +37,7 @@ test_files = [
     "tls_native_tls13_tests.jl",
     "tls_config_tests.jl",
     "tls_public_api_tests.jl",
+    "precompile_hang_tests.jl",
     "trim_compile_tests.jl",
 ]
 
