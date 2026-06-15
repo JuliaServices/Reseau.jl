@@ -432,6 +432,7 @@ end
 function __init__()
     _POLLER_THREAD_ENTRY_C[] = @cfunction(_poller_thread_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
     if _is_generating_output()
+        atexit(shutdown!)
         POLLER[] = Poller()
     elseif _runtime_supported()
         @static if Sys.iswindows()
