@@ -158,30 +158,29 @@ end
         @testset "pollwait wake reason precedence" begin
             waiter = NP.PollWaiter()
             @test !NP.pollnotify!(waiter, NP.PollWakeReason.CANCELED)
-            @test (@atomic :acquire waiter.state) == NP.PollWaiterState.CANCELED
+            @test (@atomic :acquire waiter.state) === NP._POLLWAKE_CANCELED
             @test !NP.pollnotify!(waiter, NP.PollWakeReason.READY)
-            @test (@atomic :acquire waiter.state) == NP.PollWaiterState.NOTIFIED
+            @test (@atomic :acquire waiter.state) === NP._POLLWAKE_READY
             @test NP.pollwait!(waiter) == NP.PollWakeReason.READY
-            @test (@atomic :acquire waiter.state) == NP.PollWaiterState.EMPTY
+            @test (@atomic :acquire waiter.state) === nothing
 
             waiter = NP.PollWaiter()
             @test !NP.pollnotify!(waiter, NP.PollWakeReason.READY)
             @test !NP.pollnotify!(waiter, NP.PollWakeReason.CANCELED)
-            @test (@atomic :acquire waiter.state) == NP.PollWaiterState.NOTIFIED
+            @test (@atomic :acquire waiter.state) === NP._POLLWAKE_READY
             @test NP.pollwait!(waiter) == NP.PollWakeReason.READY
 
             waiter = NP.PollWaiter()
             @test !NP.pollnotify!(waiter, NP.PollWakeReason.CANCELED)
             @test NP.pollwait!(waiter) == NP.PollWakeReason.CANCELED
-            @test (@atomic :acquire waiter.state) == NP.PollWaiterState.EMPTY
-            @test (@atomic :acquire waiter.task) === nothing
+            @test (@atomic :acquire waiter.state) === nothing
 
             waiter = NP.PollWaiter()
             owner_task = Threads.@spawn NP.pollwait!(waiter)
-            while (@atomic :acquire waiter.state) != NP.PollWaiterState.WAITING && !istaskdone(owner_task)
+            while !((@atomic :acquire waiter.state) isa Task) && !istaskdone(owner_task)
                 yield()
             end
-            published_owner = @atomic :acquire waiter.task
+            published_owner = @atomic :acquire waiter.state
             @test published_owner === owner_task
             concurrent_err = try
                 NP.pollwait!(waiter)
@@ -190,21 +189,19 @@ end
                 err
             end
             @test concurrent_err isa ArgumentError
-            @test (@atomic :acquire waiter.task) === published_owner
+            @test (@atomic :acquire waiter.state) === published_owner
             @test NP.pollnotify!(waiter, NP.PollWakeReason.READY)
             @test fetch(owner_task) == NP.PollWakeReason.READY
-            @test (@atomic :acquire waiter.state) == NP.PollWaiterState.EMPTY
-            @test (@atomic :acquire waiter.task) === nothing
+            @test (@atomic :acquire waiter.state) === nothing
 
             interrupted_waiter = NP.PollWaiter()
             interrupted_task = Threads.@spawn NP.pollwait!(interrupted_waiter)
-            while (@atomic :acquire interrupted_waiter.state) != NP.PollWaiterState.WAITING && !istaskdone(interrupted_task)
+            while !((@atomic :acquire interrupted_waiter.state) isa Task) && !istaskdone(interrupted_task)
                 yield()
             end
             schedule(interrupted_task, InterruptException(); error = true)
             @test_throws TaskFailedException fetch(interrupted_task)
-            @test (@atomic :acquire interrupted_waiter.state) == NP.PollWaiterState.EMPTY
-            @test (@atomic :acquire interrupted_waiter.task) === nothing
+            @test (@atomic :acquire interrupted_waiter.state) === nothing
             @test !NP.pollnotify!(interrupted_waiter, NP.PollWakeReason.READY)
             @test NP.pollwait!(interrupted_waiter) == NP.PollWakeReason.READY
 
@@ -213,8 +210,7 @@ end
                     waiter = NP.PollWaiter()
                     @test !NP.pollnotify!(waiter, reason)
                     @test NP.pollwait!(waiter) == reason
-                    @test (@atomic :acquire waiter.state) == NP.PollWaiterState.EMPTY
-                    @test (@atomic :acquire waiter.task) === nothing
+                    @test (@atomic :acquire waiter.state) === nothing
                 end
             end
 
@@ -223,14 +219,46 @@ end
                 expected = isodd(i) ? NP.PollWakeReason.READY : NP.PollWakeReason.CANCELED
                 waiter_task = errormonitor(Threads.@spawn NP.pollwait!(waiter))
                 deadline = time_ns() + 2_000_000_000
-                while (@atomic :acquire waiter.state) != NP.PollWaiterState.WAITING && !istaskdone(waiter_task)
+                while !((@atomic :acquire waiter.state) isa Task) && !istaskdone(waiter_task)
                     time_ns() < deadline || error("timed out waiting for PollWaiter to park")
                     yield()
                 end
                 @test NP.pollnotify!(waiter, expected)
                 @test fetch(waiter_task) == expected
-                @test (@atomic :acquire waiter.state) == NP.PollWaiterState.EMPTY
+                @test (@atomic :acquire waiter.state) === nothing
             end
+
+            # Regression for the two-word protocol's lost-wakeup deadlock: a
+            # parked waiter woken CANCELED while a concurrent READY upgrade
+            # lands mid-consume must return a reason — never re-park with its
+            # wake token already spent.
+            deadlocked = false
+            for _ in 1:256
+                waiter = NP.PollWaiter()
+                waiter_task = Threads.@spawn NP.pollwait!(waiter)
+                while !((@atomic :acquire waiter.state) isa Task) && !istaskdone(waiter_task)
+                    yield()
+                end
+                cancel_task = Threads.@spawn NP.pollnotify!(waiter, NP.PollWakeReason.CANCELED)
+                ready_task = Threads.@spawn NP.pollnotify!(waiter, NP.PollWakeReason.READY)
+                status = timedwait(() -> istaskdone(waiter_task), 20.0)
+                if status !== :ok
+                    deadlocked = true
+                    # Unstick the parked task so the testset can finish.
+                    schedule(waiter_task, InterruptException(); error = true)
+                    break
+                end
+                @test fetch(waiter_task) isa NP.PollWakeReason.T
+                wait(cancel_task)
+                wait(ready_task)
+                # A notify that landed after the consume latches a fresh token;
+                # drain it so the waiter ends the iteration clean.
+                if (@atomic :acquire waiter.state) isa NP._PollWakeToken
+                    NP.pollwait!(waiter)
+                end
+                @test (@atomic :acquire waiter.state) === nothing
+            end
+            @test !deadlocked
         end
         _el_log_test_progress("DONE: pollwait wake reason precedence")
         _el_log_test_progress("START: backend delay semantics")
@@ -577,10 +605,10 @@ end
             @test isempty(state.time_heap)
             @test (@atomic :acquire t1.deadline_ns) == Int64(0)
             @test (@atomic :acquire t2.deadline_ns) == Int64(0)
-            # Fired-but-unparked waiters latch NOTIFIED; check the latch
+            # Fired-but-unparked waiters latch a READY wake; check the latch
             # directly so a drain regression fails instead of parking forever.
-            @test (@atomic :acquire t1.waiter.state) == NP.PollWaiterState.NOTIFIED
-            @test (@atomic :acquire t2.waiter.state) == NP.PollWaiterState.NOTIFIED
+            @test (@atomic :acquire t1.waiter.state) === NP._POLLWAKE_READY
+            @test (@atomic :acquire t2.waiter.state) === NP._POLLWAKE_READY
             # The drain runs on the detached poller thread every cycle, and
             # allocating there has crashed under gVisor's sandbox. Coverage
             # instrumentation adds allocations, so only assert without it.

@@ -174,7 +174,7 @@ function _pc_run_eventloops_workload!()
         for _ in 1:20
             errno = IP._backend_poll_once!(state, Int64(50_000_000))
             errno == Int32(0) || throw(SystemError("event loop poll once", Int(errno)))
-            if (@atomic :acquire registration.read_waiter.state) == IP.PollWaiterState.NOTIFIED
+            if (@atomic :acquire registration.read_waiter.state) === IP._POLLWAKE_READY
                 IP.pollwait!(registration.read_waiter)
                 ready = true
                 break

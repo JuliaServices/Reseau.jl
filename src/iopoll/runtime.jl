@@ -420,6 +420,9 @@ function _poller_thread_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
     catch
         # Never strand `shutdown!`: even if waiter notification itself throws,
         # the shutdown event must fire so `wait(state.shutdown_event)` returns.
+        # Publish `running = false` first so the dead poller can't keep
+        # accepting registrations that would never be serviced.
+        @atomic :release state.running = false
         try
             _notify_all_waiters!(state)
         finally
