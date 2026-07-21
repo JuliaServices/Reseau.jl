@@ -1725,9 +1725,11 @@ end
 end
 
 function _read_some!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
-    nbytes == 0 && return 0
     _ensure_open!(conn, "read")
     _ensure_handshake!(conn)
+    # Match Go's tls.Conn.Read ordering: an empty read still performs the
+    # handshake for its side effect, but never waits for application data.
+    nbytes == 0 && return 0
     lock(conn.read_lock)
     try
         _ensure_open!(conn, "read")
@@ -1838,6 +1840,10 @@ Read exactly `nbytes` of decrypted application data or throw `EOFError`.
 """
 function Base.unsafe_read(conn::Conn, ptr::Ptr{UInt8}, nbytes::UInt)
     remaining = Int(nbytes)
+    if remaining == 0
+        _read_some!(conn, ptr, 0)
+        return nothing
+    end
     offset = 0
     while remaining > 0
         n = _read_some!(conn, ptr + offset, remaining)
@@ -1945,7 +1951,7 @@ function Base.readbytes!(conn::Conn, buf::MutableByteBuffer, nb::Integer = lengt
     Base.require_one_based_indexing(buf)
     requested = Int(nb)
     requested < 0 && throw(ArgumentError("nb must be >= 0"))
-    requested == 0 && return 0
+    requested == 0 && return _read_some!(conn, Ptr{UInt8}(C_NULL), 0)
     return all ? _readbytes_all!(conn, buf, requested) : _readbytes_some!(conn, buf, requested)
 end
 
@@ -2123,13 +2129,15 @@ end
 
 function Base.unsafe_write(conn::Conn, ptr::Ptr{UInt8}, nbytes::UInt)
     nbytes_int = Int(nbytes)
-    nbytes_int == 0 && return 0
     _ensure_open!(conn, "write")
     _ensure_handshake!(conn)
     lock(conn.write_lock)
     try
         _ensure_open!(conn, "write")
         conn.write_permanent_error === nothing || throw(conn.write_permanent_error::TLSError)
+        # As in Go's tls.Conn.Write, empty writes still drive the handshake and
+        # observe permanent write-side errors, but emit no application record.
+        nbytes_int == 0 && return 0
         if _active_tls13(conn)
             return _native_tls13_write_application!(conn, ptr, nbytes_int)
         end
