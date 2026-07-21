@@ -1565,23 +1565,6 @@ function _with_port(addr::TCP.SocketAddrV6, port::Int)::TCP.SocketAddrV6
     return TCP.SocketAddrV6(addr.ip, port; scope_id = Int(addr.scope_id))
 end
 
-function _is_self_connect(conn::TCP.Conn)::Bool
-    laddr = TCP.local_addr(conn)
-    raddr = TCP.remote_addr(conn)
-    (laddr === nothing || raddr === nothing) && return true
-    if laddr isa TCP.SocketAddrV4 && raddr isa TCP.SocketAddrV4
-        lv4 = laddr::TCP.SocketAddrV4
-        rv4 = raddr::TCP.SocketAddrV4
-        return lv4.port == rv4.port && lv4.ip == rv4.ip
-    end
-    if laddr isa TCP.SocketAddrV6 && raddr isa TCP.SocketAddrV6
-        lv6 = laddr::TCP.SocketAddrV6
-        rv6 = raddr::TCP.SocketAddrV6
-        return lv6.port == rv6.port && lv6.ip == rv6.ip && lv6.scope_id == rv6.scope_id
-    end
-    return false
-end
-
 """
     resolve_tcp_addrs(resolver, network, address; op=:connect, policy=ResolverPolicy())
 
@@ -2024,6 +2007,7 @@ function _resolve_serial(
         d::HostResolver,
         network::AbstractString,
         address::AbstractString,
+        kind::Symbol,
         addrs::AbstractVector{A},
         deadline_ns::Int64,
         state::DNSRaceState,
@@ -2044,38 +2028,22 @@ function _resolve_serial(
             return nothing, DialTimeoutError(String(address))
         end
         try
-            max_attempts = d.local_addr === nothing ? 3 : 1
-            for attempt in 1:max_attempts
-                if @atomic :acquire state.done
+            conn = try
+                TCP._dial_socketaddr_impl(remote_addr, d.local_addr, attempt_deadline, state, kind)
+            catch err
+                ex = _as_exception(err)
+                if ex isa TCP.ConnectCanceledError && (@atomic :acquire state.done)
                     return nothing, first_err
                 end
-                try
-                    conn = TCP._connect_socketaddr_impl(remote_addr, d.local_addr, attempt_deadline, state)
-                    if d.local_addr === nothing && _is_self_connect(conn) && attempt < max_attempts
-                        close(conn)
-                        continue
-                    end
-                    if _mark_connect_done!(state)
-                        return conn, nothing
-                    end
-                    close(conn)
-                    return nothing, first_err
-                catch err
-                    ex = _as_exception(err)
-                    if ex isa TCP.ConnectCanceledError && (@atomic :acquire state.done)
-                        return nothing, first_err
-                    end
-                    if d.local_addr === nothing &&
-                       ex isa SystemError &&
-                       (ex::SystemError).errnum == Int(Base.Libc.EADDRNOTAVAIL) &&
-                       attempt < max_attempts
-                        continue
-                    end
-                    mapped = ex isa IOPoll.DeadlineExceededError ? DialTimeoutError(String(address)) : ex
-                    first_err === nothing && (first_err = mapped)
-                    break
-                end
+                mapped = ex isa IOPoll.DeadlineExceededError ? DialTimeoutError(String(address)) : ex
+                first_err === nothing && (first_err = mapped)
+                continue
             end
+            if _mark_connect_done!(state)
+                return conn, nothing
+            end
+            close(conn)
+            return nothing, first_err
         catch err
             ex = _as_exception(err)
             first_err === nothing && (first_err = ex)
@@ -2089,6 +2057,7 @@ function _resolve_parallel(
         d::HostResolver,
         network::AbstractString,
         address::AbstractString,
+        kind::Symbol,
         primaries::AbstractVector{A},
         fallbacks::AbstractVector{B},
         deadline_ns::Int64,
@@ -2106,7 +2075,7 @@ function _resolve_parallel(
     end
     function _start_racer(primary::Bool, addrs::AbstractVector{<:TCP.SocketEndpoint})
         return @async begin
-            conn, err = _resolve_serial(d, network, address, addrs, deadline_ns, state)
+            conn, err = _resolve_serial(d, network, address, kind, addrs, deadline_ns, state)
             _emit_event!(DNSParallelResult(primary, conn, err))
             return nothing
         end
@@ -2175,16 +2144,17 @@ function _resolve_serial_families(
         d::HostResolver,
         network::AbstractString,
         address::AbstractString,
+        kind::Symbol,
         primaries::AbstractVector{A},
         fallbacks::AbstractVector{B},
         deadline_ns::Int64,
     )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}} where {A<:TCP.SocketEndpoint, B<:TCP.SocketEndpoint}
     primary_state = DNSRaceState()
-    conn, err = _resolve_serial(d, network, address, primaries, deadline_ns, primary_state)
+    conn, err = _resolve_serial(d, network, address, kind, primaries, deadline_ns, primary_state)
     conn !== nothing && return conn, nothing
     isempty(fallbacks) && return nothing, err
     fallback_state = DNSRaceState()
-    fallback_conn, fallback_err = _resolve_serial(d, network, address, fallbacks, deadline_ns, fallback_state)
+    fallback_conn, fallback_err = _resolve_serial(d, network, address, kind, fallbacks, deadline_ns, fallback_state)
     fallback_conn !== nothing && return fallback_conn, nothing
     return nothing, err === nothing ? fallback_err : err
 end
@@ -2216,10 +2186,10 @@ function _connect_resolved_addrs_impl(
     conn = nothing
     err = nothing
     if _use_parallel_race(d, kind, fallbacks)
-        conn, err = _resolve_parallel(d, network, address, primaries, fallbacks, deadline_ns)
+        conn, err = _resolve_parallel(d, network, address, kind, primaries, fallbacks, deadline_ns)
     else
         state = DNSRaceState()
-        conn, err = _resolve_serial(d, network, address, addrs, deadline_ns, state)
+        conn, err = _resolve_serial(d, network, address, kind, addrs, deadline_ns, state)
     end
     conn !== nothing && return conn
     throw(_wrap_op_error(
@@ -2277,9 +2247,9 @@ function _connect_resolved_addrs_impl(
             end
         end
         conn, err = if _use_parallel_race(d, kind, fallbacks)
-            _resolve_parallel(d, network, address, primaries, fallbacks, deadline_ns)
+            _resolve_parallel(d, network, address, kind, primaries, fallbacks, deadline_ns)
         else
-            _resolve_serial_families(d, network, address, primaries, fallbacks, deadline_ns)
+            _resolve_serial_families(d, network, address, kind, primaries, fallbacks, deadline_ns)
         end
         conn !== nothing && return conn
         throw(_wrap_op_error(
@@ -2300,9 +2270,9 @@ function _connect_resolved_addrs_impl(
         end
     end
     conn, err = if _use_parallel_race(d, kind, fallbacks)
-        _resolve_parallel(d, network, address, primaries, fallbacks, deadline_ns)
+        _resolve_parallel(d, network, address, kind, primaries, fallbacks, deadline_ns)
     else
-        _resolve_serial_families(d, network, address, primaries, fallbacks, deadline_ns)
+        _resolve_serial_families(d, network, address, kind, primaries, fallbacks, deadline_ns)
     end
     conn !== nothing && return conn
     throw(_wrap_op_error(

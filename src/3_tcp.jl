@@ -510,6 +510,22 @@ function open_tcp_fd!(;
     return _new_netfd(sysfd; family = family, sotype = SocketOps.SOCK_STREAM, net = net, is_connected = false)
 end
 
+@inline function _set_ipv6_only!(fd::FD, enabled::Bool)
+    @static if Sys.isopenbsd() || Sys.isdragonfly()
+        # These kernels enforce IPv6-only sockets and reject attempts to change
+        # IPV6_V6ONLY. This is the same capability exception Go applies.
+        return nothing
+    else
+        SocketOps.set_sockopt_int(
+            fd.pfd.sysfd,
+            SocketOps.IPPROTO_IPV6,
+            SocketOps.IPV6_V6ONLY,
+            enabled ? 1 : 0,
+        )
+        return nothing
+    end
+end
+
 @inline function _connect_socketaddr_family(
         remote_addr::SocketAddr,
         local_addr::Union{Nothing, SocketAddr},
@@ -538,10 +554,12 @@ end
             local_addr::Union{Nothing, SocketAddr},
             connect_deadline_ns::Int64,
             cancel_state,
+            network::Symbol,
         )::Conn
         family = _connect_socketaddr_family(remote_addr, local_addr)
-        fd = open_tcp_fd!(; family = family)
+        fd = open_tcp_fd!(; family = family, net = network)
         try
+            family == SocketOps.AF_INET6 && _set_ipv6_only!(fd, network === :tcp6)
             if local_addr !== nothing
                 SocketOps.bind_socket(fd.pfd.sysfd, _to_sockaddr(local_addr))
             else
@@ -577,10 +595,12 @@ else
             local_addr::Union{Nothing, SocketAddr},
             connect_deadline_ns::Int64,
             cancel_state,
+            network::Symbol,
         )::Conn
         family = _connect_socketaddr_family(remote_addr, local_addr)
-        fd = open_tcp_fd!(; family = family)
+        fd = open_tcp_fd!(; family = family, net = network)
         try
+            family == SocketOps.AF_INET6 && _set_ipv6_only!(fd, network === :tcp6)
             if local_addr !== nothing
                 SocketOps.bind_socket(fd.pfd.sysfd, _to_sockaddr(local_addr))
             end
@@ -616,6 +636,93 @@ else
     end
 end
 
+@inline _uses_ephemeral_local_port(::Nothing)::Bool = true
+@inline _uses_ephemeral_local_port(addr::SocketAddrV4)::Bool = addr.port == 0
+@inline _uses_ephemeral_local_port(addr::SocketAddrV6)::Bool = addr.port == 0
+
+function _is_self_connect(conn::Conn)::Bool
+    laddr = conn.fd.laddr
+    raddr = conn.fd.raddr
+    (laddr === nothing || raddr === nothing) && return true
+    if laddr isa SocketAddrV4 && raddr isa SocketAddrV4
+        local_v4 = laddr::SocketAddrV4
+        remote_v4 = raddr::SocketAddrV4
+        return local_v4.port == remote_v4.port && local_v4.ip == remote_v4.ip
+    end
+    if laddr isa SocketAddrV6 && raddr isa SocketAddrV6
+        local_v6 = laddr::SocketAddrV6
+        remote_v6 = raddr::SocketAddrV6
+        return local_v6.port == remote_v6.port &&
+               local_v6.ip == remote_v6.ip &&
+               local_v6.scope_id == remote_v6.scope_id
+    end
+    return false
+end
+
+function _dial_socketaddr_with(
+        remote_addr::SocketAddr,
+        local_addr::Union{Nothing, SocketAddr},
+        connect_deadline_ns::Int64,
+        cancel_state,
+        network::Symbol,
+        dial_once::F,
+    )::Conn where {F}
+    max_attempts = _uses_ephemeral_local_port(local_addr) ? 3 : 1
+    for attempt in 1:max_attempts
+        conn = try
+            dial_once(remote_addr, local_addr, connect_deadline_ns, cancel_state, network)
+        catch err
+            if err isa SystemError &&
+               (err::SystemError).errnum == Int(Base.Libc.EADDRNOTAVAIL) &&
+               attempt < max_attempts
+                continue
+            end
+            rethrow(err)
+        end
+        if attempt < max_attempts && _is_self_connect(conn)
+            close(conn)
+            continue
+        end
+        return conn
+    end
+    error("unreachable TCP dial retry state")
+end
+
+function _dial_socketaddr_with(
+        dial_once::F,
+        remote_addr::SocketAddr,
+        local_addr::Union{Nothing, SocketAddr},
+        connect_deadline_ns::Int64,
+        cancel_state,
+        network::Symbol,
+    )::Conn where {F}
+    return _dial_socketaddr_with(
+        remote_addr,
+        local_addr,
+        connect_deadline_ns,
+        cancel_state,
+        network,
+        dial_once,
+    )
+end
+
+function _dial_socketaddr_impl(
+        remote_addr::SocketAddr,
+        local_addr::Union{Nothing, SocketAddr},
+        connect_deadline_ns::Int64,
+        cancel_state,
+        network::Symbol,
+    )::Conn
+    return _dial_socketaddr_with(
+        remote_addr,
+        local_addr,
+        connect_deadline_ns,
+        cancel_state,
+        network,
+        _connect_socketaddr_impl,
+    )
+end
+
 """
     connect(remote_addr)
     connect(remote_addr, local_addr)
@@ -628,11 +735,11 @@ For host/port strings, name resolution, and timeout-aware connect policy, use
 the `connect(network, address...)` overloads on the same `TCP.connect` generic.
 """
 function connect(remote_addr::SocketAddr)::Conn
-    return _connect_socketaddr_impl(remote_addr, nothing, Int64(0), nothing)
+    return _dial_socketaddr_impl(remote_addr, nothing, Int64(0), nothing, :tcp)
 end
 
 function connect(remote_addr::SocketAddr, local_addr::Union{Nothing, SocketAddr})::Conn
-    return _connect_socketaddr_impl(remote_addr, local_addr, Int64(0), nothing)
+    return _dial_socketaddr_impl(remote_addr, local_addr, Int64(0), nothing, :tcp)
 end
 
 """
@@ -643,22 +750,6 @@ Create a TCP listener from a bound local address.
 This is the direct-address equivalent of the `listen(network, address; ...)`
 overloads on the same `TCP.listen` generic.
 """
-@inline function _set_ipv6_only!(fd::FD, enabled::Bool)
-    @static if Sys.isopenbsd() || Sys.isdragonfly()
-        # These kernels enforce IPv6-only sockets and reject attempts to change
-        # IPV6_V6ONLY. This is the same capability exception Go applies.
-        return nothing
-    else
-        SocketOps.set_sockopt_int(
-            fd.pfd.sysfd,
-            SocketOps.IPPROTO_IPV6,
-            SocketOps.IPV6_V6ONLY,
-            enabled ? 1 : 0,
-        )
-        return nothing
-    end
-end
-
 function _listen_socketaddr_impl(
         local_addr::SocketAddr,
         network::Symbol;

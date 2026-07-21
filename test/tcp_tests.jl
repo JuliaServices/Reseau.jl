@@ -23,6 +23,13 @@ function _close_quiet!(x)
     return nothing
 end
 
+function _fake_dial_conn(; self_connect::Bool)::NC.Conn
+    fd = NC._new_netfd(Cint(-1))
+    fd.laddr = NC.loopback_addr(self_connect ? 5000 : 5001)
+    fd.raddr = NC.loopback_addr(5000)
+    return NC.Conn(fd)
+end
+
 function _readavailable_until_quiet(conn::NC.Conn; timeout_s::Float64 = 2.0, quiet_timeout_s::Float64 = 0.1)::Vector{UInt8}
     out = UInt8[]
     deadline_ns = Int64(time_ns()) + round(Int64, timeout_s * 1.0e9)
@@ -116,6 +123,71 @@ end
                 _close_quiet!(listener)
                 IP.shutdown!()
             end
+        end
+        @testset "dial owns Go self-connect and EADDRNOTAVAIL retries" begin
+            remote_addr = NC.loopback_addr(5000)
+
+            no_local_calls = Ref(0)
+            no_local = NC._dial_socketaddr_with(
+                remote_addr,
+                nothing,
+                Int64(0),
+                nothing,
+                :tcp,
+            ) do _remote, _local, _deadline, _cancel, network
+                no_local_calls[] += 1
+                @test network === :tcp
+                return _fake_dial_conn(; self_connect = no_local_calls[] < 3)
+            end
+            @test no_local_calls[] == 3
+            @test !NC._is_self_connect(no_local)
+            close(no_local)
+
+            port_zero_calls = Ref(0)
+            port_zero = NC._dial_socketaddr_with(
+                remote_addr,
+                NC.loopback_addr(0),
+                Int64(0),
+                nothing,
+                :tcp4,
+            ) do _remote, _local, _deadline, _cancel, network
+                port_zero_calls[] += 1
+                @test network === :tcp4
+                return _fake_dial_conn(; self_connect = port_zero_calls[] == 1)
+            end
+            @test port_zero_calls[] == 2
+            @test !NC._is_self_connect(port_zero)
+            close(port_zero)
+
+            fixed_port_calls = Ref(0)
+            fixed_port = NC._dial_socketaddr_with(
+                remote_addr,
+                NC.loopback_addr(4000),
+                Int64(0),
+                nothing,
+                :tcp,
+            ) do _remote, _local, _deadline, _cancel, _network
+                fixed_port_calls[] += 1
+                return _fake_dial_conn(; self_connect = true)
+            end
+            @test fixed_port_calls[] == 1
+            @test NC._is_self_connect(fixed_port)
+            close(fixed_port)
+
+            not_available_calls = Ref(0)
+            recovered = NC._dial_socketaddr_with(
+                remote_addr,
+                nothing,
+                Int64(0),
+                nothing,
+                :tcp,
+            ) do _remote, _local, _deadline, _cancel, _network
+                not_available_calls[] += 1
+                not_available_calls[] < 3 && throw(SystemError("connect", Int(Base.Libc.EADDRNOTAVAIL)))
+                return _fake_dial_conn(; self_connect = false)
+            end
+            @test not_available_calls[] == 3
+            close(recovered)
         end
         @testset "connect honors explicit local address binding" begin
             IP.shutdown!()

@@ -475,9 +475,9 @@ end
             fake_fd = NC._new_netfd(Cint(-1))
             fake_fd.laddr = NC.loopback_addr(5000)
             fake_fd.raddr = NC.loopback_addr(5000)
-            @test ND._is_self_connect(NC.Conn(fake_fd))
+            @test NC._is_self_connect(NC.Conn(fake_fd))
             fake_fd.raddr = NC.loopback_addr(5001)
-            @test !ND._is_self_connect(NC.Conn(fake_fd))
+            @test !NC._is_self_connect(NC.Conn(fake_fd))
         end
         @testset "host resolver internal helper utilities" begin
             @test ND._normalize_lookup_host("Example.COM..") == "example.com"
@@ -646,6 +646,14 @@ end
                     laddr = NC.addr(listener)::NC.SocketAddrV6
                     accept_task = _nd_spawn_accept(listener)
                     client = NC.connect("tcp6", ND.join_host_port("::1", Int(laddr.port)); timeout_ns = 1_000_000_000)
+                    @test client.fd.net === :tcp6
+                    @static if !(Sys.isopenbsd() || Sys.isdragonfly())
+                        @test SO.get_sockopt_int(
+                            client.fd.pfd.sysfd,
+                            SO.IPPROTO_IPV6,
+                            SO.IPV6_V6ONLY,
+                        ) == 1
+                    end
                     @test _nd_wait_task_done(accept_task, 2.0) != :timed_out
                     server = fetch(accept_task)
                     server isa Exception && throw(server)
