@@ -921,7 +921,20 @@ end
                     for task in control_tasks
                         @test _nc_wait_task_done(task, 2.0) != :timed_out
                         result = fetch(task)
-                        @test result === nothing || result isa IP.NetClosingError
+                        # Go's internal/poll Shutdown and SetsockoptInt take
+                        # shared lifetime references, but do not serialize
+                        # control syscalls with each other. The kernel may
+                        # therefore reject a control racing a half-close (for
+                        # example, Darwin returns EINVAL for SO_KEEPALIVE), and
+                        # Go propagates that syscall error. The lifetime
+                        # contract here is specifically that close cannot
+                        # invalidate and recycle the descriptor underneath the
+                        # control operation.
+                        if result isa SystemError
+                            @test result.errnum != Int(Base.Libc.EBADF)
+                        else
+                            @test result === nothing || result isa IP.NetClosingError
+                        end
                     end
                     @test _nc_wait_task_done(close_task, 2.0) != :timed_out
                     @test fetch(close_task) === nothing
