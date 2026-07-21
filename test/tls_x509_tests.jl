@@ -82,6 +82,7 @@ function _tls_copy_cert(
     max_path_len = cert.max_path_len,
     has_key_usage = cert.has_key_usage,
     key_usage = cert.key_usage,
+    has_extended_key_usage = cert.has_extended_key_usage,
     extended_key_usage = cert.extended_key_usage,
     subject_key_id = cert.subject_key_id,
     authority_key_id = cert.authority_key_id,
@@ -115,6 +116,7 @@ function _tls_copy_cert(
         max_path_len,
         has_key_usage,
         key_usage,
+        has_extended_key_usage,
         extended_key_usage,
         copy(subject_key_id),
         copy(authority_key_id),
@@ -167,6 +169,7 @@ end
         @test cert.has_key_usage
         @test (cert.key_usage & TLX._TLS_KEY_USAGE_DIGITAL_SIGNATURE) != 0x00
         @test (cert.key_usage & TLX._TLS_KEY_USAGE_KEY_ENCIPHERMENT) != 0x00
+        @test cert.has_extended_key_usage
         @test (cert.extended_key_usage & TLX._TLS_EXT_KEY_USAGE_SERVER) != 0x00
         @test isempty(cert.authority_key_id) == false
         @test isempty(cert.subject_key_id) == false
@@ -183,6 +186,23 @@ end
             0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x01,
         ] in cert.ip_addresses
+
+        ca_cert = _tls_cert_info(_TLS_CA_PATH)
+        @test !ca_cert.has_extended_key_usage
+        @test ca_cert.extended_key_usage == 0x00
+    end
+
+    @testset "extended key usage parsing preserves unknown restrictions" begin
+        unknown_oid = _der_tlv(TLX._ASN1_OBJECT_IDENTIFIER, UInt8[0x2a, 0x03, 0x04])
+        server_oid = _der_tlv(
+            TLX._ASN1_OBJECT_IDENTIFIER,
+            collect(TLX._ASN1_OID_EKU_SERVER_AUTH),
+        )
+        unknown_only = _der_tlv(TLX._ASN1_SEQUENCE, unknown_oid)
+        mixed = _der_tlv(TLX._ASN1_SEQUENCE, vcat(server_oid, unknown_oid))
+
+        @test TLX._tls_parse_extended_key_usage(unknown_only, 1, length(unknown_only)) == 0x00
+        @test TLX._tls_parse_extended_key_usage(mixed, 1, length(mixed)) == TLX._TLS_EXT_KEY_USAGE_SERVER
     end
 
     @testset "SHA-1 X.509 signatures parse but are rejected at verification" begin
@@ -227,6 +247,31 @@ end
         @test TLX._tls_certificate_usage_permitted(key_encipherment_only, "ssl_server")
         @test !TLX._tls_certificate_usage_permitted(key_encipherment_only, "ssl_client")
         @test !TLX._tls_certificate_usage_permitted(no_key_usage, "ssl_server")
+
+        no_eku = _tls_copy_cert(
+            server_cert;
+            has_extended_key_usage = false,
+            extended_key_usage = UInt8(0),
+        )
+        unknown_only_eku = _tls_copy_cert(
+            server_cert;
+            has_extended_key_usage = true,
+            extended_key_usage = UInt8(0),
+        )
+        mixed_server_eku = _tls_copy_cert(
+            server_cert;
+            has_extended_key_usage = true,
+            extended_key_usage = TLX._TLS_EXT_KEY_USAGE_SERVER,
+        )
+        @test TLX._tls_certificate_usage_permitted(no_eku, "ssl_server")
+        @test TLX._tls_certificate_usage_permitted(no_eku, "ssl_client")
+        @test !TLX._tls_certificate_usage_permitted(unknown_only_eku, "ssl_server")
+        @test !TLX._tls_certificate_usage_permitted(unknown_only_eku, "ssl_client")
+        @test TLX._tls_certificate_usage_permitted(mixed_server_eku, "ssl_server")
+        @test !TLX._tls_certificate_usage_permitted(mixed_server_eku, "ssl_client")
+        @test !TLX._tls_chain_extended_key_usage_permitted([unknown_only_eku], "ssl_server")
+        @test TLX._tls_chain_extended_key_usage_permitted([mixed_server_eku], "ssl_server")
+        @test !TLX._tls_chain_extended_key_usage_permitted([mixed_server_eku], "ssl_client")
 
         ca_cert = _tls_cert_info(_TLS_CA_PATH)
         @test TLX._tls_cert_subject_matches_issuer(server_cert, ca_cert)
@@ -560,8 +605,16 @@ end
         client_leaf = _tls_cert_info(_TLS_CLIENT_CERT_PATH)
         root = _tls_cert_info(_TLS_CA_PATH)
 
-        client_only_root = _tls_copy_cert(root; extended_key_usage = TLX._TLS_EXT_KEY_USAGE_CLIENT)
-        server_only_root = _tls_copy_cert(root; extended_key_usage = TLX._TLS_EXT_KEY_USAGE_SERVER)
+        client_only_root = _tls_copy_cert(
+            root;
+            has_extended_key_usage = true,
+            extended_key_usage = TLX._TLS_EXT_KEY_USAGE_CLIENT,
+        )
+        server_only_root = _tls_copy_cert(
+            root;
+            has_extended_key_usage = true,
+            extended_key_usage = TLX._TLS_EXT_KEY_USAGE_SERVER,
+        )
 
         server_chain_err = try
             TLX._tls_verify_peer_certificate_chain!(

@@ -60,6 +60,7 @@ struct _TLSCertificateInfo
     max_path_len::Int
     has_key_usage::Bool
     key_usage::UInt16
+    has_extended_key_usage::Bool
     extended_key_usage::UInt8
     subject_key_id::Vector{UInt8}
     authority_key_id::Vector{UInt8}
@@ -1045,6 +1046,7 @@ function _tls_parse_der_certificate_info(cert_der::AbstractVector{UInt8})::_TLSC
     max_path_len = -1
     has_key_usage = false
     key_usage = UInt16(0)
+    has_extended_key_usage = false
     extended_key_usage = UInt8(0)
     subject_key_id = UInt8[]
     authority_key_id = UInt8[]
@@ -1088,6 +1090,7 @@ function _tls_parse_der_certificate_info(cert_der::AbstractVector{UInt8})::_TLSC
                     has_key_usage = true
                     key_usage = _tls_parse_key_usage(cert_der, octet_start, octet_end)
                 elseif _asn1_oid_equals(cert_der, oid_start, oid_end, _ASN1_OID_EXTENDED_KEY_USAGE)
+                    has_extended_key_usage = true
                     extended_key_usage = _tls_parse_extended_key_usage(cert_der, octet_start, octet_end)
                 elseif _asn1_oid_equals(cert_der, oid_start, oid_end, _ASN1_OID_SUBJECT_KEY_IDENTIFIER)
                     subject_key_id = _tls_parse_subject_key_identifier(cert_der, octet_start, octet_end)
@@ -1126,6 +1129,7 @@ function _tls_parse_der_certificate_info(cert_der::AbstractVector{UInt8})::_TLSC
         max_path_len,
         has_key_usage,
         key_usage,
+        has_extended_key_usage,
         extended_key_usage,
         subject_key_id,
         authority_key_id,
