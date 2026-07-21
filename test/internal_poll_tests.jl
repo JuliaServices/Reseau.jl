@@ -237,7 +237,7 @@ end
             end
         end
         @testset "combined deadline entry normalization" begin
-            registration = IP.Registration(Cint(7), UInt64(11), IP.PollMode.READWRITE, IP.PollWaiter(), IP.PollWaiter(), false)
+            registration = IP.Registration(IP.SysFD(7), UInt64(11), IP.PollMode.READWRITE, IP.PollWaiter(), IP.PollWaiter(), false)
             combined = IP._build_deadline_entries(registration.pollstate, Int64(10), Int64(10), UInt64(3), UInt64(5))
             @test length(combined) == 1
             @test combined[1].mode == IP.PollMode.READWRITE
@@ -319,7 +319,7 @@ end
             release_control = Channel{Nothing}(1)
             fd0 = SO.INVALID_SOCKET
             try
-                held_fd = Channel{Cint}(1)
+                held_fd = Channel{IP.SysFD}(1)
                 control_task = errormonitor(Threads.@spawn begin
                     IP._with_fd_ref(ipfd) do sysfd
                         put!(held_fd, sysfd)
