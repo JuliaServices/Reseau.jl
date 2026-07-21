@@ -481,6 +481,54 @@ function _fd_decref!(fd::FD)
     return nothing
 end
 
+"""
+    _with_fd_ref(f, fd)
+
+Run a non-I/O descriptor control operation while holding a shared lifetime
+reference. The callback receives the raw descriptor only after the reference is
+acquired, so concurrent close cannot destroy and recycle that descriptor until
+the callback returns.
+"""
+function _with_fd_ref(f::F, fd::FD) where {F}
+    _fd_incref!(fd)
+    try
+        return f(fd.sysfd)
+    finally
+        _fd_decref!(fd)
+    end
+end
+
+"""
+    shutdown_socket!(fd, how)
+
+Shut down directions on a socket while preventing concurrent descriptor
+destruction and reuse.
+"""
+function shutdown_socket!(fd::FD, how::Integer)
+    _with_fd_ref(fd) do sysfd
+        SocketOps.shutdown_socket(sysfd, how)
+    end
+    return nothing
+end
+
+"""
+    set_sockopt_int!(fd, level, optname, value)
+
+Set an integer socket option while preventing concurrent descriptor destruction
+and reuse.
+"""
+function set_sockopt_int!(
+        fd::FD,
+        level::Cint,
+        optname::Cint,
+        value::Integer,
+    )
+    _with_fd_ref(fd) do sysfd
+        SocketOps.set_sockopt_int(sysfd, level, optname, value)
+    end
+    return nothing
+end
+
 function _fd_read_lock!(fd::FD)
     _fdlock_rwlock!(fd.fdlock, true, true) || throw(_closing_error(fd.is_file))
     return nothing

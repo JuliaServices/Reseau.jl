@@ -672,11 +672,71 @@ end
                 NC.set_read_deadline!(server, time_ns() + 1_000_000_000)
                 @test eof(server)
                 @test_throws EOFError read!(server, Vector{UInt8}(undef, 1))
+
+                close(client)
+                @test_throws IP.NetClosingError NC.set_nodelay!(client, true)
+                @test_throws IP.NetClosingError NC.set_keepalive!(client, true)
+                @test_throws IP.NetClosingError NC.closeread(client)
+                @test_throws IP.NetClosingError closewrite(client)
             finally
                 _close_quiet!(server)
                 _close_quiet!(client)
                 _close_quiet!(listener)
                 IP.shutdown!()
+            end
+        end
+        @testset "TCP controls race close without raw-descriptor errors" begin
+            for _ in 1:16
+                IP.shutdown!()
+                listener = nothing
+                client = nothing
+                server = nothing
+                control_tasks = Task[]
+                close_task = nothing
+                try
+                    listener = NC.listen(NC.loopback_addr(0); backlog = 8)
+                    laddr = NC.addr(listener)::NC.SocketAddrV4
+                    accept_task = errormonitor(@async NC.accept(listener))
+                    client = NC.connect(NC.loopback_addr(Int(laddr.port)))
+                    @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
+                    server = fetch(accept_task)
+
+                    controls = (
+                        () -> NC.set_nodelay!(client, false),
+                        () -> NC.set_keepalive!(client, false),
+                        () -> NC.closeread(client),
+                        () -> closewrite(client),
+                    )
+                    for control in controls
+                        push!(control_tasks, errormonitor(Threads.@spawn begin
+                            try
+                                control()
+                                return nothing
+                            catch err
+                                return err::Exception
+                            end
+                        end))
+                    end
+                    close_task = errormonitor(Threads.@spawn close(client))
+
+                    for task in control_tasks
+                        @test _nc_wait_task_done(task, 2.0) != :timed_out
+                        result = fetch(task)
+                        @test result === nothing || result isa IP.NetClosingError
+                    end
+                    @test _nc_wait_task_done(close_task, 2.0) != :timed_out
+                    @test fetch(close_task) === nothing
+                    @test client.fd.pfd.sysfd == Cint(-1)
+                finally
+                    for task in control_tasks
+                        istaskdone(task) || wait(task)
+                    end
+                    close_task isa Task && !istaskdone(close_task) && wait(close_task)
+                    _close_quiet!(server)
+                    _close_quiet!(client)
+                    _close_quiet!(listener)
+                    IP.shutdown!()
+                end
             end
         end
         @testset "IPv6 show output uses compressed form" begin

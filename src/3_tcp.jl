@@ -1022,7 +1022,7 @@ end
 Shut down the read side of the TCP connection.
 """
 function closeread(conn::Conn)
-    SocketOps.shutdown_socket(conn.fd.pfd.sysfd, SocketOps.SHUT_RD)
+    IOPoll.shutdown_socket!(conn.fd.pfd, SocketOps.SHUT_RD)
     return nothing
 end
 
@@ -1032,7 +1032,7 @@ end
 Shut down the write side of the TCP connection.
 """
 function Base.closewrite(conn::Conn)
-    SocketOps.shutdown_socket(conn.fd.pfd.sysfd, SocketOps.SHUT_WR)
+    IOPoll.shutdown_socket!(conn.fd.pfd, SocketOps.SHUT_WR)
     return nothing
 end
 
@@ -1134,8 +1134,8 @@ end
 Enable or disable `TCP_NODELAY` on `conn`.
 """
 function set_nodelay!(conn::Conn, enabled::Bool = true)
-    SocketOps.set_sockopt_int(
-        conn.fd.pfd.sysfd,
+    IOPoll.set_sockopt_int!(
+        conn.fd.pfd,
         SocketOps.IPPROTO_TCP,
         SocketOps.TCP_NODELAY,
         enabled ? 1 : 0,
@@ -1149,8 +1149,8 @@ end
 Enable or disable `SO_KEEPALIVE` on `conn`.
 """
 function set_keepalive!(conn::Conn, enabled::Bool = true)
-    SocketOps.set_sockopt_int(
-        conn.fd.pfd.sysfd,
+    IOPoll.set_sockopt_int!(
+        conn.fd.pfd,
         SocketOps.SOL_SOCKET,
         SocketOps.SO_KEEPALIVE,
         enabled ? 1 : 0,

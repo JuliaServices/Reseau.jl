@@ -293,6 +293,52 @@ end
                 IP.shutdown!()
             end
         end
+        @testset "control references delay descriptor destruction" begin
+            fd0, fd1 = _ip_socketpair_stream()
+            ipfd = IP.FD(fd0)
+            control_task = nothing
+            close_task = nothing
+            release_control = Channel{Nothing}(1)
+            fd0 = Cint(-1)
+            try
+                held_fd = Channel{Cint}(1)
+                control_task = errormonitor(Threads.@spawn begin
+                    IP._with_fd_ref(ipfd) do sysfd
+                        put!(held_fd, sysfd)
+                        take!(release_control)
+                        return sysfd
+                    end
+                end)
+                sysfd = take!(held_fd)
+                @test sysfd == ipfd.sysfd
+
+                close_task = errormonitor(Threads.@spawn close(ipfd))
+                @test IP.timedwait(() -> istaskdone(close_task), 0.05; pollint = 0.001) == :timed_out
+                @test ipfd.sysfd == sysfd
+                @test SO.get_sockopt_int(sysfd, SO.SOL_SOCKET, SO.SO_KEEPALIVE) >= 0
+
+                put!(release_control, nothing)
+                @test IP.timedwait(() -> istaskdone(control_task), 2.0; pollint = 0.001) != :timed_out
+                @test fetch(control_task) == sysfd
+                @test IP.timedwait(() -> istaskdone(close_task), 2.0; pollint = 0.001) != :timed_out
+                @test fetch(close_task) === nothing
+                @test ipfd.sysfd == Cint(-1)
+
+                @test_throws IP.NetClosingError IP.shutdown_socket!(ipfd, SO.SHUT_RD)
+                @test_throws IP.NetClosingError IP.set_sockopt_int!(ipfd, SO.SOL_SOCKET, SO.SO_KEEPALIVE, 1)
+            finally
+                if control_task isa Task && !istaskdone(control_task)
+                    isready(release_control) || put!(release_control, nothing)
+                    wait(control_task)
+                end
+                if close_task isa Task && !istaskdone(close_task)
+                    wait(close_task)
+                end
+                ipfd.sysfd >= 0 && close(ipfd)
+                _ip_close_fd(fd1)
+                IP.shutdown!()
+            end
+        end
         @testset "event error maps to not pollable" begin
             fd0, fd1 = _ip_socketpair_stream()
             ipfd = IP.FD(fd0)
