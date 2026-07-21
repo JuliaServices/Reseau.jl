@@ -587,7 +587,8 @@ end
             drained = NP._drain_expired_time_entries!(state, Int64(time_ns()))
             @test drained === nothing
             if Base.JLOptions().code_coverage == 0
-                allocs = @allocated NP._drain_expired_time_entries!(state, Int64(time_ns()))
+                allocation_check_now = Int64(time_ns())
+                allocs = @allocated NP._drain_expired_time_entries!(state, allocation_check_now)
                 @test allocs == 0
             end
         end
