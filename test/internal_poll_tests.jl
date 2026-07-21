@@ -172,6 +172,37 @@ end
                 IP.shutdown!()
             end
         end
+        @testset "overflowed deadline saturates instead of expiring" begin
+            fd0, fd1 = _ip_socketpair_stream()
+            ipfd = IP.FD(fd0)
+            fd0 = SO.INVALID_SOCKET
+            try
+                IP._set_nonblocking!(ipfd.sysfd)
+                IP.register!(ipfd)
+                # `now + huge_timeout` can wrap negative; Go parity says a
+                # deadline in the distant future means "never fires", not
+                # "fires instantly". Assert via the internal deadline words
+                # instead of end-to-end waiting.
+                overflowed = Int64(time_ns()) + typemax(Int64)
+                @test overflowed < 0
+                IP.set_deadline!(ipfd, overflowed)
+                @test (@atomic :acquire ipfd.pd.rd_ns) == typemax(Int64)
+                @test (@atomic :acquire ipfd.pd.wd_ns) == typemax(Int64)
+                @test IP._check_error(ipfd.pd, IP.PollMode.READ) == Int32(0)
+                @test IP._check_error(ipfd.pd, IP.PollMode.WRITE) == Int32(0)
+                near_max = typemax(Int64) - Int64(1)
+                IP.set_read_deadline!(ipfd, near_max)
+                @test (@atomic :acquire ipfd.pd.rd_ns) == near_max
+                @test IP._check_error(ipfd.pd, IP.PollMode.READ) == Int32(0)
+                IP.set_deadline!(ipfd, Int64(0))
+                @test (@atomic :acquire ipfd.pd.rd_ns) == Int64(0)
+                @test (@atomic :acquire ipfd.pd.wd_ns) == Int64(0)
+            finally
+                IP._is_valid_fd(ipfd.sysfd) && close(ipfd)
+                _ip_close_fd(fd1)
+                IP.shutdown!()
+            end
+        end
         @testset "stale deadline timer does not poison future waits" begin
             fd0, fd1 = _ip_socketpair_stream()
             ipfd = IP.FD(fd0)

@@ -182,7 +182,10 @@ end
 Set read/write deadline state on an `FD`.
 
 `deadline_ns == 0` disables deadlines for the selected mode.
-`deadline_ns <= time_ns()` triggers immediate timeout.
+`0 < deadline_ns <= time_ns()` triggers immediate timeout.
+`deadline_ns < 0` means an absolute deadline computed as `now + timeout`
+overflowed; like Go's `poll_runtime_pollSetDeadline`, a deadline in the distant
+future is treated as effectively infinite rather than already expired.
 
 Returns `nothing`.
 
@@ -192,6 +195,7 @@ Throws:
 """
 function _set_deadline_impl!(fd::FD, deadline_ns::Integer, mode::PollMode.T)
     deadline = Int64(deadline_ns)
+    deadline < 0 && (deadline = typemax(Int64))
     _fdlock_incref!(fd.fdlock) || throw(_closing_error(fd.is_file))
     try
         pd = fd.pd
@@ -451,6 +455,42 @@ function _wait_iocp_completion!(registration::Registration, pd::PollState, mode:
 end
 
 """
+Drain a deadline/close-interrupted Windows overlapped operation until the
+kernel no longer owns it.
+
+After `CancelIoEx` the kernel may keep writing through the submitted
+WSARecv/WSASend buffer until the operation's completion packet is delivered;
+the zombie machinery pins the OVERLAPPED but not the caller's data buffer, so
+returning (and leaving the caller's `GC.@preserve`) before that completion
+arrives could let the kernel scribble on reclaimed memory. Mirroring Go's
+`fd_windows.go` `execIO`, this waits for the completion unconditionally,
+looping until a finish call reports the operation is no longer in flight
+(anything other than `EAGAIN`, the mapping of `ERROR_IO_INCOMPLETE`).
+
+Wake reasons are ignored on purpose: a concurrent close's `evict!` fires
+CANCELED wakes at every waiter before the completion is delivered, and the
+drain must keep waiting through those. That is safe because the caller holds
+the fd read/write lock, so `_destroy!` (and therefore `deregister!`) cannot
+tear down the registration until the drain returns, and the running poller
+thread always dispatches a wake when it processes the completion packet. If
+the poller has shut down instead, the finish call fails its registration
+lookup (`EBADF`) and the loop exits rather than parking forever.
+"""
+function _drain_canceled_iocp_op!(registration::Registration, mode::PollMode.T)
+    canceled = _iocp_cancel_mode!(registration, mode)
+    waiter = mode == PollMode.WRITE ? registration.write_waiter : registration.read_waiter
+    while true
+        canceled && pollwait!(waiter)
+        _, errno = mode == PollMode.WRITE ? _iocp_finish_write!(registration) : _iocp_finish_read!(registration)
+        errno == Int32(Base.Libc.EAGAIN) || return nothing
+        # Still ERROR_IO_INCOMPLETE: the operation remains in flight, so keep
+        # waiting for its completion wake (tolerating eviction CANCELED wakes
+        # consumed along the way).
+        canceled = true
+    end
+end
+
+"""
 Set both read and write deadlines for `fd`.
 
 `deadline_ns` is interpreted as an absolute `time_ns()`-style monotonic
@@ -630,10 +670,7 @@ function connect!(fd::FD, addrbuf::Vector{UInt8}, addrlen::Int32)
             _wait_iocp_completion!(registration, fd.pd, PollMode.WRITE, fd.is_file)
         catch err
             ex = err::Exception
-            if _iocp_cancel_mode!(registration, PollMode.WRITE)
-                pollwait!(registration.write_waiter)
-            end
-            _ = _iocp_finish_connect!(registration)
+            _drain_canceled_iocp_op!(registration, PollMode.WRITE)
             rethrow(ex)
         end
         errno = _iocp_finish_connect!(registration)
@@ -673,10 +710,7 @@ function accept!(fd::FD, family::Cint, sotype::Cint)::Tuple{SysFD, SocketOps.Acc
                     _wait_iocp_completion!(registration, fd.pd, PollMode.READ, fd.is_file)
                 catch err
                     ex = err::Exception
-                    if _iocp_cancel_mode!(registration, PollMode.READ)
-                        pollwait!(registration.read_waiter)
-                    end
-                    _, _, _ = _iocp_finish_accept!(registration)
+                    _drain_canceled_iocp_op!(registration, PollMode.READ)
                     SocketOps.close_socket_nothrow(child_sysfd)
                     rethrow(ex)
                 end
@@ -755,10 +789,7 @@ function _read_ptr_some!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
             try
                 _wait_iocp_completion!(registration, fd.pd, PollMode.READ, fd.is_file)
             catch err
-                if _iocp_cancel_mode!(registration, PollMode.READ)
-                    pollwait!(registration.read_waiter)
-                end
-                _, _ = _iocp_finish_read!(registration)
+                _drain_canceled_iocp_op!(registration, PollMode.READ)
                 rethrow(err)
             end
             bytes, result = _iocp_finish_read!(registration)
@@ -849,10 +880,7 @@ function _write_ptr!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
                 try
                     _wait_iocp_completion!(registration, fd.pd, PollMode.WRITE, fd.is_file)
                 catch err
-                    if _iocp_cancel_mode!(registration, PollMode.WRITE)
-                        pollwait!(registration.write_waiter)
-                    end
-                    _, _ = _iocp_finish_write!(registration)
+                    _drain_canceled_iocp_op!(registration, PollMode.WRITE)
                     rethrow(err)
                 end
                 bytes, result = _iocp_finish_write!(registration)

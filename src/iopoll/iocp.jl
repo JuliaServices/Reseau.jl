@@ -294,6 +294,9 @@ end
     return (@atomic :acquire reg.read_op.active) || (@atomic :acquire reg.write_op.active)
 end
 
+# Caller must hold `state.lock`: `by_ptr` and `zombies` are mutated by
+# `_backend_open_fd!`/`_backend_close_fd!` under that lock, and a Dict delete
+# or Vector resize racing those mutations is memory-unsafe.
 function _cleanup_registration_if_done!(backend::IocpBackendState, reg::IocpRegistration)
     if !(@atomic :acquire reg.closing)
         return nothing
@@ -833,21 +836,48 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
             continue
         end
         entry.overlapped == C_NULL && continue
-        reg = get(backend.by_ptr, entry.overlapped, nothing)
-        reg === nothing && continue
-        op = if entry.overlapped == _op_ptr(reg.read_op)
-            reg.read_op
-        elseif entry.overlapped == _op_ptr(reg.write_op)
-            reg.write_op
-        else
-            continue
+        # `by_ptr` and `zombies` are mutated by `_backend_open_fd!` /
+        # `_backend_close_fd!` on Julia threads under `state.lock`; reading the
+        # Dict here unlocked would race a rehash. Taking `state.lock` on the
+        # poller thread cannot deadlock: every path that holds it (submit,
+        # finish, cancel, register/deregister, heap updates) only performs
+        # bounded non-blocking work and never waits for poller progress while
+        # holding the lock. The critical section below is brief and
+        # allocation-free.
+        token = UInt64(0)
+        mode = PollMode.READ
+        is_probe = false
+        dispatch = false
+        lock(state.lock)
+        try
+            reg = get(backend.by_ptr, entry.overlapped, nothing)
+            if reg !== nothing
+                op = if entry.overlapped == _op_ptr(reg.read_op)
+                    reg.read_op
+                elseif entry.overlapped == _op_ptr(reg.write_op)
+                    reg.write_op
+                else
+                    nothing
+                end
+                if op !== nothing
+                    # Capture identity fields before publishing `active = false`:
+                    # clearing `active` licenses a resubmitting task to overwrite
+                    # `op.kind`/`op.mode`/`op.token`/`op.request`, and the
+                    # dispatch below runs after this lock is released.
+                    token = op.token
+                    mode = op.mode
+                    is_probe = op.kind == IocpOpKind.PROBE_READ || op.kind == IocpOpKind.PROBE_WRITE
+                    @atomic :release op.active = false
+                    _cleanup_registration_if_done!(backend, reg)
+                    dispatch = !(@atomic :acquire reg.closing)
+                end
+            end
+        finally
+            unlock(state.lock)
         end
-        @atomic :release op.active = false
-        is_probe = op.kind == IocpOpKind.PROBE_READ || op.kind == IocpOpKind.PROBE_WRITE
-        _cleanup_registration_if_done!(backend, reg)
-        (@atomic :acquire reg.closing) && continue
+        dispatch || continue
         status = UInt32(entry.internal & UInt(typemax(UInt32)))
-        _dispatch_ready_event!(state, PollEvent(INVALID_FD, op.token, op.mode, is_probe && status != UInt32(0)))
+        _dispatch_ready_event!(state, PollEvent(INVALID_FD, token, mode, is_probe && status != UInt32(0)))
     end
     return Int32(0)
 end
