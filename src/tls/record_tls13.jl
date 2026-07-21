@@ -312,21 +312,25 @@ function _tls13_write_record!(
 end
 
 function _tls13_process_alert!(state::_TLS13NativeClientState, alert::AbstractVector{UInt8})::Nothing
-    length(alert) == 2 || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.3 alert")
+    length(alert) == 2 || _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: malformed TLS 1.3 alert")
     alert_desc = alert[2]
-    if alert_desc != _TLS_ALERT_CLOSE_NOTIFY
-        alert_level = alert[1]
-        level_name = if alert_level == _TLS_ALERT_LEVEL_WARNING
-            "warning"
-        elseif alert_level == _TLS_ALERT_LEVEL_FATAL
-            "fatal"
-        else
-            "unknown"
-        end
-        throw(_tls_peer_alert_error(alert_desc, "tls: received $level_name TLS 1.3 alert $(Int(alert_desc))"))
+    if alert_desc == _TLS_ALERT_CLOSE_NOTIFY
+        state.peer_close_notify = true
+        return nothing
     end
-    state.peer_close_notify = true
-    return nothing
+    if alert_desc == _TLS_ALERT_USER_CANCELED
+        _tls_note_useless_record!(state, "tls: too many ignored TLS records")
+        return nothing
+    end
+    alert_level = alert[1]
+    level_name = if alert_level == _TLS_ALERT_LEVEL_WARNING
+        "warning"
+    elseif alert_level == _TLS_ALERT_LEVEL_FATAL
+        "fatal"
+    else
+        "unknown"
+    end
+    throw(_tls_peer_alert_error(alert_desc, "tls: received $level_name TLS 1.3 alert $(Int(alert_desc))"))
 end
 
 # TLS 1.3 inner plaintext parsing strips padding, recovers the true content

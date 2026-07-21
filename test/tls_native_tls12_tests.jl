@@ -357,6 +357,91 @@ end
         end
     end
 
+    @testset "TLS 1.2 warning alerts are ignored with a bound" begin
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        try
+            listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
+            state = TL12N._TLS12NativeState()
+            state.version = TL12N.TLS1_2_VERSION
+            warning = UInt8[TL12N._TLS_ALERT_LEVEL_WARNING, TL12N._TLS_ALERT_HANDSHAKE_FAILURE]
+            handshake = UInt8[TL12N._HANDSHAKE_TYPE_FINISHED, 0x00, 0x00, 0x01, 0xaa]
+            TL12N._tls_write_tls_plaintext!(client_tcp, TL12N._TLS_RECORD_TYPE_ALERT, warning, TL12N.TLS1_2_VERSION)
+            TL12N._tls_write_tls_plaintext!(client_tcp, TL12N._TLS_RECORD_TYPE_HANDSHAKE, handshake, TL12N.TLS1_2_VERSION)
+            TL12N._tls12_read_record!(server_tcp, state)
+            @test state.useless_record_count == 1
+            TL12N._tls12_read_record!(server_tcp, state)
+            @test state.useless_record_count == 0
+            @test TL12N._tls12_try_take_handshake_message!(state) == handshake
+        finally
+            _tls12_native_close_quiet!(server_tcp)
+            _tls12_native_close_quiet!(client_tcp)
+            _tls12_native_close_quiet!(listener)
+        end
+
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        try
+            listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
+            state = TL12N._TLS12NativeState()
+            state.version = TL12N.TLS1_2_VERSION
+            warning = UInt8[TL12N._TLS_ALERT_LEVEL_WARNING, TL12N._TLS_ALERT_USER_CANCELED]
+            for _ in 1:(TL12N._TLS_MAX_USELESS_RECORDS + 1)
+                TL12N._tls_write_tls_plaintext!(client_tcp, TL12N._TLS_RECORD_TYPE_ALERT, warning, TL12N.TLS1_2_VERSION)
+            end
+            for _ in 1:TL12N._TLS_MAX_USELESS_RECORDS
+                TL12N._tls12_read_record!(server_tcp, state)
+            end
+            _tls12_unexpected_message_error(() -> TL12N._tls12_read_record!(server_tcp, state))
+        finally
+            _tls12_native_close_quiet!(server_tcp)
+            _tls12_native_close_quiet!(client_tcp)
+            _tls12_native_close_quiet!(listener)
+        end
+
+        for (label, alert, expected_from_peer) in (
+            (
+                "fatal",
+                UInt8[TL12N._TLS_ALERT_LEVEL_FATAL, TL12N._TLS_ALERT_HANDSHAKE_FAILURE],
+                true,
+            ),
+            (
+                "invalid level",
+                UInt8[0x03, TL12N._TLS_ALERT_HANDSHAKE_FAILURE],
+                false,
+            ),
+        )
+            @testset "$label alert" begin
+                listener = nothing
+                client_tcp = nothing
+                server_tcp = nothing
+                try
+                    listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
+                    state = TL12N._TLS12NativeState()
+                    state.version = TL12N.TLS1_2_VERSION
+                    TL12N._tls_write_tls_plaintext!(client_tcp, TL12N._TLS_RECORD_TYPE_ALERT, alert, TL12N.TLS1_2_VERSION)
+                    err = try
+                        TL12N._tls12_read_record!(server_tcp, state)
+                        nothing
+                    catch ex
+                        ex
+                    end
+                    @test err isa TL12N._TLSAlertError
+                    if err isa TL12N._TLSAlertError
+                        @test err.from_peer == expected_from_peer
+                        @test err.alert == (expected_from_peer ? TL12N._TLS_ALERT_HANDSHAKE_FAILURE : TL12N._TLS_ALERT_UNEXPECTED_MESSAGE)
+                    end
+                finally
+                    _tls12_native_close_quiet!(server_tcp)
+                    _tls12_native_close_quiet!(client_tcp)
+                    _tls12_native_close_quiet!(listener)
+                end
+            end
+        end
+    end
+
     @testset "record layer rejects authenticated oversized plaintext" begin
         listener = nothing
         client_tcp = nothing

@@ -447,6 +447,89 @@ end
         end
     end
 
+    @testset "TLS 1.3 user_canceled alerts are ignored with a bound" begin
+        IPN.shutdown!()
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        try
+            listener, client_tcp, server_tcp = _open_tcp_pair()
+            state = TLN._TLS13NativeClientState()
+            state.version = TLN.TLS1_3_VERSION
+            user_canceled = UInt8[TLN._TLS_ALERT_LEVEL_FATAL, TLN._TLS_ALERT_USER_CANCELED]
+            handshake = UInt8[TLN._HANDSHAKE_TYPE_FINISHED, 0x00, 0x00, 0x01, 0xaa]
+            TLN._tls_write_tls_plaintext!(client_tcp, TLN._TLS_RECORD_TYPE_ALERT, user_canceled, TLN.TLS1_2_VERSION)
+            TLN._tls_write_tls_plaintext!(client_tcp, TLN._TLS_RECORD_TYPE_HANDSHAKE, handshake, TLN.TLS1_2_VERSION)
+            TLN._tls13_read_record!(server_tcp, state)
+            @test state.useless_record_count == 1
+            TLN._tls13_read_record!(server_tcp, state)
+            @test state.useless_record_count == 0
+            @test TLN._tls13_try_take_handshake_message!(state) == handshake
+        finally
+            _tls_native_close_quiet!(server_tcp)
+            _tls_native_close_quiet!(client_tcp)
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+
+        IPN.shutdown!()
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        try
+            listener, client_tcp, server_tcp = _open_tcp_pair()
+            state = TLN._TLS13NativeClientState()
+            state.version = TLN.TLS1_3_VERSION
+            user_canceled = UInt8[TLN._TLS_ALERT_LEVEL_WARNING, TLN._TLS_ALERT_USER_CANCELED]
+            for _ in 1:(TLN._TLS_MAX_USELESS_RECORDS + 1)
+                TLN._tls_write_tls_plaintext!(client_tcp, TLN._TLS_RECORD_TYPE_ALERT, user_canceled, TLN.TLS1_2_VERSION)
+            end
+            for _ in 1:TLN._TLS_MAX_USELESS_RECORDS
+                TLN._tls13_read_record!(server_tcp, state)
+            end
+            _tls13_unexpected_message_error(() -> TLN._tls13_read_record!(server_tcp, state))
+        finally
+            _tls_native_close_quiet!(server_tcp)
+            _tls_native_close_quiet!(client_tcp)
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+
+        for level in (TLN._TLS_ALERT_LEVEL_WARNING, TLN._TLS_ALERT_LEVEL_FATAL)
+            IPN.shutdown!()
+            listener = nothing
+            client_tcp = nothing
+            server_tcp = nothing
+            try
+                listener, client_tcp, server_tcp = _open_tcp_pair()
+                state = TLN._TLS13NativeClientState()
+                state.version = TLN.TLS1_3_VERSION
+                TLN._tls_write_tls_plaintext!(
+                    client_tcp,
+                    TLN._TLS_RECORD_TYPE_ALERT,
+                    UInt8[level, TLN._TLS_ALERT_HANDSHAKE_FAILURE],
+                    TLN.TLS1_2_VERSION,
+                )
+                err = try
+                    TLN._tls13_read_record!(server_tcp, state)
+                    nothing
+                catch ex
+                    ex
+                end
+                @test err isa TLN._TLSAlertError
+                if err isa TLN._TLSAlertError
+                    @test err.from_peer
+                    @test err.alert == TLN._TLS_ALERT_HANDSHAKE_FAILURE
+                end
+            finally
+                _tls_native_close_quiet!(server_tcp)
+                _tls_native_close_quiet!(client_tcp)
+                _tls_native_close_quiet!(listener)
+                IPN.shutdown!()
+            end
+        end
+    end
+
     @testset "record layer fragments oversized handshake payloads" begin
         IPN.shutdown!()
         listener = nothing
