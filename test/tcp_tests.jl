@@ -718,6 +718,7 @@ end
             client = nothing
             server = nothing
             eof_task = nothing
+            close_task = nothing
             read_lock_held = false
             try
                 listener = NC.listen(NC.loopback_addr(0); backlog = 8)
@@ -747,12 +748,32 @@ end
                 @test _nc_wait_task_done(eof_task, 2.0) != :timed_out
                 @test fetch(eof_task) === false
 
-                close(server)
+                # A close that lands while eof is queued on the read lock must
+                # report EOF, not throw NetClosingError.
+                IP._fd_read_lock!(server.fd.pfd)
+                read_lock_held = true
+                eof_task = errormonitor(Threads.@spawn begin
+                    try
+                        return eof(server)
+                    catch err
+                        return err
+                    end
+                end)
+                @test _nc_wait_task_done(eof_task, 0.05) == :timed_out
+                close_task = errormonitor(Threads.@spawn close(server))
+                @test _nc_wait_task_done(eof_task, 2.0) != :timed_out
+                @test fetch(eof_task) === true
+                IP._fd_read_unlock!(server.fd.pfd)
+                read_lock_held = false
+                @test _nc_wait_task_done(close_task, 2.0) != :timed_out
+
+                @test eof(server)
                 @test_throws IP.NetClosingError read!(server, UInt8[])
                 @test_throws IP.NetClosingError readbytes!(server, UInt8[], 0)
             finally
                 read_lock_held && IP._fd_read_unlock!(server.fd.pfd)
                 eof_task isa Task && !istaskdone(eof_task) && wait(eof_task)
+                close_task isa Task && !istaskdone(close_task) && wait(close_task)
                 _close_quiet!(server)
                 _close_quiet!(client)
                 _close_quiet!(listener)

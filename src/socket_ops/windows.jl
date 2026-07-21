@@ -705,6 +705,13 @@ errno)`.
 
 The returned child socket is normalized to the same invariants as Unix:
 non-inheritable and non-blocking before it escapes to higher layers.
+
+Plain `accept` has no `WSA_FLAG_NO_HANDLE_INHERIT` equivalent, so the child
+handle is briefly inheritable until `set_close_on_exec!` runs
+`SetHandleInformation`; that window is inherent to this fallback path. The
+production IOCP accept path is atomic: `AcceptEx` (`iopoll/iocp.jl`) lands the
+connection on a socket pre-created via `open_socket` with
+`WSA_FLAG_NO_HANDLE_INHERIT`.
 """
 function try_accept_socket(fd::SocketFD)::Tuple{SocketFD, AcceptPeer, Int32}
     addrbuf = Ref{NTuple{_ACCEPT_ADDRBUF_LEN, UInt8}}()

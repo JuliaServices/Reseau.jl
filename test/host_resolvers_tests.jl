@@ -691,41 +691,68 @@ end
                 server = nothing
                 accept_task = nothing
                 try
-                    listener6 = NC.listen("tcp6", "[::]:0"; backlog = 8)
-                    addr6 = NC.addr(listener6)::NC.SocketAddrV6
-                    @test listener6.fd.net === :tcp6
-                    @static if !(Sys.isopenbsd() || Sys.isdragonfly())
-                        @test SO.get_sockopt_int(
-                            listener6.fd.pfd.sysfd,
-                            SO.IPPROTO_IPV6,
-                            SO.IPV6_V6ONLY,
-                        ) == 1
-                    end
+                    # The IPv4 probe reuses whatever ephemeral port the tcp6
+                    # wildcard listener received, so an unrelated process may
+                    # own that IPv4 port (failing the bind) or grab it between
+                    # bind and connect (making the connect succeed). Retry with
+                    # a fresh tcp6 listener on such interference; only fail
+                    # when every attempt looks like the listener accepts IPv4.
+                    ipv4_isolated = false
+                    for _ in 1:3
+                        listener6 = NC.listen("tcp6", "[::]:0"; backlog = 8)
+                        addr6 = NC.addr(listener6)::NC.SocketAddrV6
+                        @test listener6.fd.net === :tcp6
+                        @static if !(Sys.isopenbsd() || Sys.isdragonfly())
+                            @test SO.get_sockopt_int(
+                                listener6.fd.pfd.sysfd,
+                                SO.IPPROTO_IPV6,
+                                SO.IPV6_V6ONLY,
+                            ) == 1
+                        end
 
-                    # An IPv4 listener can own the same port only when the
-                    # tcp6 wildcard did not also claim IPv4-mapped traffic.
-                    listener4 = NC.listen(
-                        "tcp4",
-                        "0.0.0.0:$(Int(addr6.port))";
-                        backlog = 8,
-                    )
-                    @test listener4.fd.net === :tcp4
-                    close(listener4)
-                    listener4 = nothing
+                        # An IPv4 listener can own the same port only when the
+                        # tcp6 wildcard did not also claim IPv4-mapped traffic.
+                        listener4 = try
+                            NC.listen(
+                                "tcp4",
+                                "0.0.0.0:$(Int(addr6.port))";
+                                backlog = 8,
+                            )
+                        catch
+                            nothing
+                        end
+                        if listener4 === nothing
+                            _nd_close_quiet!(listener6)
+                            listener6 = nothing
+                            continue
+                        end
+                        @test listener4.fd.net === :tcp4
+                        close(listener4)
+                        listener4 = nothing
 
-                    ipv4_err = try
-                        NC.connect(
-                            "tcp4",
-                            "127.0.0.1:$(Int(addr6.port))";
-                            timeout_ns = 500_000_000,
-                        )
-                        nothing
-                    catch ex
-                        ex
+                        ipv4_result = try
+                            NC.connect(
+                                "tcp4",
+                                "127.0.0.1:$(Int(addr6.port))";
+                                timeout_ns = 500_000_000,
+                            )
+                        catch ex
+                            ex
+                        end
+                        close(listener6)
+                        listener6 = nothing
+                        if !(ipv4_result isa Exception)
+                            # Unexpected success: either an unrelated process
+                            # took over the IPv4 port or the tcp6 wildcard
+                            # accepted IPv4; retry to tell the two apart.
+                            _nd_close_quiet!(ipv4_result)
+                            continue
+                        end
+                        @test ipv4_result isa ND.OpError
+                        ipv4_isolated = true
+                        break
                     end
-                    @test ipv4_err isa ND.OpError
-                    close(listener6)
-                    listener6 = nothing
+                    @test ipv4_isolated
 
                     listener_dual = NC.listen("tcp", ":0"; backlog = 8)
                     dual_addr = NC.addr(listener_dual)

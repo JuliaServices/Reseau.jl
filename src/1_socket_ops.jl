@@ -386,7 +386,11 @@ end
 
 @static if Sys.isapple()
 include("socket_ops/darwin.jl")
-elseif Sys.islinux() || Sys.isbsd()
+elseif Sys.islinux() || Sys.isfreebsd()
+# The atomic-flag backend hardcodes per-kernel SOCK_CLOEXEC/SOCK_NONBLOCK
+# constants that are only vetted for Linux and FreeBSD. Other BSDs (OpenBSD,
+# NetBSD, DragonFly) use different values, so they take the ENOSYS stub below
+# until their constants are vetted.
 include("socket_ops/linux.jl")
 elseif Sys.iswindows()
 include("socket_ops/windows.jl")

@@ -516,12 +516,19 @@ end
         # IPV6_V6ONLY. This is the same capability exception Go applies.
         return nothing
     else
-        SocketOps.set_sockopt_int(
-            fd.pfd.sysfd,
-            SocketOps.IPPROTO_IPV6,
-            SocketOps.IPV6_V6ONLY,
-            enabled ? 1 : 0,
-        )
+        try
+            SocketOps.set_sockopt_int(
+                fd.pfd.sysfd,
+                SocketOps.IPPROTO_IPV6,
+                SocketOps.IPV6_V6ONLY,
+                enabled ? 1 : 0,
+            )
+        catch err
+            ex = err::Exception
+            # Go parity: some operating systems never admit this option, so a
+            # setsockopt failure is deliberately ignored.
+            ex isa SystemError || rethrow(ex)
+        end
         return nothing
     end
 end
@@ -863,7 +870,15 @@ end
 function _peek_eof(conn::Conn)::Bool
     pfd = conn.fd.pfd
     pref = Ref{UInt8}(0x00)
-    IOPoll._fd_read_lock!(pfd)
+    try
+        IOPoll._fd_read_lock!(pfd)
+    catch err
+        ex = err::Exception
+        ex isa IOPoll.NetClosingError || rethrow(ex)
+        # A close that lands between the caller's isopen check and taking the
+        # read lock reports EOF instead of surfacing the closing error.
+        return true
+    end
     try
         while true
             IOPoll.prepareread(pfd.pd, pfd.is_file)
