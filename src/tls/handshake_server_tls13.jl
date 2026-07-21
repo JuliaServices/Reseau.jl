@@ -444,7 +444,7 @@ function _check_for_resumption!(state::_TLS13ServerHandshakeState, config)::Noth
     config.session_tickets_disabled && return nothing
     in(_TLS_PSK_MODE_DHE, state.client_hello.psk_modes) || return nothing
     length(state.client_hello.psk_identities) == length(state.client_hello.psk_binders) ||
-        _tls_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid or missing PSK binders")
+        _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: invalid or missing PSK binders")
     isempty(state.client_hello.psk_identities) && return nothing
     max_identities = min(length(state.client_hello.psk_identities), _TLS13_MAX_CLIENT_PSK_IDENTITIES)
     keys = _tls_active_session_ticket_keys(config)

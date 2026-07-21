@@ -836,6 +836,36 @@ end
         end
     end
 
+    @testset "server distinguishes malformed PSK binder counts from bad MACs" begin
+        config = _tls13_native_server_config()
+        state = TLN._TLS13ServerHandshakeState(config)
+        try
+            hello = TLN._ClientHelloMsg()
+            hello.psk_modes = UInt8[TLN._TLS_PSK_MODE_DHE]
+            hello.psk_identities = [
+                TLN._TLSPSKIdentity(UInt8[0x01], UInt32(0)),
+                TLN._TLSPSKIdentity(UInt8[0x02], UInt32(0)),
+            ]
+            hello.psk_binders = [fill(UInt8(0xa5), TLN._hash_len(TLN._HASH_SHA256))]
+            state.client_hello = hello
+
+            err = try
+                TLN._check_for_resumption!(state, config)
+                nothing
+            catch ex
+                ex
+            end
+            @test err isa TLN._TLSAlertError
+            if err isa TLN._TLSAlertError
+                @test err.alert == TLN._TLS_ALERT_ILLEGAL_PARAMETER
+                @test occursin("invalid or missing PSK binders", err.message)
+            end
+            @test !state.using_psk
+        finally
+            TLN._securezero_tls13_server_handshake_state!(state)
+        end
+    end
+
     @testset "native client roundtrip with ALPN" begin
         IPN.shutdown!()
         listener = nothing
