@@ -274,7 +274,7 @@ function _tls12_write_record!(
         )
         ciphertext_len == payload_len + _TLS12_GCM_TAG_SIZE ||
             throw(ArgumentError("tls: TLS 1.2 AEAD produced an unexpected ciphertext length"))
-        write(tcp, outbuf)
+        _tls_write_transport!(tcp, outbuf)
         if cipher_state.seq == typemax(UInt64)
             cipher_state.exhausted = true
         else

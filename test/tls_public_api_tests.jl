@@ -1667,6 +1667,7 @@ end
             end
         end
         @testset "handshake timeout surfaces TLSHandshakeTimeoutError" begin
+            @test TL._deadline_after_ns(typemax(Int64)) == typemax(Int64)
             IP.shutdown!()
             listener = nothing
             client_tcp = nothing
@@ -1710,6 +1711,67 @@ end
                 stalled_peer = fetch(accept_task)
             finally
                 isready(release_peer) || put!(release_peer, nothing)
+                _tls_close_quiet!(stalled_peer)
+                _tls_close_quiet!(client_tcp)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
+        @testset "earlier transport deadline retains i/o timeout identity" begin
+            IP.shutdown!()
+            listener = nothing
+            client_tcp = nothing
+            stalled_peer = nothing
+            client_tls = nothing
+            accepted = Channel{Nothing}(1)
+            release_peer = Channel{Nothing}(1)
+            try
+                listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+                laddr = NC.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn begin
+                    conn = NC.accept(listener)
+                    put!(accepted, nothing)
+                    take!(release_peer)
+                    return conn
+                end)
+                client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
+                accepted_status = IP.timedwait(() -> isready(accepted), 2.0; pollint = 0.001)
+                @test accepted_status != :timed_out
+                accepted_status == :timed_out || take!(accepted)
+                client_tls = TL.client(client_tcp, TL.Config(
+                    verify_peer = false,
+                    server_name = "localhost",
+                    handshake_timeout_ns = 2_000_000_000,
+                ))
+                TL.set_read_deadline!(client_tls, time_ns() + 100_000_000)
+                TL.set_write_deadline!(client_tls, time_ns() + 2_500_000_000)
+                pfd = client_tls.tcp.fd.pfd
+                pre_read_ns = @atomic :acquire pfd.pd.rd_ns
+                pre_write_ns = @atomic :acquire pfd.pd.wd_ns
+                err = try
+                    TL.handshake!(client_tls)
+                    nothing
+                catch ex
+                    ex
+                end
+                @test err isa TL.TLSError
+                @test !(err isa TL.TLSHandshakeTimeoutError)
+                if err isa TL.TLSError
+                    @test err.message == "i/o timeout"
+                    @test err.cause isa TL.DeadlineExceededError
+                end
+                @test pre_read_ns > 0
+                @test (@atomic :acquire pfd.pd.rd_ns) < 0
+                @test (@atomic :acquire pfd.pd.wd_ns) == pre_write_ns
+                _tls_close_quiet!(client_tls)
+                client_tls = nothing
+                client_tcp = nothing
+                isready(release_peer) || put!(release_peer, nothing)
+                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                stalled_peer = fetch(accept_task)
+            finally
+                isready(release_peer) || put!(release_peer, nothing)
+                _tls_close_quiet!(client_tls)
                 _tls_close_quiet!(stalled_peer)
                 _tls_close_quiet!(client_tcp)
                 _tls_close_quiet!(listener)
@@ -1789,7 +1851,7 @@ end
                 cfg = TL.Config(
                     verify_peer = false,
                     server_name = "localhost",
-                    handshake_timeout_ns = 0,
+                    handshake_timeout_ns = 10_000_000_000,
                 )
                 connect_task = errormonitor(Threads.@spawn begin
                     try
@@ -1822,8 +1884,10 @@ end
                     fetch(accept_task)
                 end
                 @test err isa TL.TLSError
+                @test !(err isa TL.TLSHandshakeTimeoutError)
                 if err isa TL.TLSError
                     @test err.message == "i/o timeout"
+                    @test err.cause isa TL.DeadlineExceededError
                 end
             finally
                 isready(release_peer) || put!(release_peer, nothing)

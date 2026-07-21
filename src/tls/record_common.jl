@@ -58,6 +58,23 @@ end
 
 Base.showerror(io::IO, err::_TLSRecordHeaderError) = print(io, err.message)
 
+const _TLS_IO_READ = UInt8(1)
+const _TLS_IO_WRITE = UInt8(2)
+
+struct _TLSTransportDeadlineError <: Exception
+    direction::UInt8
+    cause::IOPoll.DeadlineExceededError
+end
+
+Base.showerror(io::IO, err::_TLSTransportDeadlineError) = showerror(io, err.cause)
+
+struct _TLSHandshakeDeadlineError <: Exception
+    handshake_owned::Bool
+    cause::IOPoll.DeadlineExceededError
+end
+
+Base.showerror(io::IO, err::_TLSHandshakeDeadlineError) = showerror(io, err.cause)
+
 @inline _tls_protocol_error(alert::UInt8, message::AbstractString) = _TLSAlertError(String(message), alert, false)
 @inline _tls_peer_alert_error(alert::UInt8, message::AbstractString) = _TLSAlertError(String(message), alert, true)
 @inline _tls_fail(alert::UInt8, message::AbstractString)::Union{} = throw(_tls_protocol_error(alert, message))
@@ -110,10 +127,21 @@ function _tls_write_tls_plaintext!(tcp::TCP.Conn, content_type::UInt8, payload::
         UInt8(length(payload) & 0xff),
     ]
     try
-        write(tcp, header)
-        isempty(payload) || write(tcp, payload)
+        _tls_write_transport!(tcp, header)
+        isempty(payload) || _tls_write_transport!(tcp, payload)
     finally
         _securezero!(header)
+    end
+    return nothing
+end
+
+function _tls_write_transport!(tcp::TCP.Conn, payload::AbstractVector{UInt8})::Nothing
+    try
+        write(tcp, payload)
+    catch err
+        err isa IOPoll.DeadlineExceededError &&
+            throw(_TLSTransportDeadlineError(_TLS_IO_WRITE, err))
+        rethrow()
     end
     return nothing
 end
@@ -129,6 +157,8 @@ function _tls_read_record_bytes!(
         n = try
             TCP._read_some!(tcp, ptr + offset, nbytes - offset)
         catch err
+            err isa IOPoll.DeadlineExceededError &&
+                throw(_TLSTransportDeadlineError(_TLS_IO_READ, err))
             if err isa EOFError
                 allow_boundary_eof && offset == 0 && rethrow()
                 throw(_TLSUnexpectedEOFError())

@@ -1503,6 +1503,18 @@ end
     return min(old_ns, handshake_ns)
 end
 
+@inline function _deadline_after_ns(timeout_ns::Int64)::Int64
+    now_ns = Int64(time_ns())
+    timeout_ns >= typemax(Int64) - now_ns && return typemax(Int64)
+    return now_ns + timeout_ns
+end
+
+@inline function _handshake_owns_deadline(old_ns::Int64, handshake_ns::Int64)::Bool
+    old_ns == 0 && return true
+    old_ns < 0 && return false
+    return handshake_ns < old_ns
+end
+
 function _with_handshake_deadline(f::F, conn::Conn) where {F}
     # Go overlays handshake timeouts onto the transport deadline rather than inventing a
     # separate timer path. We do the same by temporarily tightening the read/write
@@ -1515,13 +1527,22 @@ function _with_handshake_deadline(f::F, conn::Conn) where {F}
     pd = pfd.pd
     old_read_ns = @atomic :acquire pd.rd_ns
     old_write_ns = @atomic :acquire pd.wd_ns
-    handshake_deadline_ns = Int64(time_ns()) + timeout_ns
+    handshake_deadline_ns = _deadline_after_ns(timeout_ns)
     read_deadline_ns = _handshake_effective_deadline(old_read_ns, handshake_deadline_ns)
     write_deadline_ns = _handshake_effective_deadline(old_write_ns, handshake_deadline_ns)
+    handshake_owns_read = _handshake_owns_deadline(old_read_ns, handshake_deadline_ns)
+    handshake_owns_write = _handshake_owns_deadline(old_write_ns, handshake_deadline_ns)
     IOPoll.set_read_deadline!(pfd, read_deadline_ns)
     IOPoll.set_write_deadline!(pfd, write_deadline_ns)
     try
         return f()
+    catch err
+        if err isa _TLSTransportDeadlineError
+            timeout_err = err::_TLSTransportDeadlineError
+            handshake_owned = timeout_err.direction == _TLS_IO_READ ? handshake_owns_read : handshake_owns_write
+            throw(_TLSHandshakeDeadlineError(handshake_owned, timeout_err.cause))
+        end
+        rethrow()
     finally
         try
             IOPoll.set_read_deadline!(pfd, old_read_ns)
@@ -1617,12 +1638,24 @@ function handshake!(conn::Conn)
             end
         catch err
             ex = _as_exception(err)
-            if ex isa IOPoll.DeadlineExceededError
-                if conn.config.handshake_timeout_ns > 0
+            if ex isa _TLSHandshakeDeadlineError
+                deadline_err = ex::_TLSHandshakeDeadlineError
+                if deadline_err.handshake_owned
                     handshake_error = TLSHandshakeTimeoutError(conn.config.handshake_timeout_ns)
                     conn.handshake_error = handshake_error
                     throw(handshake_error)
                 end
+                handshake_error = TLSError("handshake", Int32(0), "i/o timeout", deadline_err.cause)
+                conn.handshake_error = handshake_error
+                throw(handshake_error)
+            end
+            if ex isa _TLSTransportDeadlineError
+                deadline_err = ex::_TLSTransportDeadlineError
+                handshake_error = TLSError("handshake", Int32(0), "i/o timeout", deadline_err.cause)
+                conn.handshake_error = handshake_error
+                throw(handshake_error)
+            end
+            if ex isa IOPoll.DeadlineExceededError
                 handshake_error = TLSError("handshake", Int32(0), "i/o timeout", ex)
                 conn.handshake_error = handshake_error
                 throw(handshake_error)
@@ -1776,6 +1809,9 @@ function _read_some!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
         ex = _as_exception(err)
         ex isa EOFError && rethrow()
         ex isa TLSError && rethrow()
+        if ex isa _TLSTransportDeadlineError
+            throw(TLSError("read", Int32(0), "i/o timeout", (ex::_TLSTransportDeadlineError).cause))
+        end
         ex isa _TLSUnexpectedEOFError && throw(TLSError("read", Int32(0), "unexpected EOF", ex))
         ex isa _TLSRecordHeaderError && throw(TLSError("read", Int32(0), (ex::_TLSRecordHeaderError).message, ex))
         if ex isa IOPoll.NetClosingError || _is_closed(conn)
@@ -1841,6 +1877,9 @@ function _peek_eof(conn::Conn)::Bool
     catch err
         ex = _as_exception(err)
         ex isa TLSError && rethrow()
+        if ex isa _TLSTransportDeadlineError
+            throw(TLSError("peek", Int32(0), "i/o timeout", (ex::_TLSTransportDeadlineError).cause))
+        end
         ex isa _TLSUnexpectedEOFError && throw(TLSError("peek", Int32(0), "unexpected EOF", ex))
         ex isa _TLSRecordHeaderError && throw(TLSError("peek", Int32(0), (ex::_TLSRecordHeaderError).message, ex))
         if ex isa IOPoll.NetClosingError || _is_closed(conn)
@@ -2198,8 +2237,9 @@ function Base.unsafe_write(conn::Conn, ptr::Ptr{UInt8}, nbytes::UInt)
         throw(ArgumentError("tls: unsupported connection mode"))
     catch err
         ex = _as_exception(err)
-        if ex isa IOPoll.DeadlineExceededError
-            timeout_err = TLSError("write", Int32(0), "i/o timeout", ex)
+        if ex isa _TLSTransportDeadlineError || ex isa IOPoll.DeadlineExceededError
+            cause = ex isa _TLSTransportDeadlineError ? (ex::_TLSTransportDeadlineError).cause : ex
+            timeout_err = TLSError("write", Int32(0), "i/o timeout", cause)
             if conn.write_permanent_error === nothing
                 conn.write_permanent_error = timeout_err
             end
@@ -2282,7 +2322,7 @@ function _with_close_write_deadline_cap(f::F, conn::Conn) where {F}
     pfd = conn.tcp.fd.pfd
     pd = pfd.pd
     old_write_ns = @atomic :acquire pd.wd_ns
-    close_deadline_ns = Int64(time_ns()) + Int64(5_000_000_000)
+    close_deadline_ns = _deadline_after_ns(Int64(5_000_000_000))
     write_deadline_ns = _handshake_effective_deadline(old_write_ns, close_deadline_ns)
     IOPoll.set_write_deadline!(pfd, write_deadline_ns)
     try

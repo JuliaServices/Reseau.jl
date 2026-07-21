@@ -288,7 +288,7 @@ function _tls13_write_record!(
         )
         ciphertext_len == record_payload_len ||
             throw(ArgumentError("tls: TLS 1.3 AEAD produced an unexpected ciphertext length"))
-        write(tcp, outbuf)
+        _tls_write_transport!(tcp, outbuf)
         if cipher_state.seq == typemax(UInt64)
             cipher_state.exhausted = true
         else
