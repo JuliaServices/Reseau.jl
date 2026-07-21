@@ -197,11 +197,20 @@ end
 function _tls13_resolve_server_shared_secret(provider::_TLS13OpenSSLKeyShareProvider, server_share::_TLSKeyShare)::Vector{UInt8}
     provider.private_key == C_NULL && throw(ArgumentError("tls13 client handshake is missing an ECDHE private key"))
     server_share.group == provider.private_key_group || throw(ArgumentError("tls13 client handshake received a key share for an unexpected group"))
-    if server_share.group == _TLS_GROUP_X25519
-        return _tls13_x25519_shared_secret(provider.private_key, server_share.data)
-    end
-    if server_share.group == _TLS_GROUP_SECP256R1
-        return _tls13_p256_shared_secret(provider.private_key, server_share.data)
+    try
+        if server_share.group == _TLS_GROUP_X25519
+            return _tls13_x25519_shared_secret(provider.private_key, server_share.data)
+        end
+        if server_share.group == _TLS_GROUP_SECP256R1
+            return _tls13_p256_shared_secret(provider.private_key, server_share.data)
+        end
+    catch err
+        ex = _as_exception(err)
+        ex isa _TLSAlertError && rethrow()
+        if ex isa ArgumentError || ex isa TLSError
+            _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: invalid server key share")
+        end
+        rethrow()
     end
     throw(ArgumentError("tls13 client handshake OpenSSL key share provider does not support group $(string(server_share.group, base = 16))"))
 end
@@ -216,9 +225,9 @@ function _tls13_process_hello_retry_request!(
         hello.cookie = copy(server_hello.cookie)
     end
     selected_group == 0x0000 && return nothing
-    in(selected_group, hello.supported_curves) || throw(ArgumentError("tls: server selected unsupported group"))
+    in(selected_group, hello.supported_curves) || _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server selected unsupported group")
     for key_share in hello.key_shares
-        key_share.group == selected_group && throw(ArgumentError("tls: server sent an unnecessary HelloRetryRequest key_share"))
+        key_share.group == selected_group && _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server sent an unnecessary HelloRetryRequest key_share")
     end
     hello.key_shares = [_tls13_generate_key_share!(provider, selected_group)]
     return nothing
@@ -526,8 +535,12 @@ end
 
 function _check_server_hello_or_hrr!(state::_TLS13ClientHandshakeState)::Nothing
     server_hello = state.server_hello
-    server_hello.supported_version == TLS1_3_VERSION || _tls_fail(_TLS_ALERT_PROTOCOL_VERSION, "tls: server selected TLS 1.3 using an invalid supported_version")
-    server_hello.vers == TLS1_2_VERSION || _tls_fail(_TLS_ALERT_PROTOCOL_VERSION, "tls: server sent an incorrect legacy version")
+    server_hello.supported_version == UInt16(0) &&
+        _tls_fail(_TLS_ALERT_MISSING_EXTENSION, "tls: server selected TLS 1.3 using the legacy version field")
+    server_hello.supported_version == TLS1_3_VERSION ||
+        _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server selected an invalid version after a HelloRetryRequest")
+    server_hello.vers == TLS1_2_VERSION ||
+        _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server sent an incorrect legacy version")
     if server_hello.random != _HELLO_RETRY_REQUEST_RANDOM
         random_tail = @view server_hello.random[25:32]
         (random_tail == _TLS13_DOWNGRADE_CANARY_TLS12 || random_tail == _TLS13_DOWNGRADE_CANARY_TLS11) &&
@@ -540,10 +553,10 @@ function _check_server_hello_or_hrr!(state::_TLS13ClientHandshakeState)::Nothing
      server_hello.secure_renegotiation_supported ||
      !isempty(server_hello.secure_renegotiation) ||
      !isempty(server_hello.alpn_protocol) ||
-     !isempty(server_hello.scts)) && _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server sent a ServerHello extension forbidden in TLS 1.3")
+     !isempty(server_hello.scts)) && _tls_fail(_TLS_ALERT_UNSUPPORTED_EXTENSION, "tls: server sent a ServerHello extension forbidden in TLS 1.3")
 
     server_hello.session_id == state.client_hello.session_id || _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server did not echo the legacy session ID")
-    server_hello.compression_method == _TLS_COMPRESSION_NONE || _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server sent non-zero legacy TLS compression method")
+    server_hello.compression_method == _TLS_COMPRESSION_NONE || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: server sent non-zero legacy TLS compression method")
     in(server_hello.cipher_suite, state.client_hello.cipher_suites) || _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server chose an unconfigured cipher suite")
     selected_spec = _tls13_cipher_spec(server_hello.cipher_suite)
     selected_spec === nothing && _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server chose an unsupported TLS 1.3 cipher suite")
@@ -592,9 +605,11 @@ end
 
 function _process_hello_retry_request!(state::_TLS13ClientHandshakeState, io)::Nothing
     server_hello = state.server_hello
+    isempty(server_hello.encrypted_client_hello) ||
+        _tls_fail(_TLS_ALERT_UNSUPPORTED_EXTENSION, "tls: unexpected encrypted client hello extension in ServerHello")
     (server_hello.selected_group == 0x0000 && isempty(server_hello.cookie)) &&
         _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server sent an unnecessary HelloRetryRequest message")
-    server_hello.server_share === nothing || _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: received malformed key_share extension")
+    server_hello.server_share === nothing || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received malformed key_share extension")
     _tls13_process_hello_retry_request!(state.key_share_provider, state.client_hello, server_hello)
     state.client_hello.early_data && (state.client_hello.early_data = false)
     _tls13_reset_transcript_for_hrr!(state)
@@ -637,8 +652,10 @@ end
 function _process_server_hello!(state::_TLS13ClientHandshakeState)::Nothing
     server_hello = state.server_hello
     server_hello.random == _HELLO_RETRY_REQUEST_RANDOM && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 client handshake still has a HelloRetryRequest pending")
-    isempty(server_hello.cookie) || _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server sent a cookie in a normal ServerHello")
-    server_hello.selected_group == 0x0000 || _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: malformed key_share extension")
+    isempty(server_hello.encrypted_client_hello) ||
+        _tls_fail(_TLS_ALERT_UNSUPPORTED_EXTENSION, "tls: unexpected encrypted client hello extension in ServerHello")
+    isempty(server_hello.cookie) || _tls_fail(_TLS_ALERT_UNSUPPORTED_EXTENSION, "tls: server sent a cookie in a normal ServerHello")
+    server_hello.selected_group == 0x0000 || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed key_share extension")
     server_hello.server_share === nothing && _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server did not send a key share")
 
     server_share = server_hello.server_share::_TLSKeyShare
@@ -701,15 +718,20 @@ function _read_server_parameters!(state::_TLS13ClientHandshakeState, io)::Nothin
 
     server_protocol = msg.alpn_protocol
     if !isempty(server_protocol)
-        isempty(state.client_hello.alpn_protocols) && _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server advertised unrequested ALPN extension")
-        in(server_protocol, state.client_hello.alpn_protocols) || _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server selected unadvertised ALPN protocol")
+        isempty(state.client_hello.alpn_protocols) && _tls_fail(_TLS_ALERT_NO_APPLICATION_PROTOCOL, "tls: server advertised unrequested ALPN extension")
+        in(server_protocol, state.client_hello.alpn_protocols) || _tls_fail(_TLS_ALERT_NO_APPLICATION_PROTOCOL, "tls: server selected unadvertised ALPN protocol")
     end
 
-    (state.client_hello.quic_transport_parameters === nothing) == (msg.quic_transport_parameters === nothing) ||
-        _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: unexpected quic_transport_parameters extension")
+    if state.client_hello.quic_transport_parameters === nothing
+        msg.quic_transport_parameters === nothing ||
+            _tls_fail(_TLS_ALERT_UNSUPPORTED_EXTENSION, "tls: server sent an unexpected quic_transport_parameters extension")
+    else
+        msg.quic_transport_parameters === nothing &&
+            _tls_fail(_TLS_ALERT_MISSING_EXTENSION, "tls: server did not send a quic_transport_parameters extension")
+    end
 
     if msg.early_data
-        state.client_hello.early_data || _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server sent an unexpected early_data extension")
+        state.client_hello.early_data || _tls_fail(_TLS_ALERT_UNSUPPORTED_EXTENSION, "tls: server sent an unexpected early_data extension")
         _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 client handshake early_data acceptance is not implemented yet")
     end
 

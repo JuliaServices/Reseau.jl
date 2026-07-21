@@ -234,6 +234,72 @@ end
         end
     end
 
+    @testset "native client sends the selected fatal alert on the wire" begin
+        IPN.shutdown!()
+        listener = nothing
+        server_tcp = nothing
+        accept_task = nothing
+        client_task = nothing
+        try
+            listener = NCN.listen(NCN.loopback_addr(0); backlog = 1)
+            addr = NCN.addr(listener)::NCN.SocketAddrV4
+            accept_task = errormonitor(Threads.@spawn NCN.accept(listener))
+            client_task = Threads.@spawn begin
+                try
+                    TLN.connect(addr, _tls13_native_client_config())
+                    nothing
+                catch ex
+                    ex
+                end
+            end
+
+            @test _tls_native_wait_task(accept_task, 5.0) != :timed_out
+            server_tcp = fetch(accept_task)
+            client_header, client_payload = _read_tls_record(server_tcp)
+            @test client_header[1] == TLN._TLS_RECORD_TYPE_HANDSHAKE
+            client_hello = TLN._unmarshal_client_hello(client_payload)
+            @test client_hello isa TLN._ClientHelloMsg
+
+            server_hello = TLN._ServerHelloMsg()
+            server_hello.vers = TLN.TLS1_2_VERSION
+            server_hello.random = collect(UInt8(0x40):UInt8(0x5f))
+            server_hello.session_id = copy((client_hello::TLN._ClientHelloMsg).session_id)
+            server_hello.cipher_suite = TLN._TLS13_AES_128_GCM_SHA256_ID
+            server_hello.compression_method = TLN._TLS_COMPRESSION_NONE
+            # Omit supported_versions: this must be missing_extension, not the
+            # former protocol_version/internal-error classification.
+            raw_server_hello = TLN._marshal_server_hello(server_hello)
+            TLN._tls_write_tls_plaintext!(
+                server_tcp,
+                TLN._TLS_RECORD_TYPE_HANDSHAKE,
+                raw_server_hello,
+                TLN.TLS1_2_VERSION,
+            )
+
+            alert_header, alert_payload = _read_tls_record(server_tcp)
+            @test alert_header[1] == TLN._TLS_RECORD_TYPE_ALERT
+            @test alert_payload == UInt8[
+                TLN._TLS_ALERT_LEVEL_FATAL,
+                TLN._TLS_ALERT_MISSING_EXTENSION,
+            ]
+
+            @test _tls_native_wait_task(client_task::Task, 5.0) != :timed_out
+            client_err = fetch(client_task::Task)
+            @test client_err isa TLN.TLSError
+            if client_err isa TLN.TLSError
+                @test client_err.cause isa TLN._TLSAlertError
+                if client_err.cause isa TLN._TLSAlertError
+                    @test (client_err.cause::TLN._TLSAlertError).alert == TLN._TLS_ALERT_MISSING_EXTENSION
+                end
+            end
+        finally
+            _tls_native_close_quiet!(server_tcp)
+            _tls_native_close_quiet!(listener)
+            client_task isa Task && !istaskdone(client_task) && wait(client_task)
+            IPN.shutdown!()
+        end
+    end
+
     @testset "record EOF distinguishes boundaries from truncation" begin
         cases = (
             ("record boundary", UInt8[], EOFError),
