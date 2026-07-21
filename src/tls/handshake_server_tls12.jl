@@ -377,10 +377,16 @@ function _tls12_select_server_parameters!(state::_TLS12ServerHandshakeState, con
                             if !session.ext_master_secret && state.client_hello.extended_master_secret
                                 # Continue below with a fresh EMS handshake.
                             elseif session.ext_master_secret && !state.client_hello.extended_master_secret
-                                _tls_fail(
-                                    _TLS_ALERT_HANDSHAKE_FAILURE,
+                                # Go's checkForResumption returns a bare error
+                                # for this downgrade, so no alert is written;
+                                # the client only observes the connection
+                                # closing.
+                                throw(TLSError(
+                                    "handshake",
+                                    Int32(0),
                                     "tls: session supported extended_master_secret but client does not",
-                                )
+                                    nothing,
+                                ))
                             else
                                 state.resumption_session = session
                                 state.using_resumption = true

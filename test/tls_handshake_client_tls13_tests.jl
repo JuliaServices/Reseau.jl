@@ -942,9 +942,49 @@ end
         catch ex
             ex
         end
+        # Go surfaces a scheme-vs-key mismatch through verifyHandshakeSignature
+        # as decrypt_error, not as an illegal_parameter pre-check.
+        @test err isa TLHC._TLSAlertError
+        if err isa TLHC._TLSAlertError
+            @test err.alert == TLHC._TLS_ALERT_DECRYPT_ERROR
+            @test occursin("invalid signature by the server certificate", err.message)
+        end
+        @test length(io.outbound) == 1
+        @test !state.complete
+    end
+
+    @testset "certificate verify rejects PKCS#1 v1.5 schemes with illegal_parameter" begin
+        expected_hello = _tls13_cert_client_hello()
+        push!(expected_hello.supported_signature_algorithms, TLHC._TLS_SIGNATURE_RSA_PKCS1_SHA256)
+        expected = _compute_tls13_real_certificate_server_flight(expected_hello)
+        pkcs1_verify = TLHC._CertificateVerifyMsg(
+            TLHC._TLS_SIGNATURE_RSA_PKCS1_SHA256,
+            copy(expected.certificate_verify.signature),
+        )
+        inbound = copy(expected.inbound)
+        inbound[4] = TLHC._marshal_handshake_message(pkcs1_verify)
+
+        state_hello = _tls13_cert_client_hello()
+        push!(state_hello.supported_signature_algorithms, TLHC._TLS_SIGNATURE_RSA_PKCS1_SHA256)
+        state = TLHC._TLS13ClientHandshakeState(
+            state_hello,
+            TLHC._TLS13_AES_128_GCM_SHA256_ID,
+            _tls13_openssl_key_share_provider(),
+            _tls13_certificate_verifier(),
+        )
+        io = _HandshakeMessageFlightIO(inbound)
+        err = try
+            TLHC._client_handshake_tls13!(state, io)
+            nothing
+        catch ex
+            ex
+        end
+        # RFC 8446 section 4.4.3: PKCS#1 v1.5 is invalid for a TLS 1.3
+        # CertificateVerify even when the scheme was offered for TLS 1.2.
         @test err isa TLHC._TLSAlertError
         if err isa TLHC._TLSAlertError
             @test err.alert == TLHC._TLS_ALERT_ILLEGAL_PARAMETER
+            @test occursin("certificate used with invalid signature algorithm", err.message)
         end
         @test length(io.outbound) == 1
         @test !state.complete

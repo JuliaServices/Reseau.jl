@@ -158,6 +158,22 @@ function _finish_tls13_native_server!(task::Task)
     return nothing
 end
 
+# Minimal handshake-message source for driving server-side flight readers
+# detached from a wire record layer.
+mutable struct _TLS13ServerFlightIO
+    inbound::Vector{Vector{UInt8}}
+    inbound_pos::Int
+end
+
+_TLS13ServerFlightIO(inbound::Vector{Vector{UInt8}}) = _TLS13ServerFlightIO(inbound, 1)
+
+function TLN._read_handshake_bytes!(io::_TLS13ServerFlightIO)::Vector{UInt8}
+    io.inbound_pos <= length(io.inbound) || throw(EOFError())
+    raw = io.inbound[io.inbound_pos]
+    io.inbound_pos += 1
+    return raw
+end
+
 @testset "TLS native TLS1.3 client" begin
     @test TLN._native_tls13_only(_tls13_native_client_config())
     @test !TLN._native_tls13_only(TLN.Config(server_name = "localhost", verify_peer = false))
@@ -456,9 +472,17 @@ end
                 nothing,
             ),
             (
-                "wrong negotiated version",
+                # RFC 8446 §5.1: the legacy record version MUST be ignored once
+                # TLS 1.3 is negotiated (Go only enforces it for pre-1.3).
+                "ignored legacy version on negotiated TLS 1.3",
                 UInt8[TLN._TLS_RECORD_TYPE_HANDSHAKE, 0x03, 0x01, 0x00, 0x00],
                 TLN.TLS1_3_VERSION,
+                nothing,
+            ),
+            (
+                "wrong negotiated version on TLS 1.2",
+                UInt8[TLN._TLS_RECORD_TYPE_HANDSHAKE, 0x03, 0x01, 0x00, 0x00],
+                TLN.TLS1_2_VERSION,
                 TLN._TLSAlertError,
             ),
             (
@@ -516,7 +540,7 @@ end
                     else
                         @test result isa expected_error
                     end
-                    if label == "wrong negotiated version" && result isa TLN._TLSAlertError
+                    if label == "wrong negotiated version on TLS 1.2" && result isa TLN._TLSAlertError
                         @test result.alert == TLN._TLS_ALERT_PROTOCOL_VERSION
                     elseif label == "SSLv2 header" && result isa TLN._TLSAlertError
                         @test result.alert == TLN._TLS_ALERT_PROTOCOL_VERSION
@@ -626,6 +650,86 @@ end
             TLN._tls_write_tls_plaintext!(client_tcp, TLN._TLS_RECORD_TYPE_HANDSHAKE, UInt8[], TLN.TLS1_2_VERSION)
             _tls13_unexpected_message_error(() -> TLN._tls13_read_record!(server_tcp, state))
         finally
+            _tls_native_close_quiet!(server_tcp)
+            _tls_native_close_quiet!(client_tcp)
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+    end
+
+    @testset "fragmented handshake messages span encrypted records" begin
+        # Encrypted records all share the application_data outer type, so a
+        # handshake message continuing in the next record must reassemble via
+        # the decrypted inner type instead of tripping the interleave check.
+        partial = UInt8[TLN._HANDSHAKE_TYPE_FINISHED, 0x00, 0x00]
+        tail = UInt8[0x01, 0xaa]
+        IPN.shutdown!()
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        client_state = nothing
+        server_state = nothing
+        try
+            listener, client_tcp, server_tcp = _open_tcp_pair()
+            client_state, server_state, _, _ = _tls13_record_state_pair()
+            TLN._tls13_write_record!(client_tcp, client_state, TLN._TLS_RECORD_TYPE_HANDSHAKE, partial)
+            TLN._tls13_write_record!(client_tcp, client_state, TLN._TLS_RECORD_TYPE_HANDSHAKE, tail)
+            TLN._tls13_read_record!(server_tcp, server_state)
+            TLN._tls13_read_record!(server_tcp, server_state)
+            @test TLN._tls13_try_take_handshake_message!(server_state) == vcat(partial, tail)
+        finally
+            client_state isa TLN._TLS13NativeClientState && TLN._securezero_tls13_native_client_state!(client_state)
+            server_state isa TLN._TLS13NativeClientState && TLN._securezero_tls13_native_client_state!(server_state)
+            _tls_native_close_quiet!(server_tcp)
+            _tls_native_close_quiet!(client_tcp)
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+    end
+
+    @testset "record layer rejects padding-only inner plaintext" begin
+        IPN.shutdown!()
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        client_state = nothing
+        server_state = nothing
+        try
+            listener, client_tcp, server_tcp = _open_tcp_pair()
+            client_state, server_state, _, _ = _tls13_record_state_pair()
+            write_cipher = client_state.write_cipher::TLN._TLS13RecordCipherState
+            # Inner plaintext of a single zero byte: all padding, no content type.
+            inner_len = 1
+            record_payload_len = inner_len + TLN._TLS13_AEAD_TAG_SIZE
+            outbuf = Vector{UInt8}(undef, 5 + record_payload_len)
+            TLN._tls13_fill_record_header!(outbuf, TLN._TLS_RECORD_TYPE_APPLICATION_DATA, record_payload_len)
+            outbuf[6] = 0x00
+            TLN._tls13_fill_nonce!(write_cipher.nonce_buf, write_cipher.iv, write_cipher.seq)
+            ciphertext_len = TLN._tls13_encrypt_record_aead!(
+                write_cipher.aead,
+                outbuf,
+                6,
+                inner_len,
+                write_cipher.key,
+                write_cipher.nonce_buf,
+                pointer(outbuf, 1),
+                5,
+            )
+            @test ciphertext_len == record_payload_len
+            write(client_tcp, outbuf)
+            err = try
+                TLN._tls13_read_record!(server_tcp, server_state)
+                nothing
+            catch ex
+                ex
+            end
+            @test err isa TLN._TLSAlertError
+            if err isa TLN._TLSAlertError
+                @test err.alert == TLN._TLS_ALERT_UNEXPECTED_MESSAGE
+            end
+        finally
+            client_state isa TLN._TLS13NativeClientState && TLN._securezero_tls13_native_client_state!(client_state)
+            server_state isa TLN._TLS13NativeClientState && TLN._securezero_tls13_native_client_state!(server_state)
             _tls_native_close_quiet!(server_tcp)
             _tls_native_close_quiet!(client_tcp)
             _tls_native_close_quiet!(listener)
@@ -1080,6 +1184,41 @@ end
                 @test occursin("invalid or missing PSK binders", err.message)
             end
             @test !state.using_psk
+        finally
+            TLN._securezero_tls13_server_handshake_state!(state)
+        end
+    end
+
+    @testset "server rejects client certificate verify scheme that mismatches the certified key" begin
+        config = _tls13_native_server_config(client_auth = TLN.ClientAuthMode.RequireAnyClientCert)
+        state = TLN._TLS13ServerHandshakeState(config)
+        try
+            state.client_certificate_request_algorithms = UInt16[TLN._TLS13_SERVER_SUPPORTED_SIGNATURE_ALGORITHMS...]
+            certificate = TLN._CertificateMsgTLS13()
+            certificate.certificates = TLN._tls13_load_x509_pem_chain(read(_TLS_NATIVE_MTLS_CLIENT_CERT_PATH))
+            # The client certificate carries an RSA key; ECDSA P-256 is offered
+            # in the CertificateRequest but cannot belong to the certified key.
+            # Go reports this through verifyHandshakeSignature as decrypt_error.
+            certificate_verify = TLN._CertificateVerifyMsg(
+                TLN._TLS_SIGNATURE_ECDSA_SECP256R1_SHA256,
+                fill(UInt8(0x5a), 64),
+            )
+            io = _TLS13ServerFlightIO([
+                TLN._marshal_certificate_tls13(certificate),
+                TLN._marshal_certificate_verify(certificate_verify),
+            ])
+            err = try
+                TLN._read_client_certificate!(state, io, config)
+                nothing
+            catch ex
+                ex
+            end
+            @test err isa TLN._TLSAlertError
+            if err isa TLN._TLSAlertError
+                @test err.alert == TLN._TLS_ALERT_DECRYPT_ERROR
+                @test occursin("invalid signature by the client certificate", err.message)
+                @test !err.from_peer
+            end
         finally
             TLN._securezero_tls13_server_handshake_state!(state)
         end

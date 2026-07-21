@@ -341,7 +341,8 @@ function _tls13_process_inner_plaintext!(state::_TLS13NativeClientState, inner::
     while idx >= 1 && inner[idx] == 0x00
         idx -= 1
     end
-    idx >= 1 || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: TLS 1.3 record is missing an inner content type")
+    # Go surfaces an all-padding inner plaintext as unexpected_message.
+    idx >= 1 || _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: TLS 1.3 record is missing an inner content type")
     content_type = inner[idx]
     payload_len = idx - 1
     if content_type != _TLS_RECORD_TYPE_HANDSHAKE &&
@@ -383,7 +384,15 @@ function _tls13_read_record!(tcp::TCP.Conn, state::_TLS13NativeClientState)::Not
     if state.read_cipher === nothing && payload_len > _TLS13_MAX_PLAINTEXT
         _tls_fail(_TLS_ALERT_RECORD_OVERFLOW, "tls: received oversized TLS 1.3 plaintext record")
     end
-    if content_type != _TLS_RECORD_TYPE_HANDSHAKE &&
+    # The interleave rule applies to the true content type. Before keys are
+    # installed the outer type is the true type; after that every encrypted
+    # record's outer type is application_data and a partially buffered
+    # handshake message legally continues in the next record's decrypted inner
+    # payload, so the inner-type check in `_tls13_process_inner_plaintext!`
+    # owns this rule. Compatibility CCS records are never encrypted, so their
+    # outer type stays authoritative in both phases.
+    if (state.read_cipher === nothing || content_type == _TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC) &&
+       content_type != _TLS_RECORD_TYPE_HANDSHAKE &&
        _tls_buffer_available(state.handshake_buffer, state.handshake_buffer_pos) > 0
         _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: TLS 1.3 handshake message interrupted by another record")
     end

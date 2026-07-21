@@ -20,6 +20,9 @@ end
 @inline _tls_should_request_client_certificate(config)::Bool =
     config.client_auth != ClientAuthMode.NoClientCert
 
+# A false result means the peer signed with a scheme its certified key cannot
+# have produced. Callers report that like any other failed signature check
+# (decrypt_error), matching Go's verifyHandshakeSignature.
 @inline function _tls13_signature_scheme_matches_public_key(
     signature_algorithm::UInt16,
     public_key::_TLSPublicKey,

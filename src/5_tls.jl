@@ -544,7 +544,7 @@ mutable struct Conn <: IO
     @atomic handshake_complete::Bool
     @atomic closed::Bool
     @atomic active_version::UInt16
-    handshake_error::Union{Nothing, TLSError, TLSHandshakeTimeoutError}
+    handshake_error::Union{Nothing, TLSError, TLSHandshakeTimeoutError, EOFError}
     write_permanent_error::Union{Nothing, TLSError}
     negotiated_version::String
     negotiated_alpn::Union{Nothing, String}
@@ -1678,6 +1678,13 @@ function handshake!(conn::Conn)
                 handshake_error = TLSError("handshake", Int32(0), record_error.message, record_error)
                 conn.handshake_error = handshake_error
                 throw(handshake_error)
+            end
+            if ex isa EOFError
+                # Clean peer close at a record boundary surfaces as EOFError
+                # (the docstring contract; Go returns io.EOF here), unlike a
+                # mid-record close which arrives as `_TLSUnexpectedEOFError`.
+                conn.handshake_error = ex
+                throw(ex)
             end
             if ex isa IOPoll.NetClosingError || _is_closed(conn)
                 handshake_error = _closed_error("handshake", ex)

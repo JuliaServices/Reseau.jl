@@ -781,10 +781,18 @@ function _read_server_certificate!(state::_TLS13ClientHandshakeState, io)::Nothi
     certificate_verify = parsed_verify::_CertificateVerifyMsg
     in(certificate_verify.signature_algorithm, state.client_hello.supported_signature_algorithms) ||
         _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: certificate used with invalid signature algorithm")
+    # RFC 8446 section 4.4.3 forbids RSASSA-PKCS1-v1_5 in a TLS 1.3
+    # CertificateVerify even though the mixed-version ClientHello offers the
+    # PKCS#1 v1.5 schemes for a possible TLS 1.2 handshake.
+    if certificate_verify.signature_algorithm == _TLS_SIGNATURE_RSA_PKCS1_SHA256 ||
+       certificate_verify.signature_algorithm == _TLS_SIGNATURE_RSA_PKCS1_SHA384 ||
+       certificate_verify.signature_algorithm == _TLS_SIGNATURE_RSA_PKCS1_SHA512
+        _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: certificate used with invalid signature algorithm")
+    end
     _tls13_signature_scheme_matches_public_key(
         certificate_verify.signature_algorithm,
         state.certificate_verifier.leaf_public_key::_TLSPublicKey,
-    ) || _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: certificate used with invalid signature algorithm")
+    ) || _tls_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid signature by the server certificate")
     _tls13_verify_server_certificate_signature!(state.certificate_verifier, _tls13_selected_transcript(state), certificate_verify)
     state.server_certificate_verify = certificate_verify
     state.have_server_certificate_verify = true

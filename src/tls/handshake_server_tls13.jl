@@ -661,7 +661,7 @@ function _read_client_certificate!(state::_TLS13ServerHandshakeState, io, config
     _tls13_signature_scheme_matches_public_key(
         certificate_verify.signature_algorithm,
         state.client_leaf_public_key::_TLSPublicKey,
-    ) || _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: client certificate used with invalid signature algorithm")
+    ) || _tls_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid signature by the client certificate")
     signed = _tls13_signed_message(_TLS13_CLIENT_SIGNATURE_CONTEXT, state.transcript)
     try
         _tls13_openssl_verify_signature(state.client_leaf_public_key::_TLSPublicKey, certificate_verify.signature_algorithm, signed, certificate_verify.signature) ||

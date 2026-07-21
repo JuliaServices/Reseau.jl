@@ -494,6 +494,13 @@ end
                             ex
                         end
                         @test err isa TL.TLSError || err isa EOFError
+                        if err isa TL.TLSError
+                            # A clean peer close must surface as EOFError; a
+                            # TLSError here is only legitimate for the
+                            # RST/transport race, never the catch-all wrapping
+                            # a swallowed EOFError.
+                            @test err.message != "unexpected TLS failure"
+                        end
                         @test !TL.connection_state(client_tls).handshake_complete
                     finally
                         _tls_close_quiet!(client_tls)

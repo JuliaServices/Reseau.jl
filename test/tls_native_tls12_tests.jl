@@ -731,7 +731,9 @@ end
         @test resumed_ems_server.did_resume
 
         # The inverse transition is a fatal downgrade: an EMS session must not
-        # be resumed when the client no longer advertises EMS.
+        # be resumed when the client no longer advertises EMS. Matching Go's
+        # checkForResumption, the server aborts without writing an alert, so
+        # the client only observes the connection closing mid-handshake.
         listener = nothing
         server_task = nothing
         try
@@ -742,11 +744,7 @@ end
             catch ex
                 ex
             end
-            @test client_err isa TL12N._TLSAlertError
-            if client_err isa TL12N._TLSAlertError
-                @test client_err.from_peer
-                @test client_err.alert == TL12N._TLS_ALERT_HANDSHAKE_FAILURE
-            end
+            @test client_err isa EOFError
             @test _tls12_native_wait_task(server_task, 5.0) != :timed_out
             server_err = try
                 wait(server_task)
@@ -754,7 +752,14 @@ end
             catch ex
                 ex
             end
-            @test server_err !== nothing
+            @test server_err isa TaskFailedException
+            if server_err isa TaskFailedException
+                cause = server_err.task.exception
+                @test cause isa TL12N.TLSError
+                if cause isa TL12N.TLSError
+                    @test occursin("session supported extended_master_secret but client does not", cause.message)
+                end
+            end
         finally
             _tls12_native_close_quiet!(listener)
         end

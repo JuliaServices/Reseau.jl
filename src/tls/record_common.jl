@@ -195,6 +195,10 @@ function _tls_validate_record_header!(record_buffer::Vector{UInt8}, negotiated_v
         end
         return nothing
     end
+    # Once TLS 1.3 is negotiated the legacy record version carries no meaning
+    # and MUST be ignored (RFC 8446 §5.1); Go likewise only enforces the wire
+    # version for pre-1.3 negotiated connections.
+    negotiated_version == TLS1_3_VERSION && return nothing
     expected_version = _tls_wire_record_version(negotiated_version)
     record_version == expected_version || _tls_fail(
         _TLS_ALERT_PROTOCOL_VERSION,
