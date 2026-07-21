@@ -178,7 +178,7 @@ end
                     close(client_tcp)
                     client_tcp = nothing
                     err = try
-                        TLN._tls_read_wire_record!(server_tcp, UInt8[], TLN._TLS13_MAX_CIPHERTEXT)
+                        TLN._tls_read_wire_record!(server_tcp, UInt8[], TLN._TLS13_MAX_CIPHERTEXT, UInt16(0))
                         nothing
                     catch ex
                         ex
@@ -203,13 +203,132 @@ end
             close(client_tcp)
             client_tcp = nothing
             record_buffer = UInt8[]
-            @test TLN._tls_read_wire_record!(server_tcp, record_buffer, TLN._TLS13_MAX_CIPHERTEXT) == 0
-            @test_throws EOFError TLN._tls_read_wire_record!(server_tcp, record_buffer, TLN._TLS13_MAX_CIPHERTEXT)
+            @test TLN._tls_read_wire_record!(server_tcp, record_buffer, TLN._TLS13_MAX_CIPHERTEXT, UInt16(0)) == 0
+            @test_throws EOFError TLN._tls_read_wire_record!(server_tcp, record_buffer, TLN._TLS13_MAX_CIPHERTEXT, UInt16(0))
         finally
             _tls_native_close_quiet!(server_tcp)
             _tls_native_close_quiet!(client_tcp)
             _tls_native_close_quiet!(listener)
             IPN.shutdown!()
+        end
+    end
+
+    @testset "record versions follow negotiation state" begin
+        IPN.shutdown!()
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        try
+            listener, client_tcp, server_tcp = _open_tcp_pair()
+            state = TLN._TLS13NativeClientState()
+            io = TLN._TLS13HandshakeRecordIO(client_tcp, state)
+            raw = UInt8[TLN._HANDSHAKE_TYPE_CLIENT_HELLO, 0x00, 0x00, 0x00]
+
+            TLN._write_handshake_bytes!(io, raw)
+            initial_header, initial_payload = _read_tls_record(server_tcp)
+            @test (UInt16(initial_header[2]) << 8) | UInt16(initial_header[3]) == TLN._TLS_LEGACY_RECORD_VERSION
+            @test initial_payload == raw
+
+            state.version = TLN.TLS1_3_VERSION
+            TLN._write_handshake_bytes!(io, raw)
+            negotiated_header, negotiated_payload = _read_tls_record(server_tcp)
+            @test (UInt16(negotiated_header[2]) << 8) | UInt16(negotiated_header[3]) == TLN.TLS1_2_VERSION
+            @test negotiated_payload == raw
+        finally
+            _tls_native_close_quiet!(server_tcp)
+            _tls_native_close_quiet!(client_tcp)
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+
+        cases = (
+            (
+                "pre-negotiation handshake",
+                UInt8[TLN._TLS_RECORD_TYPE_HANDSHAKE, 0x03, 0x01, 0x00, 0x00],
+                UInt16(0),
+                nothing,
+            ),
+            (
+                "negotiated TLS 1.3 legacy version",
+                UInt8[TLN._TLS_RECORD_TYPE_HANDSHAKE, 0x03, 0x03, 0x00, 0x00],
+                TLN.TLS1_3_VERSION,
+                nothing,
+            ),
+            (
+                "wrong negotiated version",
+                UInt8[TLN._TLS_RECORD_TYPE_HANDSHAKE, 0x03, 0x01, 0x00, 0x00],
+                TLN.TLS1_3_VERSION,
+                TLN._TLSAlertError,
+            ),
+            (
+                "non-handshake first record",
+                UInt8[TLN._TLS_RECORD_TYPE_APPLICATION_DATA, 0x03, 0x03, 0x00, 0x00],
+                UInt16(0),
+                TLN._TLSRecordHeaderError,
+            ),
+            (
+                "implausible first version",
+                UInt8[TLN._TLS_RECORD_TYPE_HANDSHAKE, 0x11, 0x11, 0x00, 0x00],
+                UInt16(0),
+                TLN._TLSRecordHeaderError,
+            ),
+            (
+                "SSLv2 header",
+                UInt8[0x80, 0x00, 0x01, 0x00, 0x00],
+                UInt16(0),
+                TLN._TLSAlertError,
+            ),
+            (
+                "oversized record",
+                UInt8[
+                    TLN._TLS_RECORD_TYPE_HANDSHAKE,
+                    0x03,
+                    0x03,
+                    UInt8((TLN._TLS13_MAX_CIPHERTEXT + 1) >> 8),
+                    UInt8((TLN._TLS13_MAX_CIPHERTEXT + 1) & 0xff),
+                ],
+                TLN.TLS1_3_VERSION,
+                TLN._TLSAlertError,
+            ),
+        )
+        for (label, header, negotiated_version, expected_error) in cases
+            @testset "$label" begin
+                IPN.shutdown!()
+                listener = nothing
+                client_tcp = nothing
+                server_tcp = nothing
+                try
+                    listener, client_tcp, server_tcp = _open_tcp_pair()
+                    write(client_tcp, header)
+                    result = try
+                        TLN._tls_read_wire_record!(
+                            server_tcp,
+                            UInt8[],
+                            TLN._TLS13_MAX_CIPHERTEXT,
+                            negotiated_version,
+                        )
+                    catch ex
+                        ex
+                    end
+                    if expected_error === nothing
+                        @test result == 0
+                    else
+                        @test result isa expected_error
+                    end
+                    if label == "wrong negotiated version" && result isa TLN._TLSAlertError
+                        @test result.alert == TLN._TLS_ALERT_PROTOCOL_VERSION
+                    elseif label == "SSLv2 header" && result isa TLN._TLSAlertError
+                        @test result.alert == TLN._TLS_ALERT_PROTOCOL_VERSION
+                    elseif label == "oversized record" && result isa TLN._TLSAlertError
+                        @test result.alert == TLN._TLS_ALERT_RECORD_OVERFLOW
+                    end
+                finally
+                    _tls_native_close_quiet!(server_tcp)
+                    _tls_native_close_quiet!(client_tcp)
+                    _tls_native_close_quiet!(listener)
+                    IPN.shutdown!()
+                end
+            end
         end
     end
 
@@ -298,7 +417,7 @@ end
             expected_next_read = TLN._tls13_next_traffic_secret(TLN._TLS13_AES_128_GCM_SHA256, server_to_client_secret)
             expected_next_write = TLN._tls13_next_traffic_secret(TLN._TLS13_AES_128_GCM_SHA256, client_to_server_secret)
             try
-                TLN._tls13_write_record!(server_tcp, server_state.write_cipher, TLN._TLS_RECORD_TYPE_HANDSHAKE, request_key_update)
+                TLN._tls13_write_record!(server_tcp, server_state, TLN._TLS_RECORD_TYPE_HANDSHAKE, request_key_update)
                 TLN._tls13_advance_write_cipher!(server_state)
                 TLN._tls13_read_record!(client_tcp, client_state)
                 TLN._tls13_handle_post_handshake_messages!(client_tcp, client_state)
@@ -393,20 +512,71 @@ end
             client_state, server_state, _, _ = _tls13_record_state_pair()
             @test_throws ArgumentError TLN._tls13_write_record!(
                 client_tcp,
-                nothing,
+                client_state,
                 TLN._TLS_RECORD_TYPE_APPLICATION_DATA,
                 fill(UInt8(0x00), TLN._TLS13_MAX_PLAINTEXT + 1),
             )
             write_cipher = client_state.write_cipher::TLN._TLS13RecordCipherState
             write_cipher.seq = typemax(UInt64)
-            TLN._tls13_write_record!(client_tcp, client_state.write_cipher, TLN._TLS_RECORD_TYPE_APPLICATION_DATA, UInt8[0xaa])
+            TLN._tls13_write_record!(client_tcp, client_state, TLN._TLS_RECORD_TYPE_APPLICATION_DATA, UInt8[0xaa])
             @test write_cipher.exhausted
             @test_throws ArgumentError TLN._tls13_write_record!(
                 client_tcp,
-                client_state.write_cipher,
+                client_state,
                 TLN._TLS_RECORD_TYPE_APPLICATION_DATA,
                 UInt8[0xbb],
             )
+        finally
+            client_state isa TLN._TLS13NativeClientState && TLN._securezero_tls13_native_client_state!(client_state)
+            server_state isa TLN._TLS13NativeClientState && TLN._securezero_tls13_native_client_state!(server_state)
+            _tls_native_close_quiet!(server_tcp)
+            _tls_native_close_quiet!(client_tcp)
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+    end
+
+    @testset "record layer rejects authenticated oversized inner plaintext" begin
+        IPN.shutdown!()
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        client_state = nothing
+        server_state = nothing
+        try
+            listener, client_tcp, server_tcp = _open_tcp_pair()
+            client_state, server_state, _, _ = _tls13_record_state_pair()
+            write_cipher = client_state.write_cipher::TLN._TLS13RecordCipherState
+            content_len = TLN._TLS13_MAX_PLAINTEXT + 1
+            inner_len = content_len + 1
+            record_payload_len = inner_len + TLN._TLS13_AEAD_TAG_SIZE
+            outbuf = Vector{UInt8}(undef, 5 + record_payload_len)
+            TLN._tls13_fill_record_header!(outbuf, TLN._TLS_RECORD_TYPE_APPLICATION_DATA, record_payload_len)
+            fill!(@view(outbuf[6:5 + content_len]), 0x42)
+            outbuf[6 + content_len] = TLN._TLS_RECORD_TYPE_APPLICATION_DATA
+            TLN._tls13_fill_nonce!(write_cipher.nonce_buf, write_cipher.iv, write_cipher.seq)
+            ciphertext_len = TLN._tls13_encrypt_record_aead!(
+                write_cipher.aead,
+                outbuf,
+                6,
+                inner_len,
+                write_cipher.key,
+                write_cipher.nonce_buf,
+                pointer(outbuf, 1),
+                5,
+            )
+            @test ciphertext_len == record_payload_len
+            write(client_tcp, outbuf)
+            err = try
+                TLN._tls13_read_record!(server_tcp, server_state)
+                nothing
+            catch ex
+                ex
+            end
+            @test err isa TLN._TLSAlertError
+            if err isa TLN._TLSAlertError
+                @test err.alert == TLN._TLS_ALERT_RECORD_OVERFLOW
+            end
         finally
             client_state isa TLN._TLS13NativeClientState && TLN._securezero_tls13_native_client_state!(client_state)
             server_state isa TLN._TLS13NativeClientState && TLN._securezero_tls13_native_client_state!(server_state)
@@ -586,8 +756,14 @@ end
         try
             listener, client_tcp, server_tcp = _open_tcp_pair()
             state = TLN._TLS13NativeClientState()
+            state.version = TLN.TLS1_3_VERSION
             for _ in 1:(TLN._TLS_MAX_USELESS_RECORDS + 1)
-                TLN._tls_write_tls_plaintext!(client_tcp, TLN._TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC, UInt8[0x01])
+                TLN._tls_write_tls_plaintext!(
+                    client_tcp,
+                    TLN._TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC,
+                    UInt8[0x01],
+                    TLN.TLS1_2_VERSION,
+                )
             end
             for _ in 1:TLN._TLS_MAX_USELESS_RECORDS
                 TLN._tls13_read_record!(server_tcp, state)

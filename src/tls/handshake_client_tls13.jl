@@ -851,6 +851,7 @@ function _read_post_handshake_messages!(state::_TLS13ClientHandshakeState, io)::
 end
 
 function _client_handshake_tls13_after_server_hello!(state::_TLS13ClientHandshakeState, io)::Nothing
+    _tls_set_negotiated_record_version!(io, TLS1_3_VERSION)
     if state.server_hello.random == _HELLO_RETRY_REQUEST_RANDOM
         _tls13_send_dummy_change_cipher_spec!(io)
         _process_hello_retry_request!(state, io)

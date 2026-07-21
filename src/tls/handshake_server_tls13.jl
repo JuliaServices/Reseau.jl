@@ -724,6 +724,7 @@ function _send_new_session_ticket!(state::_TLS13ServerHandshakeState, io, config
 end
 
 function _server_handshake_tls13_after_client_hello!(state::_TLS13ServerHandshakeState, io, config)::Nothing
+    _tls_set_negotiated_record_version!(io, TLS1_3_VERSION)
     _prepare_server_negotiation!(state, io, config)
     _check_for_resumption!(state, config)
     _send_server_hello!(state, io)

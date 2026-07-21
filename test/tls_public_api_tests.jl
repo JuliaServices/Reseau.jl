@@ -591,6 +591,44 @@ isdefined(@__MODULE__, :_RESEAU_TLS_TEST_UTILS_LOADED) || include("tls_test_util
                 end
             end
         end
+        @testset "non-TLS first record surfaces a header error without an alert" begin
+            IP.shutdown!()
+            listener = nothing
+            client_tcp = nothing
+            server_tcp = nothing
+            server_tls = nothing
+            try
+                listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 1)
+                laddr = NC.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
+                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                server_tcp = fetch(accept_task)
+                server_tls = TL.server(server_tcp, _tls_server_config(handshake_timeout_ns = 2_000_000_000))
+                write(client_tcp, UInt8[TL._TLS_RECORD_TYPE_APPLICATION_DATA, 0x03, 0x03, 0x00, 0x00])
+                err = try
+                    TL.handshake!(server_tls)
+                    nothing
+                catch ex
+                    ex
+                end
+                @test err isa TL.TLSError
+                if err isa TL.TLSError
+                    @test err.op == "handshake"
+                    @test err.message == "tls: first record does not look like a TLS handshake"
+                    @test err.cause isa TL._TLSRecordHeaderError
+                end
+
+                NC.set_read_deadline!(client_tcp, time_ns() + 100_000_000)
+                @test_throws NC.DeadlineExceededError read!(client_tcp, Vector{UInt8}(undef, 1))
+            finally
+                _tls_close_quiet!(server_tls)
+                _tls_close_quiet!(server_tcp)
+                _tls_close_quiet!(client_tcp)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
         @testset "mixed-version native client negotiates TLS 1.2 with an exact TLS 1.2 server" begin
             IP.shutdown!()
             listener = nothing

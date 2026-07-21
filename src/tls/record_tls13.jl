@@ -54,6 +54,7 @@ keys, buffered handshake/plaintext data, shutdown flags, resumable-session
 material, and negotiated metadata exposed through `connection_state`.
 """
 mutable struct _TLS13NativeClientState
+    version::UInt16
     read_cipher::Union{Nothing, _TLS13RecordCipherState}
     write_cipher::Union{Nothing, _TLS13RecordCipherState}
     record_buffer::Vector{UInt8}
@@ -76,6 +77,7 @@ mutable struct _TLS13NativeClientState
 end
 
 _TLS13NativeClientState() = _TLS13NativeClientState(
+    UInt16(0),
     nothing,
     nothing,
     UInt8[],
@@ -106,6 +108,11 @@ the underlying TCP stream plus the connection's TLS 1.3 native record state.
 mutable struct _TLS13HandshakeRecordIO
     tcp::TCP.Conn
     state::_TLS13NativeClientState
+end
+
+@inline function _tls_set_negotiated_record_version!(io::_TLS13HandshakeRecordIO, version::UInt16)::Nothing
+    io.state.version = version
+    return nothing
 end
 
 function _securezero_tls13_record_cipher!(cipher::_TLS13RecordCipherState)::Nothing
@@ -142,6 +149,7 @@ function _securezero_tls13_native_client_state!(state::_TLS13NativeClientState):
     empty!(state.plaintext_buffer)
     empty!(state.resumption_secret)
     empty!(state.session_certificates)
+    state.version = UInt16(0)
     state.handshake_buffer_pos = 1
     state.plaintext_buffer_pos = 1
     state.useless_record_count = 0
@@ -161,6 +169,7 @@ function _tls13_set_read_cipher!(state::_TLS13NativeClientState, spec::_TLS13Cip
     if state.read_cipher !== nothing
         _securezero_tls13_record_cipher!(state.read_cipher::_TLS13RecordCipherState)
     end
+    state.version = TLS1_3_VERSION
     state.read_cipher = _TLS13RecordCipherState(spec, traffic_secret)
     return nothing
 end
@@ -169,6 +178,7 @@ function _tls13_set_write_cipher!(state::_TLS13NativeClientState, spec::_TLS13Ci
     if state.write_cipher !== nothing
         _securezero_tls13_record_cipher!(state.write_cipher::_TLS13RecordCipherState)
     end
+    state.version = TLS1_3_VERSION
     state.write_cipher = _TLS13RecordCipherState(spec, traffic_secret)
     return nothing
 end
@@ -232,15 +242,16 @@ end
 # encrypted inner content type, mirroring Go's TLS 1.3 record layer.
 function _tls13_write_record!(
     tcp::TCP.Conn,
-    cipher::Union{Nothing, _TLS13RecordCipherState},
+    state::_TLS13NativeClientState,
     inner_type::UInt8,
     payload_ptr::Ptr{UInt8},
     payload_len::Int,
 )::Nothing
     payload_len <= _TLS13_MAX_PLAINTEXT || throw(ArgumentError("tls: TLS 1.3 record plaintext exceeds the maximum record size"))
+    cipher = state.write_cipher
     if cipher === nothing
         payload = unsafe_wrap(Vector{UInt8}, payload_ptr, payload_len; own = false)
-        _tls_write_tls_plaintext!(tcp, inner_type, payload)
+        _tls_write_tls_plaintext!(tcp, inner_type, payload, _tls_wire_record_version(state.version))
         return nothing
     end
     cipher_state = cipher::_TLS13RecordCipherState
@@ -291,12 +302,12 @@ end
 
 function _tls13_write_record!(
     tcp::TCP.Conn,
-    cipher::Union{Nothing, _TLS13RecordCipherState},
+    state::_TLS13NativeClientState,
     inner_type::UInt8,
     payload::AbstractVector{UInt8},
 )::Nothing
     GC.@preserve payload begin
-        return _tls13_write_record!(tcp, cipher, inner_type, pointer(payload), length(payload))
+        return _tls13_write_record!(tcp, state, inner_type, pointer(payload), length(payload))
     end
 end
 
@@ -356,12 +367,15 @@ end
 # then feeding any recovered handshake, alert, application, or post-handshake
 # bytes into the appropriate connection-owned buffers.
 function _tls13_read_record!(tcp::TCP.Conn, state::_TLS13NativeClientState)::Nothing
-    payload_len = _tls_read_wire_record!(tcp, state.record_buffer, _TLS13_MAX_CIPHERTEXT)
+    payload_len = _tls_read_wire_record!(tcp, state.record_buffer, _TLS13_MAX_CIPHERTEXT, state.version)
     record = state.record_buffer
     content_type = record[1]
     payload_start = 6
     payload_end = 5 + payload_len
     payload = @view(record[payload_start:payload_end])
+    if state.read_cipher === nothing && payload_len > _TLS13_MAX_PLAINTEXT
+        _tls_fail(_TLS_ALERT_RECORD_OVERFLOW, "tls: received oversized TLS 1.3 plaintext record")
+    end
     if content_type == _TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC
         payload_len == 1 && payload[1] == 0x01 || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed ChangeCipherSpec record")
         _tls_note_useless_record!(state, "tls: too many ignored TLS records")
@@ -404,7 +418,10 @@ function _tls13_read_record!(tcp::TCP.Conn, state::_TLS13NativeClientState)::Not
     )
     _securezero!(cipher.nonce_buf)
     plaintext_len_or_nothing === nothing && _tls_fail(_TLS_ALERT_BAD_RECORD_MAC, "tls: invalid TLS 1.3 record authentication tag")
-    plaintext = @view(record[payload_start:payload_start + (plaintext_len_or_nothing::Int) - 1])
+    plaintext_len = plaintext_len_or_nothing::Int
+    plaintext_len <= _TLS13_MAX_PLAINTEXT + 1 ||
+        _tls_fail(_TLS_ALERT_RECORD_OVERFLOW, "tls: received oversized TLS 1.3 inner plaintext")
+    plaintext = @view(record[payload_start:payload_start + plaintext_len - 1])
     advanced = _tls13_process_inner_plaintext!(state, plaintext)
     advanced && _tls_reset_useless_record_count!(state)
     if cipher.seq == typemax(UInt64)
@@ -461,7 +478,7 @@ function _tls13_handle_key_update!(tcp::TCP.Conn, state::_TLS13NativeClientState
     if request_update
         raw = _tls13_key_update_message(false)
         try
-            _tls13_write_record!(tcp, state.write_cipher, _TLS_RECORD_TYPE_HANDSHAKE, raw)
+            _tls13_write_record!(tcp, state, _TLS_RECORD_TYPE_HANDSHAKE, raw)
             _tls13_advance_write_cipher!(state)
         finally
             _securezero!(raw)
@@ -480,7 +497,7 @@ function _tls13_maybe_rekey_write!(tcp::TCP.Conn, state::_TLS13NativeClientState
     rem(cipher_state.seq, _TLS13_WRITE_KEY_UPDATE_INTERVAL) == UInt64(0) || return nothing
     raw = _tls13_key_update_message(false)
     try
-        _tls13_write_record!(tcp, state.write_cipher, _TLS_RECORD_TYPE_HANDSHAKE, raw)
+        _tls13_write_record!(tcp, state, _TLS_RECORD_TYPE_HANDSHAKE, raw)
         _tls13_advance_write_cipher!(state)
     finally
         _securezero!(raw)
@@ -594,7 +611,7 @@ function _write_handshake_bytes!(io::_TLS13HandshakeRecordIO, raw::Vector{UInt8}
     raw_len = length(raw)
     while raw_pos <= raw_len
         raw_end = min(raw_pos + _TLS13_MAX_PLAINTEXT - 1, raw_len)
-        _tls13_write_record!(io.tcp, io.state.write_cipher, _TLS_RECORD_TYPE_HANDSHAKE, @view(raw[raw_pos:raw_end]))
+        _tls13_write_record!(io.tcp, io.state, _TLS_RECORD_TYPE_HANDSHAKE, @view(raw[raw_pos:raw_end]))
         raw_pos = raw_end + 1
     end
     return nothing

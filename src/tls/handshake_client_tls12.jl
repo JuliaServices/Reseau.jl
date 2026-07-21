@@ -649,7 +649,7 @@ function _tls12_resumed_handshake!(
         _tls_write_tls_plaintext!(io.tcp, _TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC, _TLS12_CHANGE_CIPHER_SPEC_PAYLOAD, TLS1_2_VERSION)
         client_verify_data = _tls12_client_finished_verify_data(hash_kind, master_secret, transcript)
         raw_client_finished = _write_handshake_message(_FinishedMsg(client_verify_data), transcript)
-        _tls12_write_record!(io.tcp, io.state.write_cipher, _TLS_RECORD_TYPE_HANDSHAKE, raw_client_finished)
+        _tls12_write_record!(io.tcp, io.state, _TLS_RECORD_TYPE_HANDSHAKE, raw_client_finished)
         state.did_resume = true
         _tls12_save_client_session!(state, config, cache_key, master_secret)
     finally
@@ -737,7 +737,7 @@ function _client_handshake_tls12_for_suite!(
         client_verify_data = _tls12_client_finished_verify_data(hash_kind, master_secret, transcript)
         client_finished = _FinishedMsg(client_verify_data)
         raw_client_finished = _write_handshake_message(client_finished, transcript)
-        _tls12_write_record!(io.tcp, io.state.write_cipher, _TLS_RECORD_TYPE_HANDSHAKE, raw_client_finished)
+        _tls12_write_record!(io.tcp, io.state, _TLS_RECORD_TYPE_HANDSHAKE, raw_client_finished)
         state.server_hello.ticket_supported && _tls12_read_new_session_ticket!(state, io, transcript)
 
         io.state.allow_encrypted_handshake = true
@@ -779,6 +779,7 @@ function _client_handshake_tls12_after_server_hello!(
     raw_server_hello::Vector{UInt8},
     cache_key::AbstractString,
 )::Nothing
+    _tls_set_negotiated_record_version!(io, TLS1_2_VERSION)
     resumed = state.resumption_session !== nothing && state.server_hello.session_id == state.client_hello.session_id
     if state.cipher_suite == _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID ||
        state.cipher_suite == _TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256_ID

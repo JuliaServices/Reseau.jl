@@ -228,10 +228,108 @@ end
             write_iv = UInt8[0xa0, 0xa1, 0xa2, 0xa3]
             TL12N._tls12_set_write_cipher!(client_state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, write_key, write_iv)
             TL12N._tls12_set_read_cipher!(server_state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, write_key, write_iv)
-            TL12N._tls12_write_record!(client_tcp, client_state.write_cipher, TL12N._TLS_RECORD_TYPE_APPLICATION_DATA, UInt8[0x61, 0x62, 0x63])
+            TL12N._tls12_write_record!(client_tcp, client_state, TL12N._TLS_RECORD_TYPE_APPLICATION_DATA, UInt8[0x61, 0x62, 0x63])
             TL12N._tls12_read_record!(server_tcp, server_state)
             @test server_state.plaintext_buffer == UInt8[0x61, 0x62, 0x63]
         finally
+            _tls12_native_close_quiet!(server_tcp)
+            _tls12_native_close_quiet!(client_tcp)
+            _tls12_native_close_quiet!(listener)
+        end
+    end
+
+    @testset "initial and negotiated records use Go-compatible versions" begin
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        try
+            listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
+            state = TL12N._TLS12NativeState()
+            io = TL12N._TLS12HandshakeRecordIO(client_tcp, state)
+            raw = UInt8[TL12N._HANDSHAKE_TYPE_CLIENT_HELLO, 0x00, 0x00, 0x00]
+
+            TL12N._write_handshake_bytes!(io, raw)
+            initial_header = Vector{UInt8}(undef, 5)
+            read!(server_tcp, initial_header)
+            initial_payload = Vector{UInt8}(undef, 4)
+            read!(server_tcp, initial_payload)
+            @test (UInt16(initial_header[2]) << 8) | UInt16(initial_header[3]) == TL12N._TLS_LEGACY_RECORD_VERSION
+            @test initial_payload == raw
+
+            state.version = TL12N.TLS1_2_VERSION
+            TL12N._write_handshake_bytes!(io, raw)
+            negotiated_header = Vector{UInt8}(undef, 5)
+            read!(server_tcp, negotiated_header)
+            negotiated_payload = Vector{UInt8}(undef, 4)
+            read!(server_tcp, negotiated_payload)
+            @test (UInt16(negotiated_header[2]) << 8) | UInt16(negotiated_header[3]) == TL12N.TLS1_2_VERSION
+            @test negotiated_payload == raw
+        finally
+            _tls12_native_close_quiet!(server_tcp)
+            _tls12_native_close_quiet!(client_tcp)
+            _tls12_native_close_quiet!(listener)
+        end
+    end
+
+    @testset "record layer rejects authenticated oversized plaintext" begin
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        client_state = nothing
+        server_state = nothing
+        try
+            listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
+            client_state = TL12N._TLS12NativeState()
+            server_state = TL12N._TLS12NativeState()
+            write_key = UInt8[UInt8(0x70 + i) for i in 0:15]
+            write_iv = UInt8[0xe0, 0xe1, 0xe2, 0xe3]
+            TL12N._tls12_set_write_cipher!(client_state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, write_key, write_iv)
+            TL12N._tls12_set_read_cipher!(server_state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, write_key, write_iv)
+            write_cipher = client_state.write_cipher::TL12N._TLS12RecordCipherState
+            plaintext_len = TL12N._TLS12_MAX_PLAINTEXT + 1
+            record_payload_len = 8 + plaintext_len + TL12N._TLS12_GCM_TAG_SIZE
+            outbuf = Vector{UInt8}(undef, 5 + record_payload_len)
+            outbuf[1] = TL12N._TLS_RECORD_TYPE_APPLICATION_DATA
+            outbuf[2] = UInt8(TL12N.TLS1_2_VERSION >> 8)
+            outbuf[3] = UInt8(TL12N.TLS1_2_VERSION & 0xff)
+            outbuf[4] = UInt8(record_payload_len >> 8)
+            outbuf[5] = UInt8(record_payload_len & 0xff)
+            explicit_nonce = @view(outbuf[6:13])
+            TL12N._tls12_fill_explicit_nonce!(explicit_nonce, write_cipher.seq)
+            copyto!(write_cipher.nonce_buf, 1, write_cipher.iv, 1, length(write_cipher.iv))
+            copyto!(write_cipher.nonce_buf, length(write_cipher.iv) + 1, explicit_nonce, 1, 8)
+            TL12N._tls12_fill_record_additional_data!(
+                write_cipher.additional_data_buf,
+                write_cipher.seq,
+                TL12N._TLS_RECORD_TYPE_APPLICATION_DATA,
+                plaintext_len,
+            )
+            fill!(@view(outbuf[14:13 + plaintext_len]), 0x43)
+            ciphertext_len = TL12N._tls12_encrypt_record_aead!(
+                write_cipher.aead,
+                outbuf,
+                14,
+                plaintext_len,
+                write_cipher.key,
+                write_cipher.nonce_buf,
+                pointer(write_cipher.additional_data_buf),
+                length(write_cipher.additional_data_buf),
+            )
+            @test ciphertext_len == plaintext_len + TL12N._TLS12_GCM_TAG_SIZE
+            write(client_tcp, outbuf)
+            err = try
+                TL12N._tls12_read_record!(server_tcp, server_state)
+                nothing
+            catch ex
+                ex
+            end
+            @test err isa TL12N._TLSAlertError
+            if err isa TL12N._TLSAlertError
+                @test err.alert == TL12N._TLS_ALERT_RECORD_OVERFLOW
+            end
+        finally
+            client_state isa TL12N._TLS12NativeState && TL12N._securezero_tls12_native_state!(client_state)
+            server_state isa TL12N._TLS12NativeState && TL12N._securezero_tls12_native_state!(server_state)
             _tls12_native_close_quiet!(server_tcp)
             _tls12_native_close_quiet!(client_tcp)
             _tls12_native_close_quiet!(listener)
@@ -245,6 +343,7 @@ end
         try
             listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
             state = TL12N._TLS12NativeState()
+            state.version = TL12N.TLS1_2_VERSION
             TL12N._tls_write_tls_plaintext!(client_tcp, TL12N._TLS_RECORD_TYPE_APPLICATION_DATA, UInt8[0x61], TL12N.TLS1_2_VERSION)
             tls_err = _tls12_unexpected_message_error(() -> TL12N._tls12_read_record!(server_tcp, state))
             @test !tls_err.from_peer
@@ -288,7 +387,7 @@ end
             TL12N._tls12_set_write_cipher!(client_state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, write_key, write_iv)
             TL12N._tls12_set_read_cipher!(server_state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, write_key, write_iv)
             hello_request = UInt8[0x00, 0x00, 0x00, 0x00]
-            TL12N._tls12_write_record!(client_tcp, client_state.write_cipher, TL12N._TLS_RECORD_TYPE_HANDSHAKE, hello_request)
+            TL12N._tls12_write_record!(client_tcp, client_state, TL12N._TLS_RECORD_TYPE_HANDSHAKE, hello_request)
             tls_err = _tls12_unexpected_message_error(() -> TL12N._tls12_read_record!(server_tcp, server_state))
             @test !tls_err.from_peer
         finally
@@ -311,7 +410,7 @@ end
             TL12N._tls12_set_write_cipher!(client_state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, write_key, write_iv)
             TL12N._tls12_set_read_cipher!(server_state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, write_key, write_iv)
             for _ in 1:(TL12N._TLS_MAX_USELESS_RECORDS + 1)
-                TL12N._tls12_write_record!(client_tcp, client_state.write_cipher, TL12N._TLS_RECORD_TYPE_APPLICATION_DATA, UInt8[])
+                TL12N._tls12_write_record!(client_tcp, client_state, TL12N._TLS_RECORD_TYPE_APPLICATION_DATA, UInt8[])
             end
             for _ in 1:TL12N._TLS_MAX_USELESS_RECORDS
                 TL12N._tls12_read_record!(server_tcp, server_state)

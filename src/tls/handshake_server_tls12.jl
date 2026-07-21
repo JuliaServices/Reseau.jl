@@ -659,7 +659,7 @@ function _tls12_send_server_finished!(
     try
         _tls_write_tls_plaintext!(io.tcp, _TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC, _TLS12_CHANGE_CIPHER_SPEC_PAYLOAD, TLS1_2_VERSION)
         raw = _write_handshake_message(_FinishedMsg(verify_data), transcript)
-        _tls12_write_record!(io.tcp, io.state.write_cipher, _TLS_RECORD_TYPE_HANDSHAKE, raw)
+        _tls12_write_record!(io.tcp, io.state, _TLS_RECORD_TYPE_HANDSHAKE, raw)
     finally
         _securezero!(verify_data)
     end
@@ -823,6 +823,7 @@ function _server_handshake_tls12_after_client_hello!(
     config,
     raw_client_hello::Vector{UInt8},
 )::Nothing
+    _tls_set_negotiated_record_version!(io, TLS1_2_VERSION)
     _tls12_select_server_parameters!(state, config)
     if state.cipher_suite == _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID ||
        state.cipher_suite == _TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256_ID

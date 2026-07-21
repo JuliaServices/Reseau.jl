@@ -1,6 +1,6 @@
 const _TLS12_GCM_TAG_SIZE = 16
 const _TLS12_MAX_PLAINTEXT = 16_384
-const _TLS12_MAX_CIPHERTEXT = _TLS12_MAX_PLAINTEXT + 8 + _TLS12_GCM_TAG_SIZE + 256
+const _TLS12_MAX_CIPHERTEXT = _TLS12_MAX_PLAINTEXT + 2048
 const _TLS12_MAX_HANDSHAKE_BUFFER = _MAX_CERTIFICATE_HANDSHAKE_SIZE + _TLS12_MAX_PLAINTEXT
 const _TLS12_CHANGE_CIPHER_SPEC_PAYLOAD = UInt8[0x01]
 
@@ -54,6 +54,7 @@ read/write cipher state, buffered handshake/plaintext bytes, shutdown flags, and
 the small amount of negotiated metadata exposed via `connection_state`.
 """
 mutable struct _TLS12NativeState
+    version::UInt16
     read_cipher::Union{Nothing, _TLS12RecordCipherState}
     write_cipher::Union{Nothing, _TLS12RecordCipherState}
     record_buffer::Vector{UInt8}
@@ -72,6 +73,7 @@ mutable struct _TLS12NativeState
 end
 
 _TLS12NativeState() = _TLS12NativeState(
+    UInt16(0),
     nothing,
     nothing,
     UInt8[],
@@ -98,6 +100,11 @@ the underlying TCP stream plus the connection's TLS 1.2 native record state.
 mutable struct _TLS12HandshakeRecordIO
     tcp::TCP.Conn
     state::_TLS12NativeState
+end
+
+@inline function _tls_set_negotiated_record_version!(io::_TLS12HandshakeRecordIO, version::UInt16)::Nothing
+    io.state.version = version
+    return nothing
 end
 
 function _securezero_tls12_record_cipher!(cipher::_TLS12RecordCipherState)::Nothing
@@ -128,6 +135,7 @@ function _securezero_tls12_native_state!(state::_TLS12NativeState)::Nothing
     empty!(state.record_buffer)
     empty!(state.handshake_buffer)
     empty!(state.plaintext_buffer)
+    state.version = UInt16(0)
     state.handshake_buffer_pos = 1
     state.plaintext_buffer_pos = 1
     state.useless_record_count = 0
@@ -145,6 +153,7 @@ function _tls12_set_read_cipher!(state::_TLS12NativeState, spec::_TLS12CipherSpe
     if state.read_cipher !== nothing
         _securezero_tls12_record_cipher!(state.read_cipher::_TLS12RecordCipherState)
     end
+    state.version = TLS1_2_VERSION
     state.read_cipher = _TLS12RecordCipherState(spec, Vector{UInt8}(key), Vector{UInt8}(iv), UInt64(0), false)
     return nothing
 end
@@ -153,6 +162,7 @@ function _tls12_set_write_cipher!(state::_TLS12NativeState, spec::_TLS12CipherSp
     if state.write_cipher !== nothing
         _securezero_tls12_record_cipher!(state.write_cipher::_TLS12RecordCipherState)
     end
+    state.version = TLS1_2_VERSION
     state.write_cipher = _TLS12RecordCipherState(spec, Vector{UInt8}(key), Vector{UInt8}(iv), UInt64(0), false)
     return nothing
 end
@@ -214,15 +224,16 @@ end
 # treated as a hard protocol error and permanently disables further writes.
 function _tls12_write_record!(
     tcp::TCP.Conn,
-    cipher::Union{Nothing, _TLS12RecordCipherState},
+    state::_TLS12NativeState,
     content_type::UInt8,
     payload_ptr::Ptr{UInt8},
     payload_len::Int,
 )::Nothing
     payload_len <= _TLS12_MAX_PLAINTEXT || throw(ArgumentError("tls: TLS 1.2 record plaintext exceeds the maximum record size"))
+    cipher = state.write_cipher
     if cipher === nothing
         payload = unsafe_wrap(Vector{UInt8}, payload_ptr, payload_len; own = false)
-        _tls_write_tls_plaintext!(tcp, content_type, payload, TLS1_2_VERSION)
+        _tls_write_tls_plaintext!(tcp, content_type, payload, _tls_wire_record_version(state.version))
         return nothing
     end
     cipher_state = cipher::_TLS12RecordCipherState
@@ -278,12 +289,12 @@ end
 
 function _tls12_write_record!(
     tcp::TCP.Conn,
-    cipher::Union{Nothing, _TLS12RecordCipherState},
+    state::_TLS12NativeState,
     content_type::UInt8,
     payload::AbstractVector{UInt8},
 )::Nothing
     GC.@preserve payload begin
-        return _tls12_write_record!(tcp, cipher, content_type, pointer(payload), length(payload))
+        return _tls12_write_record!(tcp, state, content_type, pointer(payload), length(payload))
     end
 end
 
@@ -311,12 +322,15 @@ end
 # 3. route alerts/plaintext/handshake bytes into the right buffers,
 # 4. enforce TLS 1.2 invariants like ChangeCipherSpec ordering.
 function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeState)::Nothing
-    payload_len = _tls_read_wire_record!(tcp, state.record_buffer, _TLS12_MAX_CIPHERTEXT)
+    payload_len = _tls_read_wire_record!(tcp, state.record_buffer, _TLS12_MAX_CIPHERTEXT, state.version)
     record = state.record_buffer
     content_type = record[1]
     payload_start = 6
     payload_end = 5 + payload_len
     payload = @view(record[payload_start:payload_end])
+    if state.read_cipher === nothing && payload_len > _TLS12_MAX_PLAINTEXT
+        _tls_fail(_TLS_ALERT_RECORD_OVERFLOW, "tls: received oversized TLS 1.2 plaintext record")
+    end
     if content_type == _TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC
         payload_len == 1 && payload[1] == 0x01 || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 ChangeCipherSpec record")
         state.read_cipher === nothing || _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected post-handshake TLS 1.2 ChangeCipherSpec")
@@ -370,6 +384,8 @@ function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeState)::Nothing
         )
         plaintext_len_or_nothing === nothing && _tls_fail(_TLS_ALERT_BAD_RECORD_MAC, "tls: invalid TLS 1.2 record authentication tag")
         plaintext_len = plaintext_len_or_nothing::Int
+        plaintext_len <= _TLS12_MAX_PLAINTEXT ||
+            _tls_fail(_TLS_ALERT_RECORD_OVERFLOW, "tls: received oversized TLS 1.2 plaintext record")
         plaintext = @view(record[ciphertext_pos:ciphertext_pos + plaintext_len - 1])
         if content_type == _TLS_RECORD_TYPE_HANDSHAKE
             state.allow_encrypted_handshake ||
@@ -445,7 +461,7 @@ function _write_handshake_bytes!(io::_TLS12HandshakeRecordIO, raw::Vector{UInt8}
     raw_len = length(raw)
     while raw_pos <= raw_len
         raw_end = min(raw_pos + _TLS12_MAX_PLAINTEXT - 1, raw_len)
-        _tls12_write_record!(io.tcp, io.state.write_cipher, _TLS_RECORD_TYPE_HANDSHAKE, @view(raw[raw_pos:raw_end]))
+        _tls12_write_record!(io.tcp, io.state, _TLS_RECORD_TYPE_HANDSHAKE, @view(raw[raw_pos:raw_end]))
         raw_pos = raw_end + 1
     end
     return nothing

@@ -8,6 +8,7 @@ const _TLS_ALERT_LEVEL_FATAL = UInt8(2)
 const _TLS_ALERT_CLOSE_NOTIFY = UInt8(0)
 const _TLS_ALERT_UNEXPECTED_MESSAGE = UInt8(10)
 const _TLS_ALERT_BAD_RECORD_MAC = UInt8(20)
+const _TLS_ALERT_RECORD_OVERFLOW = UInt8(22)
 const _TLS_ALERT_HANDSHAKE_FAILURE = UInt8(40)
 const _TLS_ALERT_BAD_CERTIFICATE = UInt8(42)
 const _TLS_ALERT_ILLEGAL_PARAMETER = UInt8(47)
@@ -45,9 +46,23 @@ struct _TLSUnexpectedEOFError <: Exception end
 
 Base.showerror(io::IO, ::_TLSUnexpectedEOFError) = print(io, "unexpected EOF")
 
+# The first record can fail Go's pre-negotiation plausibility checks without
+# generating a TLS alert, because the bytes might not be TLS at all. Keep that
+# distinct from negotiated protocol violations, which do emit an alert.
+struct _TLSRecordHeaderError <: Exception
+    message::String
+end
+
+Base.showerror(io::IO, err::_TLSRecordHeaderError) = print(io, err.message)
+
 @inline _tls_protocol_error(alert::UInt8, message::AbstractString) = _TLSAlertError(String(message), alert, false)
 @inline _tls_peer_alert_error(alert::UInt8, message::AbstractString) = _TLSAlertError(String(message), alert, true)
 @inline _tls_fail(alert::UInt8, message::AbstractString)::Union{} = throw(_tls_protocol_error(alert, message))
+
+# Detached handshake-state tests and alternate handshake adapters intentionally
+# do not own a wire record layer. Concrete TCP record adapters specialize this
+# hook to record the selected protocol version.
+@inline _tls_set_negotiated_record_version!(io, ::UInt16)::Nothing = nothing
 
 @inline function _tls_buffer_available(buf::Vector{UInt8}, pos::Int)::Int
     return max(0, length(buf) - pos + 1)
@@ -129,11 +144,42 @@ function _tls_read_record_bytes!(
     return nothing
 end
 
-function _tls_read_wire_record!(tcp::TCP.Conn, record_buffer::Vector{UInt8}, max_ciphertext::Int)::Int
+@inline function _tls_wire_record_version(negotiated_version::UInt16)::UInt16
+    negotiated_version == UInt16(0) && return _TLS_LEGACY_RECORD_VERSION
+    negotiated_version == TLS1_3_VERSION && return TLS1_2_VERSION
+    return negotiated_version
+end
+
+function _tls_validate_record_header!(record_buffer::Vector{UInt8}, negotiated_version::UInt16)::Nothing
+    content_type = record_buffer[1]
+    record_version = (UInt16(record_buffer[2]) << 8) | UInt16(record_buffer[3])
+    if negotiated_version == UInt16(0)
+        content_type == 0x80 && _tls_fail(_TLS_ALERT_PROTOCOL_VERSION, "tls: unsupported SSLv2 handshake received")
+        if (content_type != _TLS_RECORD_TYPE_ALERT && content_type != _TLS_RECORD_TYPE_HANDSHAKE) ||
+           record_version >= UInt16(0x1000)
+            throw(_TLSRecordHeaderError("tls: first record does not look like a TLS handshake"))
+        end
+        return nothing
+    end
+    expected_version = _tls_wire_record_version(negotiated_version)
+    record_version == expected_version || _tls_fail(
+        _TLS_ALERT_PROTOCOL_VERSION,
+        "tls: received record with version $(string(record_version; base = 16)) when expecting version $(string(expected_version; base = 16))",
+    )
+    return nothing
+end
+
+function _tls_read_wire_record!(
+        tcp::TCP.Conn,
+        record_buffer::Vector{UInt8},
+        max_ciphertext::Int,
+        negotiated_version::UInt16,
+    )::Int
     resize!(record_buffer, 5)
     GC.@preserve record_buffer _tls_read_record_bytes!(tcp, pointer(record_buffer), 5, true)
+    _tls_validate_record_header!(record_buffer, negotiated_version)
     payload_len = (Int(record_buffer[4]) << 8) | Int(record_buffer[5])
-    payload_len <= max_ciphertext || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received oversized TLS record")
+    payload_len <= max_ciphertext || _tls_fail(_TLS_ALERT_RECORD_OVERFLOW, "tls: received oversized TLS record")
     resize!(record_buffer, 5 + payload_len)
     if payload_len != 0
         GC.@preserve record_buffer _tls_read_record_bytes!(tcp, pointer(record_buffer, 6), payload_len, false)

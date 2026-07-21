@@ -1230,6 +1230,7 @@ end
 # the exact TLS 1.2 record/handshake code can continue from the same stream.
 function _tls12_copy_initial_state(state13::_TLS13NativeClientState)::_TLS12NativeState
     state12 = _TLS12NativeState()
+    state12.version = state13.version
     state12.record_buffer = copy(state13.record_buffer)
     state12.handshake_buffer = copy(state13.handshake_buffer)
     state12.handshake_buffer_pos = state13.handshake_buffer_pos
@@ -1402,6 +1403,7 @@ function _native_tls_auto_client_handshake!(conn::Conn)::Nothing
         state13.server_hello = server_hello
         state13.have_server_hello = true
         negotiated_version = _tls_pick_client_version(conn.config, state13.server_hello)
+        native_state13.version = negotiated_version
         if negotiated_version == TLS1_3_VERSION
             _check_server_hello_or_hrr!(state13)
             _client_handshake_tls13_after_server_hello!(state13, io13)
@@ -1446,6 +1448,7 @@ function _native_tls_auto_server_handshake!(conn::Conn)::Nothing
     client_hello = _unmarshal_client_hello(raw_client_hello)
     client_hello === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: native mixed-version server expected ClientHello")
     negotiated_version = _tls_mutual_supported_version(conn.config, _tls_client_hello_supported_versions(client_hello))
+    native_state13.version = negotiated_version
     if negotiated_version == TLS1_3_VERSION
         state13 = _TLS13ServerHandshakeState(conn.config)
         try
@@ -1615,6 +1618,12 @@ function handshake!(conn::Conn)
                 conn.handshake_error = handshake_error
                 throw(handshake_error)
             end
+            if ex isa _TLSRecordHeaderError
+                record_error = ex::_TLSRecordHeaderError
+                handshake_error = TLSError("handshake", Int32(0), record_error.message, record_error)
+                conn.handshake_error = handshake_error
+                throw(handshake_error)
+            end
             if ex isa IOPoll.NetClosingError || _is_closed(conn)
                 handshake_error = _closed_error("handshake", ex)
                 conn.handshake_error = handshake_error
@@ -1750,6 +1759,7 @@ function _read_some!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
         ex isa EOFError && rethrow()
         ex isa TLSError && rethrow()
         ex isa _TLSUnexpectedEOFError && throw(TLSError("read", Int32(0), "unexpected EOF", ex))
+        ex isa _TLSRecordHeaderError && throw(TLSError("read", Int32(0), (ex::_TLSRecordHeaderError).message, ex))
         if ex isa IOPoll.NetClosingError || _is_closed(conn)
             throw(_closed_error("read", ex))
         end
@@ -1814,6 +1824,7 @@ function _peek_eof(conn::Conn)::Bool
         ex = _as_exception(err)
         ex isa TLSError && rethrow()
         ex isa _TLSUnexpectedEOFError && throw(TLSError("peek", Int32(0), "unexpected EOF", ex))
+        ex isa _TLSRecordHeaderError && throw(TLSError("peek", Int32(0), (ex::_TLSRecordHeaderError).message, ex))
         if ex isa IOPoll.NetClosingError || _is_closed(conn)
             throw(_closed_error("peek", ex))
         end
@@ -2063,7 +2074,7 @@ _write_buffer(buf::ByteMemory, nbytes::Int) = buf
 function _native_tls13_write_alert!(conn::Conn, alert_level::UInt8, alert_desc::UInt8)::Nothing
     state = _native_tls13_state(conn)
     state.sent_close_notify && return nothing
-    _tls13_write_record!(conn.tcp, state.write_cipher, _TLS_RECORD_TYPE_ALERT, UInt8[alert_level, alert_desc])
+    _tls13_write_record!(conn.tcp, state, _TLS_RECORD_TYPE_ALERT, UInt8[alert_level, alert_desc])
     if alert_desc == _TLS_ALERT_CLOSE_NOTIFY
         state.sent_close_notify = true
     end
@@ -2083,7 +2094,7 @@ end
 function _native_tls12_write_alert!(conn::Conn, alert_level::UInt8, alert_desc::UInt8)::Nothing
     state = _native_tls12_state(conn)
     state.sent_close_notify && return nothing
-    _tls12_write_record!(conn.tcp, state.write_cipher, _TLS_RECORD_TYPE_ALERT, UInt8[alert_level, alert_desc])
+    _tls12_write_record!(conn.tcp, state, _TLS_RECORD_TYPE_ALERT, UInt8[alert_level, alert_desc])
     if alert_desc == _TLS_ALERT_CLOSE_NOTIFY
         state.sent_close_notify = true
     end
@@ -2103,9 +2114,24 @@ end
 function _native_auto_try_write_fatal_alert!(conn::Conn, alert_desc::UInt8)::Nothing
     _is_closed(conn) && return nothing
     !_is_tls_auto_policy(conn.policy) && return nothing
-    conn.native_state === nothing && return nothing
+    native_state = conn.native_state
+    native_state === nothing && return nothing
     try
-        _tls_write_tls_plaintext!(conn.tcp, _TLS_RECORD_TYPE_ALERT, UInt8[_TLS_ALERT_LEVEL_FATAL, alert_desc], TLS1_2_VERSION)
+        if native_state isa _TLS13NativeClientState
+            _tls13_write_record!(
+                conn.tcp,
+                native_state::_TLS13NativeClientState,
+                _TLS_RECORD_TYPE_ALERT,
+                UInt8[_TLS_ALERT_LEVEL_FATAL, alert_desc],
+            )
+        elseif native_state isa _TLS12NativeState
+            _tls12_write_record!(
+                conn.tcp,
+                native_state::_TLS12NativeState,
+                _TLS_RECORD_TYPE_ALERT,
+                UInt8[_TLS_ALERT_LEVEL_FATAL, alert_desc],
+            )
+        end
     catch
     end
     return nothing
@@ -2117,7 +2143,7 @@ function _native_tls13_write_application!(conn::Conn, ptr::Ptr{UInt8}, nbytes::I
     while total < nbytes
         chunk_len = min(nbytes - total, _TLS13_MAX_PLAINTEXT)
         _tls13_maybe_rekey_write!(conn.tcp, state)
-        _tls13_write_record!(conn.tcp, state.write_cipher, _TLS_RECORD_TYPE_APPLICATION_DATA, ptr + total, chunk_len)
+        _tls13_write_record!(conn.tcp, state, _TLS_RECORD_TYPE_APPLICATION_DATA, ptr + total, chunk_len)
         total += chunk_len
     end
     return total
@@ -2128,7 +2154,7 @@ function _native_tls12_write_application!(conn::Conn, ptr::Ptr{UInt8}, nbytes::I
     total = 0
     while total < nbytes
         chunk_len = min(nbytes - total, _TLS12_MAX_PLAINTEXT)
-        _tls12_write_record!(conn.tcp, state.write_cipher, _TLS_RECORD_TYPE_APPLICATION_DATA, ptr + total, chunk_len)
+        _tls12_write_record!(conn.tcp, state, _TLS_RECORD_TYPE_APPLICATION_DATA, ptr + total, chunk_len)
         total += chunk_len
     end
     return total
