@@ -489,6 +489,9 @@ end
             @test ND._effective_fallback_delay_ns(ND.HostResolver(fallback_delay_ns = 0)) == Int64(300_000_000)
             @test !ND._use_parallel_race(ND.HostResolver(fallback_delay_ns = -1), :tcp, NC.SocketEndpoint[NC.loopback_addr6(80)])
             @test ND._use_parallel_race(ND.HostResolver(fallback_delay_ns = 1), :tcp, NC.SocketEndpoint[NC.loopback_addr6(80)])
+            @test ND._connect_deadline_ns(ND.HostResolver(timeout_ns = typemax(Int64))) == typemax(Int64)
+            @test ND._connect_deadline_ns(ND.HostResolver(timeout_ns = typemin(Int64))) < Int64(time_ns())
+            @test ND._fallback_deadline_ns(ND.HostResolver(fallback_delay_ns = typemax(Int64))) == typemax(Int64)
 
             scoped_addr = NC.SocketAddrV6(NC.loopback_addr6(1234).ip, 1234; scope_id = 7)
             scoped_ips = ND._resolve_host_ips(_SlowResolver(0.0, NC.SocketEndpoint[scoped_addr]), "tcp", "ignored.host")
@@ -863,6 +866,22 @@ end
         @testset "caching resolver fresh/stale/negative behavior" begin
             addr_a = NC.loopback_addr(1111)
             addr_b = NC.loopback_addr(2222)
+
+            saturated_parent = _CountingResolver(0.0, NC.SocketEndpoint[addr_a])
+            saturated_cache = ND.CachingResolver(saturated_parent; ttl_ns = 10, stale_ttl_ns = 10, negative_ttl_ns = 10, max_hosts = 8)
+            positive_key = ND._lookup_key("tcp", "positive-overflow.test")
+            negative_key = ND._lookup_key("tcp", "negative-overflow.test")
+            lock(saturated_cache.lock)
+            try
+                ND._store_cache_entry_locked!(saturated_cache, positive_key, NC.SocketEndpoint[addr_a], nothing, typemax(Int64) - Int64(5))
+                ND._store_cache_entry_locked!(saturated_cache, negative_key, nothing, ND.LookupError("lookup failed", "negative-overflow.test"), typemax(Int64) - Int64(5))
+                @test saturated_cache.entries[positive_key].expires_ns == typemax(Int64)
+                @test saturated_cache.entries[positive_key].stale_expires_ns == typemax(Int64)
+                @test saturated_cache.entries[negative_key].expires_ns == typemax(Int64)
+                @test saturated_cache.entries[negative_key].stale_expires_ns == typemax(Int64)
+            finally
+                unlock(saturated_cache.lock)
+            end
 
             fresh_parent = _CountingResolver(0.0, NC.SocketEndpoint[addr_a])
             fresh_cache = ND.CachingResolver(fresh_parent; ttl_ns = 1_000_000_000, stale_ttl_ns = 0, negative_ttl_ns = 0, max_hosts = 8)

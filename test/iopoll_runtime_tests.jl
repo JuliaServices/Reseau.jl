@@ -130,6 +130,9 @@ end
         NP.shutdown!()
         _el_log_test_progress("START: poller-backed sleep/timedwait")
         @testset "poller-backed sleep/timedwait" begin
+            @test IP._saturating_add_ns(Int64(20), Int64(22)) == Int64(42)
+            @test IP._saturating_add_ns(typemax(Int64) - Int64(2), Int64(3)) == typemax(Int64)
+            @test IP._saturating_add_ns(typemin(Int64) + Int64(2), Int64(-3)) == typemin(Int64)
             _el_log_test_progress("poller-backed sleep/timedwait: sleep")
             t0 = time_ns()
             IP.sleep(0.03)

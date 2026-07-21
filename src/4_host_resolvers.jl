@@ -1382,10 +1382,10 @@ function _store_cache_entry_locked!(
     expires_ns = now_ns
     stale_expires_ns = now_ns
     if err === nothing
-        expires_ns += resolver.ttl_ns
-        stale_expires_ns = expires_ns + resolver.stale_ttl_ns
+        expires_ns = IOPoll._saturating_add_ns(now_ns, resolver.ttl_ns)
+        stale_expires_ns = IOPoll._saturating_add_ns(expires_ns, resolver.stale_ttl_ns)
     else
-        expires_ns += resolver.negative_ttl_ns
+        expires_ns = IOPoll._saturating_add_ns(now_ns, resolver.negative_ttl_ns)
         stale_expires_ns = expires_ns
     end
     resolver.entries[key] = _LookupCacheEntry(
@@ -1723,8 +1723,12 @@ end
 
 function _connect_deadline_ns(d::HostResolver)::Int64
     now = Int64(time_ns())
-    timeout_deadline = d.timeout_ns == 0 ? Int64(0) : now + d.timeout_ns
+    timeout_deadline = d.timeout_ns == 0 ? Int64(0) : IOPoll._saturating_add_ns(now, d.timeout_ns)
     return _min_nonzero(timeout_deadline, d.deadline_ns)
+end
+
+@inline function _fallback_deadline_ns(d::HostResolver)::Int64
+    return IOPoll._saturating_add_ns(Int64(time_ns()), _effective_fallback_delay_ns(d))
 end
 
 function _spawn_timer_task(f::F, deadline_ns::Int64) where {F}
@@ -2081,11 +2085,10 @@ function _resolve_parallel(
         end
     end
     _start_racer(true, primaries)
-    delay_ns = _effective_fallback_delay_ns(d)
     # This is the Happy Eyeballs-style stagger: start one address family first,
     # then launch the fallback family if the primary path has not succeeded
     # quickly enough.
-    fallback_timer, fallback_timer_task = _spawn_timer_task(Int64(time_ns()) + delay_ns) do
+    fallback_timer, fallback_timer_task = _spawn_timer_task(_fallback_deadline_ns(d)) do
         _emit_event!(:fallback_timer)
     end
     primary_done = false

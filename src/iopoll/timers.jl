@@ -386,6 +386,15 @@ function _drain_expired_time_entries!(state::Poller, now_ns::Int64)
     end
 end
 
+@inline function _saturating_add_ns(base_ns::Int64, delta_ns::Int64)::Int64
+    if delta_ns > 0
+        base_ns > typemax(Int64) - delta_ns && return typemax(Int64)
+    elseif delta_ns < 0
+        base_ns < typemin(Int64) - delta_ns && return typemin(Int64)
+    end
+    return base_ns + delta_ns
+end
+
 """
     sleep_until_ns(deadline_ns)
 
@@ -412,7 +421,7 @@ sleep heap.
 function sleep_ns(delay_ns::Integer)
     delay = Int64(delay_ns)
     delay <= 0 && return nothing
-    return sleep_until_ns(Int64(time_ns()) + delay)
+    return sleep_until_ns(_saturating_add_ns(Int64(time_ns()), delay))
 end
 
 """
