@@ -1241,6 +1241,20 @@ function _tls12_copy_initial_state(state13::_TLS13NativeClientState)::_TLS12Nati
     return state12
 end
 
+function _activate_native_tls12_state!(
+        conn::Conn,
+        state13::_TLS13NativeClientState,
+    )::_TLS12NativeState
+    conn.native_state === state13 || throw(ArgumentError("tls: stale mixed-version native state transition"))
+    state12 = _tls12_copy_initial_state(state13)
+    # Commit the selected-version state before any TLS 1.2 continuation can
+    # install keys or fail. The connection now owns state12 on both success and
+    # failure, allowing the outer alert path to use the live write cipher.
+    conn.native_state = state12
+    _securezero_tls13_native_client_state!(state13)
+    return state12
+end
+
 function _ensure_open!(conn::Conn, op::AbstractString)
     _is_closed(conn) && throw(_closed_error(op))
     conn.native_state === nothing && throw(_closed_error(op))
@@ -1418,18 +1432,13 @@ function _native_tls_auto_client_handshake!(conn::Conn)::Nothing
         client_hello12 = _unmarshal_client_hello(raw_client_hello)
         client_hello12 === nothing && throw(ArgumentError("tls: malformed native mixed-version ClientHello"))
         state12 = _TLS12ClientHandshakeState(client_hello12, session12)
-        state12_native = _tls12_copy_initial_state(native_state13)
+        state12_native = _activate_native_tls12_state!(conn, native_state13)
         io12 = _TLS12HandshakeRecordIO(conn.tcp, state12_native)
-        installed_state12 = false
         try
             _tls12_set_server_hello!(state12, raw_server_hello)
             _client_handshake_tls12_after_server_hello!(state12, io12, conn.config, raw_client_hello, raw_server_hello, cache_key)
-            conn.native_state = state12_native
-            installed_state12 = true
-            _securezero_tls13_native_client_state!(native_state13)
             _finish_native_tls12_client_handshake!(conn, state12)
         finally
-            installed_state12 || _securezero_tls12_native_state!(state12_native)
             _securezero_tls12_client_handshake_state!(state12)
         end
     finally
@@ -1460,20 +1469,15 @@ function _native_tls_auto_server_handshake!(conn::Conn)::Nothing
         end
         return nothing
     end
-    state12_native = _tls12_copy_initial_state(native_state13)
+    state12_native = _activate_native_tls12_state!(conn, native_state13)
     io12 = _TLS12HandshakeRecordIO(conn.tcp, state12_native)
     state12 = _TLS12ServerHandshakeState(conn.config)
-    installed_state12 = false
     try
         state12.send_downgrade_canary = true
         _tls12_set_client_hello!(state12, raw_client_hello)
         _server_handshake_tls12_after_client_hello!(state12, io12, conn.config, raw_client_hello)
-        conn.native_state = state12_native
-        installed_state12 = true
-        _securezero_tls13_native_client_state!(native_state13)
         _finish_native_tls12_server_handshake!(conn, state12)
     finally
-        installed_state12 || _securezero_tls12_native_state!(state12_native)
         _securezero_tls12_server_handshake_state!(state12)
     end
     return nothing

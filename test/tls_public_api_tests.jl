@@ -3,6 +3,15 @@ using Reseau
 
 isdefined(@__MODULE__, :_RESEAU_TLS_TEST_UTILS_LOADED) || include("tls_test_utils.jl")
 
+function _tls_public_read_record(conn::NC.Conn)::Tuple{Vector{UInt8}, Vector{UInt8}}
+    header = Vector{UInt8}(undef, 5)
+    read!(conn, header)
+    payload_len = (Int(header[4]) << 8) | Int(header[5])
+    payload = Vector{UInt8}(undef, payload_len)
+    payload_len == 0 || read!(conn, payload)
+    return header, payload
+end
+
 @testset "TLS public API" begin
         @testset "direct socket-address connect/listen passthroughs" begin
             if Sys.iswindows() && VERSION < v"1.11.0"
@@ -629,6 +638,216 @@ isdefined(@__MODULE__, :_RESEAU_TLS_TEST_UTILS_LOADED) || include("tls_test_util
                 IP.shutdown!()
             end
         end
+        @testset "mixed-version failures retain the selected TLS 1.2 record state" begin
+            @testset "client pre-CCS failure sends a plaintext alert from TLS 1.2 state" begin
+                IP.shutdown!()
+                listener = nothing
+                client_tls = nothing
+                server_task = nothing
+                try
+                    listener = NC.listen(NC.loopback_addr(0); backlog = 1)
+                    addr = NC.addr(listener)::NC.SocketAddrV4
+                    server_task = errormonitor(Threads.@spawn begin
+                        server_tcp = NC.accept(listener)
+                        try
+                            record = UInt8[]
+                            TL._tls_read_wire_record!(
+                                server_tcp,
+                                record,
+                                TL._TLS12_MAX_CIPHERTEXT,
+                                UInt16(0),
+                            )
+                            client_hello = TL._unmarshal_client_hello(copy(@view record[6:end]))
+                            client_hello === nothing && error("failed to parse mixed ClientHello")
+                            server_hello = TL._ServerHelloMsg()
+                            server_hello.vers = TL.TLS1_2_VERSION
+                            server_hello.random = fill(UInt8(0x44), 32)
+                            server_hello.session_id = copy(client_hello.session_id)
+                            server_hello.cipher_suite = UInt16(0xffff)
+                            raw_server_hello = TL._marshal_server_hello(server_hello)
+                            TL._tls_write_tls_plaintext!(
+                                server_tcp,
+                                TL._TLS_RECORD_TYPE_HANDSHAKE,
+                                raw_server_hello,
+                                TL.TLS1_2_VERSION,
+                            )
+                            return _tls_public_read_record(server_tcp)
+                        finally
+                            _tls_close_quiet!(server_tcp)
+                        end
+                    end)
+
+                    client_tcp = NC.connect(addr)
+                    client_tls = TL.client(client_tcp, TL.Config(
+                        verify_peer = false,
+                        server_name = "localhost",
+                        handshake_timeout_ns = 2_000_000_000,
+                    ))
+                    displaced_state = TL._native_tls13_state(client_tls)
+                    err = try
+                        TL.handshake!(client_tls)
+                        nothing
+                    catch ex
+                        ex
+                    end
+                    @test err isa TL.TLSError
+                    if err isa TL.TLSError
+                        @test err.cause isa TL._TLSAlertError
+                        if err.cause isa TL._TLSAlertError
+                            @test (err.cause::TL._TLSAlertError).alert == TL._TLS_ALERT_HANDSHAKE_FAILURE
+                        end
+                    end
+                    @test client_tls.native_state isa TL._TLS12NativeState
+                    @test displaced_state.version == UInt16(0)
+                    @test isempty(displaced_state.record_buffer)
+
+                    @test _tls_wait_task_done(server_task, 2.0) != :timed_out
+                    header, payload = fetch(server_task)
+                    @test header[1] == TL._TLS_RECORD_TYPE_ALERT
+                    @test header[2:3] == UInt8[0x03, 0x03]
+                    @test payload == UInt8[TL._TLS_ALERT_LEVEL_FATAL, TL._TLS_ALERT_HANDSHAKE_FAILURE]
+                finally
+                    _tls_close_quiet!(client_tls)
+                    _tls_close_quiet!(listener)
+                    server_task isa Task && !istaskdone(server_task) && wait(server_task)
+                    IP.shutdown!()
+                end
+            end
+
+            @testset "server pre-CCS failure sends a plaintext alert from TLS 1.2 state" begin
+                IP.shutdown!()
+                listener = nothing
+                client_tcp = nothing
+                server_tls_ref = Ref{Union{Nothing, TL.Conn}}(nothing)
+                displaced_ref = Ref{Union{Nothing, TL._TLS13NativeClientState}}(nothing)
+                server_task = nothing
+                try
+                    listener = NC.listen(NC.loopback_addr(0); backlog = 1)
+                    addr = NC.addr(listener)::NC.SocketAddrV4
+                    server_task = errormonitor(Threads.@spawn begin
+                        server_tcp = NC.accept(listener)
+                        server_tls = TL.server(server_tcp, _tls_server_config(
+                            handshake_timeout_ns = 2_000_000_000,
+                        ))
+                        server_tls_ref[] = server_tls
+                        displaced_ref[] = TL._native_tls13_state(server_tls)
+                        try
+                            TL.handshake!(server_tls)
+                            return nothing
+                        catch ex
+                            return ex
+                        end
+                    end)
+
+                    client_tcp = NC.connect(addr)
+                    hello = TL._tls_auto_client_hello(TL.Config(
+                        verify_peer = false,
+                        server_name = "localhost",
+                    ))
+                    hello.supported_versions = UInt16[TL.TLS1_2_VERSION]
+                    hello.compression_methods = UInt8[0x01]
+                    TL._tls_write_tls_plaintext!(
+                        client_tcp,
+                        TL._TLS_RECORD_TYPE_HANDSHAKE,
+                        TL._marshal_client_hello(hello),
+                        TL._TLS_LEGACY_RECORD_VERSION,
+                    )
+                    header, payload = _tls_public_read_record(client_tcp)
+
+                    @test _tls_wait_task_done(server_task, 2.0) != :timed_out
+                    err = fetch(server_task)
+                    @test err isa TL.TLSError
+                    if err isa TL.TLSError
+                        @test err.cause isa TL._TLSAlertError
+                        if err.cause isa TL._TLSAlertError
+                            @test (err.cause::TL._TLSAlertError).alert == TL._TLS_ALERT_ILLEGAL_PARAMETER
+                        end
+                    end
+                    server_tls = server_tls_ref[]
+                    @test server_tls isa TL.Conn
+                    if server_tls isa TL.Conn
+                        @test server_tls.native_state isa TL._TLS12NativeState
+                    end
+                    displaced_state = displaced_ref[]
+                    @test displaced_state isa TL._TLS13NativeClientState
+                    if displaced_state isa TL._TLS13NativeClientState
+                        @test displaced_state.version == UInt16(0)
+                        @test isempty(displaced_state.record_buffer)
+                    end
+                    @test header[1] == TL._TLS_RECORD_TYPE_ALERT
+                    @test header[2:3] == UInt8[0x03, 0x03]
+                    @test payload == UInt8[TL._TLS_ALERT_LEVEL_FATAL, TL._TLS_ALERT_ILLEGAL_PARAMETER]
+                finally
+                    _tls_close_quiet!(server_tls_ref[])
+                    _tls_close_quiet!(client_tcp)
+                    _tls_close_quiet!(listener)
+                    server_task isa Task && !istaskdone(server_task) && wait(server_task)
+                    IP.shutdown!()
+                end
+            end
+
+            @testset "post-CCS fatal alert uses the installed TLS 1.2 write cipher" begin
+                IP.shutdown!()
+                listener = nothing
+                client_tls = nothing
+                server_tcp = nothing
+                peer_state = TL._TLS12NativeState()
+                try
+                    listener = NC.listen(NC.loopback_addr(0); backlog = 1)
+                    addr = NC.addr(listener)::NC.SocketAddrV4
+                    accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                    client_tcp = NC.connect(addr)
+                    @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                    server_tcp = fetch(accept_task)
+                    client_tls = TL.client(client_tcp, TL.Config(
+                        verify_peer = false,
+                        server_name = "localhost",
+                    ))
+                    displaced_state = TL._native_tls13_state(client_tls)
+                    displaced_state.version = TL.TLS1_2_VERSION
+                    append!(displaced_state.record_buffer, UInt8[0x71, 0x72])
+                    state12 = TL._activate_native_tls12_state!(client_tls, displaced_state)
+                    @test client_tls.native_state === state12
+                    @test state12.record_buffer == UInt8[0x71, 0x72]
+                    @test isempty(displaced_state.record_buffer)
+
+                    key = UInt8[UInt8(0x20 + i) for i in 0:15]
+                    iv = UInt8[0xa0, 0xa1, 0xa2, 0xa3]
+                    TL._tls12_set_write_cipher!(
+                        state12,
+                        TL._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+                        key,
+                        iv,
+                    )
+                    TL._tls12_set_read_cipher!(
+                        peer_state,
+                        TL._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+                        key,
+                        iv,
+                    )
+                    TL._native_auto_try_write_fatal_alert!(client_tls, TL._TLS_ALERT_BAD_RECORD_MAC)
+                    err = try
+                        TL._tls12_read_record!(server_tcp, peer_state)
+                        nothing
+                    catch ex
+                        ex
+                    end
+                    @test err isa TL._TLSAlertError
+                    if err isa TL._TLSAlertError
+                        @test err.from_peer
+                        @test err.alert == TL._TLS_ALERT_BAD_RECORD_MAC
+                    end
+                    @test (state12.write_cipher::TL._TLS12RecordCipherState).seq == UInt64(1)
+                finally
+                    TL._securezero_tls12_native_state!(peer_state)
+                    _tls_close_quiet!(client_tls)
+                    _tls_close_quiet!(server_tcp)
+                    _tls_close_quiet!(listener)
+                    IP.shutdown!()
+                end
+            end
+        end
+
         @testset "mixed-version native client negotiates TLS 1.2 with an exact TLS 1.2 server" begin
             IP.shutdown!()
             listener = nothing
