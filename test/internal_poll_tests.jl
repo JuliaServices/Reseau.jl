@@ -82,6 +82,24 @@ end
 
 @testset "IOPoll phase 2" begin
         IP.shutdown!()
+        @testset "stream syscall chunk bounds" begin
+            maxrw = 1 << 30
+            @test IP._MAX_RW == maxrw
+            @test IP._max_rw_chunk(0) == 0
+            @test IP._max_rw_chunk(maxrw - 1) == maxrw - 1
+            @test IP._max_rw_chunk(maxrw) == maxrw
+            @test IP._max_rw_chunk(maxrw + 1) == maxrw
+            @test IP._max_rw_chunk(typemax(Int)) == maxrw
+            @test IP._checked_write_advance(3, 4, 4) == 7
+            err = try
+                IP._checked_write_advance(3, 5, 4)
+                nothing
+            catch ex
+                ex
+            end
+            @test err isa ErrorException
+            @test occursin("got 5 from a write of 4", sprint(showerror, err))
+        end
         @testset "read waits then wakes on readability" begin
             fd0, fd1 = _ip_socketpair_stream()
             ipfd = IP.FD(fd0)

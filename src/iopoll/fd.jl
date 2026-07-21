@@ -38,6 +38,18 @@ mutable struct FD
     end
 end
 
+# Darwin and several other socket implementations reject very large individual
+# read/write buffers. Go uses one GiB rather than the largest signed syscall size
+# so successive chunks remain naturally aligned.
+const _MAX_RW = 1 << 30
+
+@inline _max_rw_chunk(nbytes::Int)::Int = min(nbytes, _MAX_RW)
+
+@inline function _checked_write_advance(total::Int, wrote::Int, requested::Int)::Int
+    wrote > requested && throw(ErrorException("invalid return from write: got $wrote from a write of $requested"))
+    return total + wrote
+end
+
 """
     _convert_poll_error!(res, is_file)
 
@@ -705,6 +717,7 @@ Important behavior notes:
   sockets and does not imply EOF
 - once at least one byte has been read, the call returns immediately instead of
   waiting to fill the rest of `p`
+- stream reads submit at most one GiB to an individual OS operation
 - if no bytes are currently available and the descriptor is pollable, the call
   waits for read readiness and then retries
 - a zero-length `p` returns `0` immediately without touching the descriptor
@@ -729,7 +742,7 @@ function _read_ptr_some!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
         @static if Sys.iswindows()
             prepareread(fd.pd, fd.is_file)
             registration = _poll_registration(fd.pd)
-            n = UInt32(min(nbytes, Int(typemax(UInt32))))
+            n = UInt32(_max_rw_chunk(nbytes))
             while true
                 errno = _iocp_submit_read!(registration, p, n)
                 errno == Int32(0) && break
@@ -759,8 +772,9 @@ function _read_ptr_some!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
         # If the read would block, `waitread` refreshes backend event state
         # before parking.
         prepareread(fd.pd, fd.is_file, false)
+        read_size = fd.is_stream ? _max_rw_chunk(nbytes) : nbytes
         while true
-            n = SocketOps.read_once!(fd.sysfd, p, Csize_t(nbytes))
+            n = SocketOps.read_once!(fd.sysfd, p, Csize_t(read_size))
             if n >= 0
                 if n == 0 && fd.zero_read_is_eof
                     throw(EOFError())
@@ -785,7 +799,8 @@ Write all bytes from `p` and return the number of bytes written.
 
 Unlike `read!`, a successful return means the full buffer was written. In
 non-blocking mode this loops on `EAGAIN` by waiting for write readiness and
-then resuming from the first unwritten byte.
+then resuming from the first unwritten byte. Each stream syscall is capped at
+one GiB; larger buffers are written in successive chunks.
 """
 function write!(fd::FD, p::AbstractVector{UInt8})::Int
     data = if p isa StridedVector{UInt8} && stride(p, 1) == 1
@@ -821,7 +836,7 @@ function _write_ptr!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
             while nn < nbytes
                 preparewrite(fd.pd, fd.is_file)
                 registration = _poll_registration(fd.pd)
-                chunk = UInt32(min(nbytes - nn, Int(typemax(UInt32))))
+                chunk = UInt32(_max_rw_chunk(nbytes - nn))
                 while true
                     errno = _iocp_submit_write!(registration, p + nn, chunk)
                     errno == Int32(0) && break
@@ -843,16 +858,18 @@ function _write_ptr!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
                 bytes, result = _iocp_finish_write!(registration)
                 result == Int32(0) || throw(SystemError("write", Int(result)))
                 bytes == UInt32(0) && throw(EOFError())
-                nn += Int(bytes)
+                nn = _checked_write_advance(nn, Int(bytes), Int(chunk))
             end
             return nn
         end
         preparewrite(fd.pd, fd.is_file)
         while true
             nn == nbytes && return nn
-            n = SocketOps.write_once!(fd.sysfd, p + nn, Csize_t(nbytes - nn))
+            remaining = nbytes - nn
+            chunk = fd.is_stream ? _max_rw_chunk(remaining) : remaining
+            n = SocketOps.write_once!(fd.sysfd, p + nn, Csize_t(chunk))
             if n > 0
-                nn += Int(n)
+                nn = _checked_write_advance(nn, Int(n), chunk)
                 continue
             end
             n == 0 && throw(EOFError())
