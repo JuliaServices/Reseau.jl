@@ -662,6 +662,90 @@ end
                 end
             end
         end
+        @testset "tcp6 wildcard is IPv6-only and tcp wildcard accepts IPv4" begin
+            if !_nd_ipv6_supported()
+                @test true
+            else
+                IP.shutdown!()
+                listener6 = nothing
+                listener4 = nothing
+                listener_dual = nothing
+                client = nothing
+                server = nothing
+                accept_task = nothing
+                try
+                    listener6 = NC.listen("tcp6", "[::]:0"; backlog = 8)
+                    addr6 = NC.addr(listener6)::NC.SocketAddrV6
+                    @test listener6.fd.net === :tcp6
+                    @static if !(Sys.isopenbsd() || Sys.isdragonfly())
+                        @test SO.get_sockopt_int(
+                            listener6.fd.pfd.sysfd,
+                            SO.IPPROTO_IPV6,
+                            SO.IPV6_V6ONLY,
+                        ) == 1
+                    end
+
+                    # An IPv4 listener can own the same port only when the
+                    # tcp6 wildcard did not also claim IPv4-mapped traffic.
+                    listener4 = NC.listen(
+                        "tcp4",
+                        "0.0.0.0:$(Int(addr6.port))";
+                        backlog = 8,
+                    )
+                    @test listener4.fd.net === :tcp4
+                    close(listener4)
+                    listener4 = nothing
+
+                    ipv4_err = try
+                        NC.connect(
+                            "tcp4",
+                            "127.0.0.1:$(Int(addr6.port))";
+                            timeout_ns = 500_000_000,
+                        )
+                        nothing
+                    catch ex
+                        ex
+                    end
+                    @test ipv4_err isa ND.OpError
+                    close(listener6)
+                    listener6 = nothing
+
+                    listener_dual = NC.listen("tcp", ":0"; backlog = 8)
+                    dual_addr = NC.addr(listener_dual)
+                    @test listener_dual.fd.net === :tcp
+                    if dual_addr isa NC.SocketAddrV6
+                        @static if !(Sys.isopenbsd() || Sys.isdragonfly())
+                            @test SO.get_sockopt_int(
+                                listener_dual.fd.pfd.sysfd,
+                                SO.IPPROTO_IPV6,
+                                SO.IPV6_V6ONLY,
+                            ) == 0
+                        end
+                    end
+                    port = Int(dual_addr.port)
+                    accept_task = _nd_spawn_accept(listener_dual)
+                    client = NC.connect(
+                        "tcp4",
+                        "127.0.0.1:$port";
+                        timeout_ns = 1_000_000_000,
+                    )
+                    @test _nd_wait_task_done(accept_task, 2.0) != :timed_out
+                    server = fetch(accept_task)
+                    server isa Exception && throw(server)
+                    @test write(client, UInt8[0xa5]) == 1
+                    payload = Vector{UInt8}(undef, 1)
+                    @test _nd_read_exact!(server, payload) == 1
+                    @test payload == UInt8[0xa5]
+                finally
+                    _nd_close_quiet!(server)
+                    _nd_close_quiet!(client)
+                    _nd_close_quiet!(listener_dual)
+                    _nd_close_quiet!(listener4)
+                    _nd_close_quiet!(listener6)
+                    IP.shutdown!()
+                end
+            end
+        end
         @testset "error typing and wrapping (phase 5C)" begin
             resolver_started = Channel{Nothing}(1)
             resolver_release = Channel{Nothing}(1)

@@ -1545,7 +1545,14 @@ lookup_port(resolver::CachingResolver, network::AbstractString, service::Abstrac
 
 @inline function _wildcard_addrs(kind::Symbol, op::Symbol)::Vector{TCP.SocketEndpoint}
     if kind == :tcp && op == :listen
-        return TCP.SocketEndpoint[TCP.any_addr6(0), TCP.any_addr(0)]
+        @static if Sys.isopenbsd() || Sys.isdragonfly()
+            # These kernels do not support IPv4-mapped IPv6 listeners, so a
+            # generic wildcard must prefer IPv4 just as Go's capability probe
+            # does. Explicit tcp6 and explicit [::] requests remain IPv6.
+            return TCP.SocketEndpoint[TCP.any_addr(0), TCP.any_addr6(0)]
+        else
+            return TCP.SocketEndpoint[TCP.any_addr6(0), TCP.any_addr(0)]
+        end
     end
     return TCP.SocketEndpoint[TCP.any_addr(0), TCP.any_addr6(0)]
 end
@@ -2445,7 +2452,7 @@ function listen(
         backlog::Integer = 128,
         reuseaddr::Bool = true,
     )::TCP.Listener
-    try
+    kind = try
         _network_kind(network)
     catch err
         throw(_wrap_op_error("listen", network, nothing, nothing, _as_exception(err)))
@@ -2458,7 +2465,12 @@ function listen(
     first_err::Union{Nothing, Exception} = nothing
     for local_addr in addrs
         try
-            return TCP.listen(local_addr; backlog = backlog, reuseaddr = reuseaddr)
+            return TCP._listen_socketaddr_impl(
+                local_addr,
+                kind;
+                backlog = backlog,
+                reuseaddr = reuseaddr,
+            )
         catch err
             first_err === nothing && (first_err = _as_exception(err))
         end

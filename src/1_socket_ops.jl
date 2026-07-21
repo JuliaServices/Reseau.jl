@@ -41,6 +41,8 @@ const MSG_PEEK = Cint(0x02)
 
 const SOL_SOCKET = @static Sys.islinux() ? Cint(1) : Cint(0xffff)
 const IPPROTO_TCP = Cint(6)
+const IPPROTO_IPV6 = Cint(41)
+const IPV6_V6ONLY = @static Sys.islinux() ? Cint(26) : Cint(27)
 const SO_ERROR = @static Sys.islinux() ? Cint(0x0004) : Cint(0x1007)
 const SO_REUSEADDR = @static Sys.islinux() ? Cint(0x0002) : Cint(0x0004)
 const SO_KEEPALIVE = @static Sys.islinux() ? Cint(0x0009) : Cint(0x0008)

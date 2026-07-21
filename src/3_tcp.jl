@@ -502,9 +502,12 @@ issue readiness-driven operations should call `IOPoll.register!` before use.
 Returns an internal `FD` object and throws `SystemError` on socket creation
 failure.
 """
-function open_tcp_fd!(; family::Cint = SocketOps.AF_INET)::FD
+function open_tcp_fd!(;
+        family::Cint = SocketOps.AF_INET,
+        net::Symbol = :tcp,
+    )::FD
     sysfd = SocketOps.open_socket(family, SocketOps.SOCK_STREAM)
-    return _new_netfd(sysfd; family = family, sotype = SocketOps.SOCK_STREAM, net = :tcp, is_connected = false)
+    return _new_netfd(sysfd; family = family, sotype = SocketOps.SOCK_STREAM, net = net, is_connected = false)
 end
 
 @inline function _connect_socketaddr_family(
@@ -640,10 +643,32 @@ Create a TCP listener from a bound local address.
 This is the direct-address equivalent of the `listen(network, address; ...)`
 overloads on the same `TCP.listen` generic.
 """
-function listen(local_addr::SocketAddr; backlog::Integer = 128, reuseaddr::Bool = true)::Listener
+@inline function _set_ipv6_only!(fd::FD, enabled::Bool)
+    @static if Sys.isopenbsd() || Sys.isdragonfly()
+        # These kernels enforce IPv6-only sockets and reject attempts to change
+        # IPV6_V6ONLY. This is the same capability exception Go applies.
+        return nothing
+    else
+        SocketOps.set_sockopt_int(
+            fd.pfd.sysfd,
+            SocketOps.IPPROTO_IPV6,
+            SocketOps.IPV6_V6ONLY,
+            enabled ? 1 : 0,
+        )
+        return nothing
+    end
+end
+
+function _listen_socketaddr_impl(
+        local_addr::SocketAddr,
+        network::Symbol;
+        backlog::Integer,
+        reuseaddr::Bool,
+    )::Listener
     family = _addr_family(local_addr)
-    fd = open_tcp_fd!(; family = family)
+    fd = open_tcp_fd!(; family = family, net = network)
     try
+        family == SocketOps.AF_INET6 && _set_ipv6_only!(fd, network === :tcp6)
         reuseaddr && SocketOps.set_sockopt_int(fd.pfd.sysfd, SocketOps.SOL_SOCKET, SocketOps.SO_REUSEADDR, 1)
         SocketOps.bind_socket(fd.pfd.sysfd, _to_sockaddr(local_addr))
         SocketOps.listen_socket(fd.pfd.sysfd, backlog)
@@ -654,6 +679,15 @@ function listen(local_addr::SocketAddr; backlog::Integer = 128, reuseaddr::Bool 
         close(fd)
         rethrow()
     end
+end
+
+function listen(local_addr::SocketAddr; backlog::Integer = 128, reuseaddr::Bool = true)::Listener
+    return _listen_socketaddr_impl(
+        local_addr,
+        :tcp;
+        backlog = backlog,
+        reuseaddr = reuseaddr,
+    )
 end
 
 """
