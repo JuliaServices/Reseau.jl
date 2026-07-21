@@ -833,24 +833,29 @@ end
 function _peek_eof(conn::Conn)::Bool
     pfd = conn.fd.pfd
     pref = Ref{UInt8}(0x00)
-    while true
-        IOPoll.prepareread(pfd.pd, pfd.is_file)
-        n = GC.@preserve pref SocketOps.recv_from!(
-            pfd.sysfd,
-            Base.unsafe_convert(Ptr{UInt8}, pref),
-            Csize_t(1),
-            SocketOps.MSG_PEEK,
-        )
-        if n > 0
-            return false
+    IOPoll._fd_read_lock!(pfd)
+    try
+        while true
+            IOPoll.prepareread(pfd.pd, pfd.is_file)
+            n = GC.@preserve pref SocketOps.recv_from!(
+                pfd.sysfd,
+                Base.unsafe_convert(Ptr{UInt8}, pref),
+                Csize_t(1),
+                SocketOps.MSG_PEEK,
+            )
+            if n > 0
+                return false
+            end
+            n == 0 && return true
+            errno = SocketOps.last_error()
+            if errno == Int32(Base.Libc.EAGAIN) && IOPoll.pollable(pfd.pd)
+                IOPoll.waitread(pfd.pd, pfd.is_file)
+                continue
+            end
+            throw(SystemError("recv(MSG_PEEK)", Int(errno)))
         end
-        n == 0 && return true
-        errno = SocketOps.last_error()
-        if errno == Int32(Base.Libc.EAGAIN) && IOPoll.pollable(pfd.pd)
-            IOPoll.waitread(pfd.pd, pfd.is_file)
-            continue
-        end
-        throw(SystemError("recv(MSG_PEEK)", Int(errno)))
+    finally
+        IOPoll._fd_read_unlock!(pfd)
     end
 end
 
@@ -864,6 +869,10 @@ This is the primitive that powers Julia's standard `read!` behavior once
 """
 function Base.unsafe_read(conn::Conn, ptr::Ptr{UInt8}, nbytes::UInt)
     remaining = Int(nbytes)
+    if remaining == 0
+        _read_some!(conn, ptr, 0)
+        return nothing
+    end
     offset = 0
     while remaining > 0
         n = _read_some!(conn, ptr + offset, remaining)
@@ -975,7 +984,10 @@ function Base.readbytes!(conn::Conn, buf::MutableByteBuffer, nb::Integer = lengt
     Base.require_one_based_indexing(buf)
     requested = Int(nb)
     requested < 0 && throw(ArgumentError("nb must be >= 0"))
-    requested == 0 && return 0
+    if requested == 0
+        _read_some!(conn, Ptr{UInt8}(C_NULL), 0)
+        return 0
+    end
     return all ? _readbytes_all!(conn, buf, requested) : _readbytes_some!(conn, buf, requested)
 end
 
@@ -1036,7 +1048,7 @@ end
 Return `true` while `conn` still owns an open socket.
 """
 function Base.isopen(conn::Conn)::Bool
-    return conn.fd.pfd.sysfd >= 0
+    return !IOPoll._fdlock_closing(conn.fd.pfd.fdlock)
 end
 
 function Base.flush(::Conn)
@@ -1182,7 +1194,7 @@ end
 Return `true` while `listener` still owns an open listening socket.
 """
 function Base.isopen(listener::Listener)::Bool
-    return listener.fd.pfd.sysfd >= 0
+    return !IOPoll._fdlock_closing(listener.fd.pfd.fdlock)
 end
 
 """
@@ -1330,8 +1342,8 @@ end
     return nothing
 end
 
-@inline _show_state(conn::Conn) = conn.fd.pfd.sysfd >= 0 ? "open" : "closed"
-@inline _show_state(listener::Listener) = listener.fd.pfd.sysfd >= 0 ? "active" : "closed"
+@inline _show_state(conn::Conn) = IOPoll._fdlock_closing(conn.fd.pfd.fdlock) ? "closed" : "open"
+@inline _show_state(listener::Listener) = IOPoll._fdlock_closing(listener.fd.pfd.fdlock) ? "closed" : "active"
 
 function Base.show(io::IO, conn::Conn)
     print(io, "TCP.Conn(")

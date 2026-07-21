@@ -219,3 +219,7 @@ function _fdlock_rwunlock!(mu::FDLock, read_lock::Bool)::Bool
         return (new & (_MUTEX_CLOSED | _MUTEX_REF_MASK)) == _MUTEX_CLOSED
     end
 end
+
+@inline function _fdlock_closing(mu::FDLock)::Bool
+    return ((@atomic :acquire mu.state) & _MUTEX_CLOSED) != 0
+end
