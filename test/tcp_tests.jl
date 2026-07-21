@@ -56,6 +56,15 @@ end
 @testset "TCP phase 4" begin
         @test NC.Conn <: IO
         @test NC.DeadlineExceededError === IP.DeadlineExceededError
+        @testset "wildcard dial destinations follow Go local-address mapping" begin
+            v4 = NC.any_addr(8080)
+            v6 = NC.any_addr6(8080; scope_id = 7)
+            concrete = NC.loopback_addr(8080)
+            @test NC._wildcard_remote_to_local(v4, :tcp) == NC.loopback_addr(8080)
+            @test NC._wildcard_remote_to_local(v6, :tcp) == NC.loopback_addr(8080)
+            @test NC._wildcard_remote_to_local(v6, :tcp6) == NC.loopback_addr6(8080; scope_id = 7)
+            @test NC._wildcard_remote_to_local(concrete, :tcp) === concrete
+        end
         @testset "connect/listen/accept and address snapshots" begin
             IP.shutdown!()
             listener = nothing

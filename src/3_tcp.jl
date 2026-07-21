@@ -537,6 +537,35 @@ end
     return family
 end
 
+@inline _is_wildcard_addr(addr::SocketAddrV4)::Bool = addr.ip == (0x00, 0x00, 0x00, 0x00)
+@inline _is_wildcard_addr(addr::SocketAddrV6)::Bool = all(iszero, addr.ip)
+
+@inline function _wildcard_remote_to_local(
+        remote_addr::SocketAddr,
+        network::Symbol,
+    )::SocketAddr
+    _is_wildcard_addr(remote_addr) || return remote_addr
+    if network === :tcp6
+        scope_id = remote_addr isa SocketAddrV6 ? remote_addr.scope_id : UInt32(0)
+        return loopback_addr6(remote_addr.port; scope_id = scope_id)
+    end
+    return loopback_addr(remote_addr.port)
+end
+
+@inline function _prepare_dial_remote_addr(
+        remote_addr::SocketAddr,
+        network::Symbol,
+    )::SocketAddr
+    # Go's internetSocket rewrites wildcard dial destinations on kernels that
+    # do not consistently interpret them as the local host. In particular,
+    # ConnectEx rejects 0.0.0.0/:: as a remote address on Windows.
+    @static if Sys.iswindows() || Sys.isfreebsd() || Sys.isopenbsd()
+        return _wildcard_remote_to_local(remote_addr, network)
+    else
+        return remote_addr
+    end
+end
+
 @inline function _clear_connect_write_deadline!(fd::FD, connect_deadline_ns::Int64)
     connect_deadline_ns == 0 && return nothing
     try
@@ -713,6 +742,7 @@ function _dial_socketaddr_impl(
         cancel_state,
         network::Symbol,
     )::Conn
+    remote_addr = _prepare_dial_remote_addr(remote_addr, network)
     return _dial_socketaddr_with(
         remote_addr,
         local_addr,
