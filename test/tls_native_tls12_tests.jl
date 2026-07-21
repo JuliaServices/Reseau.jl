@@ -271,6 +271,92 @@ end
         end
     end
 
+    @testset "fragmented handshake enforces TLS 1.2 CCS boundary" begin
+        partial = UInt8[TL12N._HANDSHAKE_TYPE_FINISHED, 0x00, 0x00]
+        tail = UInt8[0x01, 0xaa]
+
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        try
+            listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
+            state = TL12N._TLS12NativeState()
+            state.version = TL12N.TLS1_2_VERSION
+            TL12N._tls_write_tls_plaintext!(
+                client_tcp,
+                TL12N._TLS_RECORD_TYPE_HANDSHAKE,
+                partial,
+                TL12N.TLS1_2_VERSION,
+            )
+            TL12N._tls12_read_record!(server_tcp, state)
+            TL12N._tls_write_tls_plaintext!(
+                client_tcp,
+                TL12N._TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC,
+                UInt8[0x01],
+                TL12N.TLS1_2_VERSION,
+            )
+            err = _tls12_unexpected_message_error(() -> TL12N._tls12_read_record!(server_tcp, state))
+            @test occursin("interrupted", err.message)
+        finally
+            _tls12_native_close_quiet!(server_tcp)
+            _tls12_native_close_quiet!(client_tcp)
+            _tls12_native_close_quiet!(listener)
+        end
+
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        try
+            listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
+            state = TL12N._TLS12NativeState()
+            state.version = TL12N.TLS1_2_VERSION
+            TL12N._tls_write_tls_plaintext!(client_tcp, TL12N._TLS_RECORD_TYPE_HANDSHAKE, partial, TL12N.TLS1_2_VERSION)
+            TL12N._tls12_read_record!(server_tcp, state)
+            TL12N._tls_write_tls_plaintext!(
+                client_tcp,
+                TL12N._TLS_RECORD_TYPE_ALERT,
+                UInt8[TL12N._TLS_ALERT_LEVEL_FATAL, TL12N._TLS_ALERT_HANDSHAKE_FAILURE],
+                TL12N.TLS1_2_VERSION,
+            )
+            alert_err = try
+                TL12N._tls12_read_record!(server_tcp, state)
+                nothing
+            catch ex
+                ex
+            end
+            @test alert_err isa TL12N._TLSAlertError
+            if alert_err isa TL12N._TLSAlertError
+                @test alert_err.from_peer
+                @test alert_err.alert == TL12N._TLS_ALERT_HANDSHAKE_FAILURE
+            end
+        finally
+            _tls12_native_close_quiet!(server_tcp)
+            _tls12_native_close_quiet!(client_tcp)
+            _tls12_native_close_quiet!(listener)
+        end
+
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        try
+            listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
+            state = TL12N._TLS12NativeState()
+            state.version = TL12N.TLS1_2_VERSION
+            TL12N._tls_write_tls_plaintext!(client_tcp, TL12N._TLS_RECORD_TYPE_HANDSHAKE, partial, TL12N.TLS1_2_VERSION)
+            TL12N._tls_write_tls_plaintext!(client_tcp, TL12N._TLS_RECORD_TYPE_HANDSHAKE, tail, TL12N.TLS1_2_VERSION)
+            TL12N._tls12_read_record!(server_tcp, state)
+            TL12N._tls12_read_record!(server_tcp, state)
+            @test TL12N._tls12_try_take_handshake_message!(state) == vcat(partial, tail)
+
+            TL12N._tls_write_tls_plaintext!(client_tcp, TL12N._TLS_RECORD_TYPE_HANDSHAKE, UInt8[], TL12N.TLS1_2_VERSION)
+            _tls12_unexpected_message_error(() -> TL12N._tls12_read_record!(server_tcp, state))
+        finally
+            _tls12_native_close_quiet!(server_tcp)
+            _tls12_native_close_quiet!(client_tcp)
+            _tls12_native_close_quiet!(listener)
+        end
+    end
+
     @testset "record layer rejects authenticated oversized plaintext" begin
         listener = nothing
         client_tcp = nothing

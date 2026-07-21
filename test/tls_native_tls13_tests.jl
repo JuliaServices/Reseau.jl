@@ -46,6 +46,21 @@ function _read_tls_record(conn::NCN.Conn)
     return header, payload
 end
 
+function _tls13_unexpected_message_error(f)
+    err = try
+        f()
+        nothing
+    catch ex
+        ex
+    end
+    @test err isa TLN._TLSAlertError
+    if err isa TLN._TLSAlertError
+        @test err.alert == TLN._TLS_ALERT_UNEXPECTED_MESSAGE
+        @test !err.from_peer
+    end
+    return err
+end
+
 function _assert_no_pending_tcp_bytes(conn::NCN.Conn)
     NCN.set_read_deadline!(conn, time_ns() + 50_000_000)
     try
@@ -329,6 +344,106 @@ end
                     IPN.shutdown!()
                 end
             end
+        end
+    end
+
+    @testset "fragmented handshake records reject TLS 1.3 interleaving" begin
+        partial = UInt8[TLN._HANDSHAKE_TYPE_FINISHED, 0x00, 0x00]
+        tail = UInt8[0x01, 0xaa]
+        interrupts = (
+            (
+                "ChangeCipherSpec",
+                TLN._TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC,
+                UInt8[0x01],
+            ),
+            (
+                "alert",
+                TLN._TLS_RECORD_TYPE_ALERT,
+                UInt8[TLN._TLS_ALERT_LEVEL_FATAL, TLN._TLS_ALERT_HANDSHAKE_FAILURE],
+            ),
+            (
+                "application data",
+                TLN._TLS_RECORD_TYPE_APPLICATION_DATA,
+                UInt8[0x42],
+            ),
+        )
+        for (label, content_type, payload) in interrupts
+            @testset "plaintext $label" begin
+                IPN.shutdown!()
+                listener = nothing
+                client_tcp = nothing
+                server_tcp = nothing
+                try
+                    listener, client_tcp, server_tcp = _open_tcp_pair()
+                    state = TLN._TLS13NativeClientState()
+                    state.version = TLN.TLS1_3_VERSION
+                    TLN._tls_write_tls_plaintext!(
+                        client_tcp,
+                        TLN._TLS_RECORD_TYPE_HANDSHAKE,
+                        partial,
+                        TLN.TLS1_2_VERSION,
+                    )
+                    TLN._tls13_read_record!(server_tcp, state)
+                    TLN._tls_write_tls_plaintext!(client_tcp, content_type, payload, TLN.TLS1_2_VERSION)
+                    err = _tls13_unexpected_message_error(() -> TLN._tls13_read_record!(server_tcp, state))
+                    err isa TLN._TLSAlertError && @test occursin("interrupted", err.message)
+                finally
+                    _tls_native_close_quiet!(server_tcp)
+                    _tls_native_close_quiet!(client_tcp)
+                    _tls_native_close_quiet!(listener)
+                    IPN.shutdown!()
+                end
+            end
+        end
+
+        for (label, content_type, payload) in interrupts[2:3]
+            @testset "encrypted $label" begin
+                IPN.shutdown!()
+                listener = nothing
+                client_tcp = nothing
+                server_tcp = nothing
+                client_state = nothing
+                server_state = nothing
+                try
+                    listener, client_tcp, server_tcp = _open_tcp_pair()
+                    client_state, server_state, _, _ = _tls13_record_state_pair()
+                    TLN._tls13_write_record!(client_tcp, client_state, TLN._TLS_RECORD_TYPE_HANDSHAKE, partial)
+                    TLN._tls13_read_record!(server_tcp, server_state)
+                    TLN._tls13_write_record!(client_tcp, client_state, content_type, payload)
+                    err = _tls13_unexpected_message_error(() -> TLN._tls13_read_record!(server_tcp, server_state))
+                    err isa TLN._TLSAlertError && @test occursin("interrupted", err.message)
+                finally
+                    client_state isa TLN._TLS13NativeClientState && TLN._securezero_tls13_native_client_state!(client_state)
+                    server_state isa TLN._TLS13NativeClientState && TLN._securezero_tls13_native_client_state!(server_state)
+                    _tls_native_close_quiet!(server_tcp)
+                    _tls_native_close_quiet!(client_tcp)
+                    _tls_native_close_quiet!(listener)
+                    IPN.shutdown!()
+                end
+            end
+        end
+
+        IPN.shutdown!()
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        try
+            listener, client_tcp, server_tcp = _open_tcp_pair()
+            state = TLN._TLS13NativeClientState()
+            state.version = TLN.TLS1_3_VERSION
+            TLN._tls_write_tls_plaintext!(client_tcp, TLN._TLS_RECORD_TYPE_HANDSHAKE, partial, TLN.TLS1_2_VERSION)
+            TLN._tls_write_tls_plaintext!(client_tcp, TLN._TLS_RECORD_TYPE_HANDSHAKE, tail, TLN.TLS1_2_VERSION)
+            TLN._tls13_read_record!(server_tcp, state)
+            TLN._tls13_read_record!(server_tcp, state)
+            @test TLN._tls13_try_take_handshake_message!(state) == vcat(partial, tail)
+
+            TLN._tls_write_tls_plaintext!(client_tcp, TLN._TLS_RECORD_TYPE_HANDSHAKE, UInt8[], TLN.TLS1_2_VERSION)
+            _tls13_unexpected_message_error(() -> TLN._tls13_read_record!(server_tcp, state))
+        finally
+            _tls_native_close_quiet!(server_tcp)
+            _tls_native_close_quiet!(client_tcp)
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
         end
     end
 

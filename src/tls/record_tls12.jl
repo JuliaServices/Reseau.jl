@@ -333,6 +333,8 @@ function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeState)::Nothing
     end
     if content_type == _TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC
         payload_len == 1 && payload[1] == 0x01 || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 ChangeCipherSpec record")
+        _tls_buffer_available(state.handshake_buffer, state.handshake_buffer_pos) == 0 ||
+            _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: TLS 1.2 handshake message interrupted by ChangeCipherSpec")
         state.read_cipher === nothing || _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected post-handshake TLS 1.2 ChangeCipherSpec")
         state.received_change_cipher_spec && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received duplicate TLS 1.2 ChangeCipherSpec")
         state.received_change_cipher_spec = true
@@ -341,12 +343,11 @@ function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeState)::Nothing
     end
     if state.read_cipher === nothing
         if content_type == _TLS_RECORD_TYPE_HANDSHAKE
-            if payload_len != 0
-                append!(state.handshake_buffer, payload)
-                length(state.handshake_buffer) <= _TLS12_MAX_HANDSHAKE_BUFFER ||
-                    _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received too much buffered TLS 1.2 handshake data")
-                _tls_reset_useless_record_count!(state)
-            end
+            payload_len != 0 || _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received empty TLS 1.2 handshake record")
+            append!(state.handshake_buffer, payload)
+            length(state.handshake_buffer) <= _TLS12_MAX_HANDSHAKE_BUFFER ||
+                _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received too much buffered TLS 1.2 handshake data")
+            _tls_reset_useless_record_count!(state)
             return nothing
         end
         if content_type == _TLS_RECORD_TYPE_ALERT
@@ -390,10 +391,11 @@ function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeState)::Nothing
         if content_type == _TLS_RECORD_TYPE_HANDSHAKE
             state.allow_encrypted_handshake ||
                 _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected post-handshake TLS 1.2 handshake message")
+            isempty(plaintext) && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received empty TLS 1.2 handshake record")
             append!(state.handshake_buffer, plaintext)
             length(state.handshake_buffer) <= _TLS12_MAX_HANDSHAKE_BUFFER ||
                 _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received too much buffered TLS 1.2 handshake data")
-            !isempty(plaintext) && _tls_reset_useless_record_count!(state)
+            _tls_reset_useless_record_count!(state)
         elseif content_type == _TLS_RECORD_TYPE_APPLICATION_DATA
             if isempty(plaintext)
                 _tls_note_useless_record!(state, "tls: too many ignored TLS records")

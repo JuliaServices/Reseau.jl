@@ -340,13 +340,16 @@ function _tls13_process_inner_plaintext!(state::_TLS13NativeClientState, inner::
     idx >= 1 || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: TLS 1.3 record is missing an inner content type")
     content_type = inner[idx]
     payload_len = idx - 1
+    if content_type != _TLS_RECORD_TYPE_HANDSHAKE &&
+       _tls_buffer_available(state.handshake_buffer, state.handshake_buffer_pos) > 0
+        _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: TLS 1.3 handshake message interrupted by another record")
+    end
     if content_type == _TLS_RECORD_TYPE_HANDSHAKE
-        if payload_len != 0
-            append!(state.handshake_buffer, @view(inner[1:payload_len]))
-            length(state.handshake_buffer) <= _TLS13_MAX_HANDSHAKE_BUFFER ||
-                _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received too much buffered TLS 1.3 handshake data")
-        end
-        return payload_len != 0
+        payload_len != 0 || _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received empty TLS 1.3 handshake record")
+        append!(state.handshake_buffer, @view(inner[1:payload_len]))
+        length(state.handshake_buffer) <= _TLS13_MAX_HANDSHAKE_BUFFER ||
+            _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received too much buffered TLS 1.3 handshake data")
+        return true
     end
     if content_type == _TLS_RECORD_TYPE_APPLICATION_DATA
         if payload_len == 0
@@ -376,6 +379,10 @@ function _tls13_read_record!(tcp::TCP.Conn, state::_TLS13NativeClientState)::Not
     if state.read_cipher === nothing && payload_len > _TLS13_MAX_PLAINTEXT
         _tls_fail(_TLS_ALERT_RECORD_OVERFLOW, "tls: received oversized TLS 1.3 plaintext record")
     end
+    if content_type != _TLS_RECORD_TYPE_HANDSHAKE &&
+       _tls_buffer_available(state.handshake_buffer, state.handshake_buffer_pos) > 0
+        _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: TLS 1.3 handshake message interrupted by another record")
+    end
     if content_type == _TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC
         payload_len == 1 && payload[1] == 0x01 || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed ChangeCipherSpec record")
         _tls_note_useless_record!(state, "tls: too many ignored TLS records")
@@ -383,12 +390,11 @@ function _tls13_read_record!(tcp::TCP.Conn, state::_TLS13NativeClientState)::Not
     end
     if state.read_cipher === nothing
         if content_type == _TLS_RECORD_TYPE_HANDSHAKE
-            if payload_len != 0
-                append!(state.handshake_buffer, payload)
-                length(state.handshake_buffer) <= _TLS13_MAX_HANDSHAKE_BUFFER ||
-                    _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received too much buffered TLS 1.3 handshake data")
-                _tls_reset_useless_record_count!(state)
-            end
+            payload_len != 0 || _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received empty TLS 1.3 handshake record")
+            append!(state.handshake_buffer, payload)
+            length(state.handshake_buffer) <= _TLS13_MAX_HANDSHAKE_BUFFER ||
+                _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received too much buffered TLS 1.3 handshake data")
+            _tls_reset_useless_record_count!(state)
             return nothing
         end
         if content_type == _TLS_RECORD_TYPE_ALERT
