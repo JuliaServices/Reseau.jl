@@ -69,10 +69,33 @@ task at a time.
 """
 mutable struct PollWaiter
     @atomic state::PollWaiterState.T
-    task::Union{Nothing, Task}
+    @atomic task::Union{Nothing, Task}
     function PollWaiter()
         return new(PollWaiterState.EMPTY, nothing)
     end
+end
+
+@inline function _release_pollwait_owner!(waiter::PollWaiter, task::Task)
+    owner, released = @atomicreplace(waiter.task, task => nothing)
+    released || throw(ArgumentError("invalid PollWaiter task owner: $owner"))
+    return nothing
+end
+
+function _abort_pollwait_owner!(waiter::PollWaiter, task::Task)
+    while true
+        state = @atomic :acquire waiter.state
+        state == PollWaiterState.EMPTY && break
+        if state == PollWaiterState.WAITING ||
+           state == PollWaiterState.NOTIFIED ||
+           state == PollWaiterState.CANCELED
+            _, cleared = @atomicreplace(waiter.state, state => PollWaiterState.EMPTY)
+            cleared && break
+            continue
+        end
+        throw(ArgumentError("invalid PollWaiter state"))
+    end
+    _release_pollwait_owner!(waiter, task)
+    return nothing
 end
 
 """
@@ -88,36 +111,65 @@ simultaneously, or if the waiter state machine is observed in an invalid state.
 """
 function pollwait!(waiter::PollWaiter)::PollWakeReason.T
     task = current_task()
+    _, owns_waiter = @atomicreplace(waiter.task, nothing => task)
+    owns_waiter || throw(ArgumentError("concurrent wait on PollWaiter"))
+    released_owner = false
     # Intentionally preserve the caller's task stickiness. The poller wakes this
     # task via `schedule(task)`; for a migratable task that drops it into the
     # global run-queue, waking a cold parked worker whose cost scales with
     # nthreads. Stickiness is the caller's choice (`@async` to pin a hot reader,
     # `Threads.@spawn` to stay migratable) — don't override it here.
-    waiter.task = task
     try
-        # Fast path: transition directly from EMPTY -> WAITING and park.
-        state, ok = @atomicreplace(waiter.state, PollWaiterState.EMPTY => PollWaiterState.WAITING)
-        if ok
-            wait()
-        else
-            (state == PollWaiterState.NOTIFIED || state == PollWaiterState.CANCELED) ||
-                throw(ArgumentError("concurrent wait on PollWaiter"))
-        end
+        # Claim the empty state only after publishing the atomic task owner.
+        # Notifications that arrive first stay latched and are consumed below
+        # without parking.
         while true
+            state = @atomic :acquire waiter.state
+            if state == PollWaiterState.EMPTY
+                _, waiting = @atomicreplace(waiter.state, PollWaiterState.EMPTY => PollWaiterState.WAITING)
+                waiting && break
+                continue
+            end
+            if state == PollWaiterState.NOTIFIED
+                _, consumed = @atomicreplace(waiter.state, PollWaiterState.NOTIFIED => PollWaiterState.EMPTY)
+                consumed || continue
+                _release_pollwait_owner!(waiter, task)
+                released_owner = true
+                return PollWakeReason.READY
+            end
+            if state == PollWaiterState.CANCELED
+                _, consumed = @atomicreplace(waiter.state, PollWaiterState.CANCELED => PollWaiterState.EMPTY)
+                consumed || continue
+                _release_pollwait_owner!(waiter, task)
+                released_owner = true
+                return PollWakeReason.CANCELED
+            end
+            throw(ArgumentError("invalid PollWaiter state"))
+        end
+
+        while true
+            wait()
             # The notification state carries its reason in the same atomic word,
             # so consuming the token cannot race a separate reason publication.
             state, ok = @atomicreplace(waiter.state, PollWaiterState.NOTIFIED => PollWaiterState.EMPTY)
-            ok && return PollWakeReason.READY
+            if ok
+                _release_pollwait_owner!(waiter, task)
+                released_owner = true
+                return PollWakeReason.READY
+            end
             if state == PollWaiterState.CANCELED
                 state, ok = @atomicreplace(waiter.state, PollWaiterState.CANCELED => PollWaiterState.EMPTY)
-                ok && return PollWakeReason.CANCELED
+                if ok
+                    _release_pollwait_owner!(waiter, task)
+                    released_owner = true
+                    return PollWakeReason.CANCELED
+                end
                 continue
             end
             state == PollWaiterState.WAITING || throw(ArgumentError("invalid PollWaiter state"))
-            wait()
         end
     finally
-        waiter.task = nothing
+        released_owner || _abort_pollwait_owner!(waiter, task)
     end
 end
 
@@ -147,13 +199,18 @@ function pollnotify!(waiter::PollWaiter, reason::PollWakeReason.T = PollWakeReas
         end
         notified_state = reason == PollWakeReason.READY ? PollWaiterState.NOTIFIED : PollWaiterState.CANCELED
         previous_state = state
+        task = if previous_state == PollWaiterState.WAITING
+            owner = @atomic :acquire waiter.task
+            owner isa Task || throw(ArgumentError("invalid PollWaiter task state"))
+            owner::Task
+        else
+            nothing
+        end
         state, ok = @atomicreplace(waiter.state, previous_state => notified_state)
         ok || continue
         if previous_state == PollWaiterState.WAITING
-            task = waiter.task
-            task isa Task || throw(ArgumentError("invalid PollWaiter task state"))
             # `schedule(task)` is the low-level dual of the `wait()` above.
-            schedule(task)
+            schedule(task::Task)
             return true
         end
         previous_state == PollWaiterState.EMPTY || throw(ArgumentError("invalid PollWaiter state"))

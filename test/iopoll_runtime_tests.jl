@@ -174,6 +174,49 @@ end
             @test !NP.pollnotify!(waiter, NP.PollWakeReason.CANCELED)
             @test NP.pollwait!(waiter) == NP.PollWakeReason.CANCELED
             @test (@atomic :acquire waiter.state) == NP.PollWaiterState.EMPTY
+            @test (@atomic :acquire waiter.task) === nothing
+
+            waiter = NP.PollWaiter()
+            owner_task = Threads.@spawn NP.pollwait!(waiter)
+            while (@atomic :acquire waiter.state) != NP.PollWaiterState.WAITING && !istaskdone(owner_task)
+                yield()
+            end
+            published_owner = @atomic :acquire waiter.task
+            @test published_owner === owner_task
+            concurrent_err = try
+                NP.pollwait!(waiter)
+                nothing
+            catch err
+                err
+            end
+            @test concurrent_err isa ArgumentError
+            @test (@atomic :acquire waiter.task) === published_owner
+            @test NP.pollnotify!(waiter, NP.PollWakeReason.READY)
+            @test fetch(owner_task) == NP.PollWakeReason.READY
+            @test (@atomic :acquire waiter.state) == NP.PollWaiterState.EMPTY
+            @test (@atomic :acquire waiter.task) === nothing
+
+            interrupted_waiter = NP.PollWaiter()
+            interrupted_task = Threads.@spawn NP.pollwait!(interrupted_waiter)
+            while (@atomic :acquire interrupted_waiter.state) != NP.PollWaiterState.WAITING && !istaskdone(interrupted_task)
+                yield()
+            end
+            schedule(interrupted_task, InterruptException(); error = true)
+            @test_throws TaskFailedException fetch(interrupted_task)
+            @test (@atomic :acquire interrupted_waiter.state) == NP.PollWaiterState.EMPTY
+            @test (@atomic :acquire interrupted_waiter.task) === nothing
+            @test !NP.pollnotify!(interrupted_waiter, NP.PollWakeReason.READY)
+            @test NP.pollwait!(interrupted_waiter) == NP.PollWakeReason.READY
+
+            for reason in (NP.PollWakeReason.READY, NP.PollWakeReason.CANCELED)
+                for _ in 1:128
+                    waiter = NP.PollWaiter()
+                    @test !NP.pollnotify!(waiter, reason)
+                    @test NP.pollwait!(waiter) == reason
+                    @test (@atomic :acquire waiter.state) == NP.PollWaiterState.EMPTY
+                    @test (@atomic :acquire waiter.task) === nothing
+                end
+            end
 
             for i in 1:128
                 waiter = NP.PollWaiter()
