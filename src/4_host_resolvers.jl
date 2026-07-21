@@ -1565,6 +1565,19 @@ function _with_port(addr::TCP.SocketAddrV6, port::Int)::TCP.SocketAddrV6
     return TCP.SocketAddrV6(addr.ip, port; scope_id = Int(addr.scope_id))
 end
 
+@inline function _append_unspecified_dial_fallback!(
+        ips::Vector{TCP.SocketEndpoint},
+        op::Symbol,
+    )::Vector{TCP.SocketEndpoint}
+    if op === :connect && length(ips) == 1
+        only_addr = ips[1]
+        if only_addr isa TCP.SocketAddrV6 && all(iszero, (only_addr::TCP.SocketAddrV6).ip)
+            push!(ips, TCP.any_addr(0))
+        end
+    end
+    return ips
+end
+
 """
     resolve_tcp_addrs(resolver, network, address; op=:connect, policy=ResolverPolicy())
 
@@ -1606,6 +1619,7 @@ function resolve_tcp_addrs(
     else
         _resolve_host_ips(resolver, network, host)
     end
+    _append_unspecified_dial_fallback!(ips, op)
     filtered = _apply_policy_and_network(ips, kind, policy)
     isempty(filtered) && _lookup_error("no suitable address", host)
     out = empty(similar(filtered))

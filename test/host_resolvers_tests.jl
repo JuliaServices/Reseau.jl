@@ -422,6 +422,12 @@ end
         end
         @testset "resolve_tcp_addr convenience wrapper" begin
             @test ND.resolve_tcp_addr("tcp", "127.0.0.1:80") == NC.loopback_addr(80)
+            @test ND.resolve_tcp_addr("tcp", "[::]:80") == NC.any_addr6(80)
+            unspecified = ND.resolve_tcp_addrs(ND.DEFAULT_RESOLVER, "tcp", "[::]:80"; op = :connect)
+            @test unspecified == NC.SocketEndpoint[NC.any_addr6(80), NC.any_addr(80)]
+            @test ND.resolve_tcp_addrs(ND.DEFAULT_RESOLVER, "tcp4", "[::]:80"; op = :connect) == NC.SocketAddrV4[NC.any_addr(80)]
+            @test ND.resolve_tcp_addrs(ND.DEFAULT_RESOLVER, "tcp6", "[::]:80"; op = :connect) == NC.SocketAddrV6[NC.any_addr6(80)]
+            @test ND.resolve_tcp_addrs(ND.DEFAULT_RESOLVER, "tcp", "[::]:80"; op = :resolve) == NC.SocketEndpoint[NC.any_addr6(80)]
         end
         @testset "resolver policies and static resolver" begin
             v4 = NC.loopback_addr(9000)
@@ -755,6 +761,29 @@ end
                     _nd_close_quiet!(listener6)
                     IP.shutdown!()
                 end
+            end
+        end
+        @testset "IPv6-unspecified dial falls back to local IPv4" begin
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            accept_task = nothing
+            try
+                listener = NC.listen("tcp4", "127.0.0.1:0"; backlog = 8)
+                port = Int((NC.addr(listener)::NC.SocketAddrV4).port)
+                accept_task = _nd_spawn_accept(listener)
+                client = NC.connect("tcp4", "[::]:$port"; timeout_ns = 1_000_000_000)
+                @test _nd_wait_task_done(accept_task, 2.0) != :timed_out
+                server = fetch(accept_task)
+                server isa Exception && throw(server)
+                @test NC.remote_addr(client) == NC.loopback_addr(port)
+            finally
+                _nd_close_quiet!(server)
+                _nd_close_quiet!(client)
+                _nd_close_quiet!(listener)
+                accept_task isa Task && istaskdone(accept_task) && wait(accept_task)
+                IP.shutdown!()
             end
         end
         @testset "error typing and wrapping (phase 5C)" begin
