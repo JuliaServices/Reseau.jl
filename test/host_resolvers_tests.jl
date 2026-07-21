@@ -427,7 +427,11 @@ end
             @test unspecified == NC.SocketEndpoint[NC.any_addr6(80), NC.any_addr(80)]
             @test ND.resolve_tcp_addrs(ND.DEFAULT_RESOLVER, "tcp4", "[::]:80"; op = :connect) == NC.SocketAddrV4[NC.any_addr(80)]
             @test ND.resolve_tcp_addrs(ND.DEFAULT_RESOLVER, "tcp6", "[::]:80"; op = :connect) == NC.SocketAddrV6[NC.any_addr6(80)]
-            @test ND.resolve_tcp_addrs(ND.DEFAULT_RESOLVER, "tcp", "[::]:80"; op = :resolve) == NC.SocketEndpoint[NC.any_addr6(80)]
+            # Go applies the issue-18806 [::] -> 0.0.0.0 fallback in
+            # internetAddrList for every op, not just dials, so :resolve and
+            # :listen see the appended IPv4 wildcard too.
+            @test ND.resolve_tcp_addrs(ND.DEFAULT_RESOLVER, "tcp", "[::]:80"; op = :resolve) == NC.SocketEndpoint[NC.any_addr6(80), NC.any_addr(80)]
+            @test ND.resolve_tcp_addrs(ND.DEFAULT_RESOLVER, "tcp", "[::]:80"; op = :listen) == NC.SocketEndpoint[NC.any_addr6(80), NC.any_addr(80)]
         end
         @testset "resolver policies and static resolver" begin
             v4 = NC.loopback_addr(9000)

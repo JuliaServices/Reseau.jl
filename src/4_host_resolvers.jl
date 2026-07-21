@@ -436,22 +436,23 @@ end
 
 function _ccall_getaddrinfo(hostname::String, hints::Ref{_AddrInfo}, result_ptr::Ptr{Ptr{_AddrInfo}})::Cint
     null_service = Ptr{UInt8}(C_NULL)
+    # Blocking OS resolution can take seconds; run it GC-safe so a slow lookup
+    # on this adopted worker thread cannot stall a stop-the-world GC elsewhere
+    # in the process.
     return @static if Sys.iswindows()
-        ccall((:getaddrinfo, "Ws2_32"), Cint,
-            (Cstring, Cstring, Ptr{_AddrInfo}, Ptr{Ptr{_AddrInfo}}),
-            hostname,
-            null_service,
-            hints,
-            result_ptr,
-        )
+        @gcsafe_ccall "Ws2_32".getaddrinfo(
+            hostname::Cstring,
+            null_service::Cstring,
+            hints::Ptr{_AddrInfo},
+            result_ptr::Ptr{Ptr{_AddrInfo}},
+        )::Cint
     else
-        ccall(:getaddrinfo, Cint,
-            (Cstring, Cstring, Ptr{_AddrInfo}, Ptr{Ptr{_AddrInfo}}),
-            hostname,
-            null_service,
-            hints,
-            result_ptr,
-        )
+        @gcsafe_ccall getaddrinfo(
+            hostname::Cstring,
+            null_service::Cstring,
+            hints::Ptr{_AddrInfo},
+            result_ptr::Ptr{Ptr{_AddrInfo}},
+        )::Cint
     end
 end
 
@@ -1565,11 +1566,17 @@ function _with_port(addr::TCP.SocketAddrV6, port::Int)::TCP.SocketAddrV6
     return TCP.SocketAddrV6(addr.ip, port; scope_id = Int(addr.scope_id))
 end
 
-@inline function _append_unspecified_dial_fallback!(
+@inline function _append_unspecified_fallback!(
         ips::Vector{TCP.SocketEndpoint},
-        op::Symbol,
     )::Vector{TCP.SocketEndpoint}
-    if op === :connect && length(ips) == 1
+    # Go issue 18806: a host that resolves to exactly the IPv6 unspecified
+    # address (`[::]`) also gets 0.0.0.0 appended, because a machine may bind
+    # `::` yet be unable to connect back to it. Go applies this in
+    # `internetAddrList` for every network op after lookup, not just dials, so
+    # it is intentionally not gated on `op`. The empty-host wildcard never
+    # reaches here as a single address (`_wildcard_addrs` returns two), so this
+    # only fires for a literal `[::]` host.
+    if length(ips) == 1
         only_addr = ips[1]
         if only_addr isa TCP.SocketAddrV6 && all(iszero, (only_addr::TCP.SocketAddrV6).ip)
             push!(ips, TCP.any_addr(0))
@@ -1619,7 +1626,7 @@ function resolve_tcp_addrs(
     else
         _resolve_host_ips(resolver, network, host)
     end
-    _append_unspecified_dial_fallback!(ips, op)
+    _append_unspecified_fallback!(ips)
     filtered = _apply_policy_and_network(ips, kind, policy)
     isempty(filtered) && _lookup_error("no suitable address", host)
     out = empty(similar(filtered))
