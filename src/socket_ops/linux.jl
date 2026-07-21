@@ -130,34 +130,14 @@ end
 """
     open_socket(family, sotype, proto=0)
 
-Create a socket and configure it as close-on-exec and non-blocking.
-
-On modern Linux kernels this is done atomically with `socket(..., SOCK_NONBLOCK |
-SOCK_CLOEXEC, ...)`, which avoids the small post-open race that exists when those
-flags must be applied with `fcntl`.
+Create a socket atomically configured as close-on-exec and non-blocking.
 
 Returns the new file descriptor or throws `SystemError` on failure.
 """
 function open_socket(family::Integer, sotype::Integer, proto::Integer = 0)::Cint
-    raw_type = Cint(sotype)
-    flagged_type = Cint(raw_type | _SOCK_NONBLOCK | _SOCK_CLOEXEC)
+    flagged_type = Cint(Cint(sotype) | _SOCK_NONBLOCK | _SOCK_CLOEXEC)
     fd = @gcsafe_ccall socket(Cint(family)::Cint, flagged_type::Cint, Cint(proto)::Cint)::Cint
-    if fd == -1
-        errno = _errno_i32()
-        if errno != Int32(Base.Libc.EINVAL)
-            _throw_errno("socket", errno)
-        end
-        # Older kernels may not support atomic SOCK_NONBLOCK/SOCK_CLOEXEC.
-        fd = @gcsafe_ccall socket(Cint(family)::Cint, raw_type::Cint, Cint(proto)::Cint)::Cint
-        fd == -1 && _throw_errno("socket", _errno_i32())
-        try
-            set_close_on_exec!(fd)
-            set_nonblocking!(fd, true)
-        catch
-            close_socket_nothrow(fd)
-            rethrow()
-        end
-    end
+    fd == -1 && _throw_errno("socket", _errno_i32())
     return fd
 end
 
