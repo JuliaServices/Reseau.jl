@@ -639,6 +639,76 @@ end
             end
         end
         @testset "mixed-version failures retain the selected TLS 1.2 record state" begin
+            @testset "server rejects inappropriate TLS fallback signaling" begin
+                IP.shutdown!()
+                listener = nothing
+                client_tcp = nothing
+                server_task = nothing
+                try
+                    listener = NC.listen(NC.loopback_addr(0); backlog = 1)
+                    addr = NC.addr(listener)::NC.SocketAddrV4
+                    server_task = errormonitor(Threads.@spawn begin
+                        server_tcp = NC.accept(listener)
+                        server_tls = TL.server(server_tcp, _tls_server_config(
+                            handshake_timeout_ns = 2_000_000_000,
+                        ))
+                        try
+                            TL.handshake!(server_tls)
+                            return nothing
+                        catch ex
+                            return ex
+                        finally
+                            _tls_close_quiet!(server_tls)
+                        end
+                    end)
+
+                    client_tcp = NC.connect(addr)
+                    hello = TL._tls_auto_client_hello(TL.Config(
+                        verify_peer = false,
+                        server_name = "localhost",
+                    ))
+                    hello.supported_versions = UInt16[TL.TLS1_2_VERSION]
+                    push!(hello.cipher_suites, TL._TLS_FALLBACK_SCSV)
+                    TL._tls_write_tls_plaintext!(
+                        client_tcp,
+                        TL._TLS_RECORD_TYPE_HANDSHAKE,
+                        TL._marshal_client_hello(hello),
+                        TL._TLS_LEGACY_RECORD_VERSION,
+                    )
+                    header, payload = _tls_public_read_record(client_tcp)
+
+                    @test _tls_wait_task_done(server_task, 2.0) != :timed_out
+                    err = fetch(server_task)
+                    @test err isa TL.TLSError
+                    if err isa TL.TLSError
+                        @test err.cause isa TL._TLSAlertError
+                        if err.cause isa TL._TLSAlertError
+                            @test (err.cause::TL._TLSAlertError).alert == TL._TLS_ALERT_INAPPROPRIATE_FALLBACK
+                        end
+                    end
+                    @test header[1] == TL._TLS_RECORD_TYPE_ALERT
+                    @test payload == UInt8[
+                        TL._TLS_ALERT_LEVEL_FATAL,
+                        TL._TLS_ALERT_INAPPROPRIATE_FALLBACK,
+                    ]
+
+                    tls12_only = _tls_server_config(
+                        min_version = TL.TLS1_2_VERSION,
+                        max_version = TL.TLS1_2_VERSION,
+                    )
+                    @test TL._tls_check_inappropriate_fallback!(
+                        tls12_only,
+                        hello,
+                        TL.TLS1_2_VERSION,
+                    ) === nothing
+                finally
+                    _tls_close_quiet!(client_tcp)
+                    _tls_close_quiet!(listener)
+                    server_task isa Task && !istaskdone(server_task) && wait(server_task)
+                    IP.shutdown!()
+                end
+            end
+
             @testset "client pre-CCS failure sends a plaintext alert from TLS 1.2 state" begin
                 IP.shutdown!()
                 listener = nothing

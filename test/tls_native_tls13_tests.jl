@@ -171,6 +171,69 @@ end
     ))
     @test TLN._native_tls13_server_enabled(_tls13_native_server_config())
 
+    @testset "server enforces TLS 1.3 ClientHello invariants" begin
+        server_config = _tls13_native_server_config()
+        client_config = _tls13_native_client_config()
+
+        valid_state = TLN._TLS13ServerHandshakeState(server_config)
+        try
+            valid_hello = TLN._tls13_client_hello(client_config)
+            @test TLN._tls13_set_client_hello!(valid_state, TLN._marshal_client_hello(valid_hello)) === nothing
+        finally
+            TLN._securezero_tls13_server_handshake_state!(valid_state)
+        end
+
+        cases = (
+            (
+                "legacy version negotiation",
+                TLN._TLS_ALERT_ILLEGAL_PARAMETER,
+                hello -> (hello.supported_versions = UInt16[]),
+            ),
+            (
+                "extra compression method",
+                TLN._TLS_ALERT_ILLEGAL_PARAMETER,
+                hello -> (hello.compression_methods = UInt8[TLN._TLS_COMPRESSION_NONE, 0x01]),
+            ),
+            (
+                "non-empty renegotiation info",
+                TLN._TLS_ALERT_HANDSHAKE_FAILURE,
+                hello -> (hello.secure_renegotiation = UInt8[0x01]),
+            ),
+            (
+                "TCP early data",
+                TLN._TLS_ALERT_UNSUPPORTED_EXTENSION,
+                hello -> (hello.early_data = true),
+            ),
+            (
+                "QUIC parameters on TCP",
+                TLN._TLS_ALERT_UNSUPPORTED_EXTENSION,
+                hello -> (hello.quic_transport_parameters = UInt8[]),
+            ),
+        )
+        for (label, expected_alert, configure!) in cases
+            @testset "$label" begin
+                state = TLN._TLS13ServerHandshakeState(server_config)
+                try
+                    hello = TLN._tls13_client_hello(client_config)
+                    configure!(hello)
+                    err = try
+                        TLN._tls13_set_client_hello!(state, TLN._marshal_client_hello(hello))
+                        nothing
+                    catch ex
+                        ex
+                    end
+                    @test err isa TLN._TLSAlertError
+                    if err isa TLN._TLSAlertError
+                        @test err.alert == expected_alert
+                        @test !err.from_peer
+                    end
+                finally
+                    TLN._securezero_tls13_server_handshake_state!(state)
+                end
+            end
+        end
+    end
+
     @testset "record EOF distinguishes boundaries from truncation" begin
         cases = (
             ("record boundary", UInt8[], EOFError),

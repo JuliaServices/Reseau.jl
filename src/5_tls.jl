@@ -834,6 +834,19 @@ function _tls_mutual_supported_version(config::Config, peer_versions::AbstractVe
     _tls_fail(_TLS_ALERT_PROTOCOL_VERSION, "tls: peer offered only unsupported native TLS versions")
 end
 
+function _tls_check_inappropriate_fallback!(
+    config::Config,
+    client_hello::_ClientHelloMsg,
+    negotiated_version::UInt16,
+)::Nothing
+    in(_TLS_FALLBACK_SCSV, client_hello.cipher_suites) || return nothing
+    supported_versions = _native_supported_versions(config)
+    isempty(supported_versions) && return nothing
+    negotiated_version < first(supported_versions) &&
+        _tls_fail(_TLS_ALERT_INAPPROPRIATE_FALLBACK, "tls: client using inappropriate protocol fallback")
+    return nothing
+end
+
 function _tls_pick_client_version(config::Config, server_hello::_ServerHelloMsg)::UInt16
     peer_version = server_hello.supported_version == UInt16(0) ? server_hello.vers : server_hello.supported_version
     in(peer_version, _native_supported_versions(config)) ||
@@ -1458,6 +1471,7 @@ function _native_tls_auto_server_handshake!(conn::Conn)::Nothing
     client_hello === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: native mixed-version server expected ClientHello")
     negotiated_version = _tls_mutual_supported_version(conn.config, _tls_client_hello_supported_versions(client_hello))
     native_state13.version = negotiated_version
+    _tls_check_inappropriate_fallback!(conn.config, client_hello, negotiated_version)
     if negotiated_version == TLS1_3_VERSION
         state13 = _TLS13ServerHandshakeState(conn.config)
         try
