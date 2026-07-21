@@ -825,6 +825,36 @@ end
         @test_throws ArgumentError TLH._unmarshal_handshake_message(UInt8[TLH._HANDSHAKE_TYPE_FINISHED, 0x01, 0x00, 0x01])
     end
 
+    @testset "State-machine parser distinguishes malformed and unexpected messages" begin
+        cases = (
+            (
+                "recognized malformed message",
+                UInt8[TLH._HANDSHAKE_TYPE_FINISHED, 0x00, 0x00, 0x02, 0x01],
+                TLH._TLS_ALERT_DECODE_ERROR,
+            ),
+            (
+                "unknown message type",
+                UInt8[0xff, 0x00, 0x00, 0x00],
+                TLH._TLS_ALERT_UNEXPECTED_MESSAGE,
+            ),
+        )
+        for (label, raw, expected_alert) in cases
+            @testset "$label" begin
+                err = try
+                    TLH._unmarshal_handshake_message_or_fail(raw)
+                    nothing
+                catch ex
+                    ex
+                end
+                @test err isa TLH._TLSAlertError
+                err isa TLH._TLSAlertError && @test err.alert == expected_alert
+            end
+        end
+
+        finished = _finished_msg(verify_data = UInt8[0x01, 0x02])
+        @test TLH._unmarshal_handshake_message_or_fail(TLH._marshal_handshake_message(finished)) == finished
+    end
+
     @testset "Randomized roundtrip coverage" begin
         rng = MersenneTwister(0x5eed1)
         for _ in 1:30

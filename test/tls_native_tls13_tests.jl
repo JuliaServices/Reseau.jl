@@ -300,6 +300,63 @@ end
         end
     end
 
+    @testset "native client sends decode_error for a malformed ServerHello" begin
+        IPN.shutdown!()
+        listener = nothing
+        server_tcp = nothing
+        accept_task = nothing
+        client_task = nothing
+        try
+            listener = NCN.listen(NCN.loopback_addr(0); backlog = 1)
+            addr = NCN.addr(listener)::NCN.SocketAddrV4
+            accept_task = errormonitor(Threads.@spawn NCN.accept(listener))
+            client_task = Threads.@spawn begin
+                try
+                    TLN.connect(addr, _tls13_native_client_config())
+                    nothing
+                catch ex
+                    ex
+                end
+            end
+            @test _tls_native_wait_task(accept_task, 5.0) != :timed_out
+            server_tcp = fetch(accept_task)
+            client_header, _ = _read_tls_record(server_tcp)
+            @test client_header[1] == TLN._TLS_RECORD_TYPE_HANDSHAKE
+
+            malformed_server_hello = UInt8[
+                TLN._HANDSHAKE_TYPE_SERVER_HELLO,
+                0x00,
+                0x00,
+                0x01,
+                0x00,
+            ]
+            TLN._tls_write_tls_plaintext!(
+                server_tcp,
+                TLN._TLS_RECORD_TYPE_HANDSHAKE,
+                malformed_server_hello,
+                TLN.TLS1_2_VERSION,
+            )
+            alert_header, alert_payload = _read_tls_record(server_tcp)
+            @test alert_header[1] == TLN._TLS_RECORD_TYPE_ALERT
+            @test alert_payload == UInt8[TLN._TLS_ALERT_LEVEL_FATAL, TLN._TLS_ALERT_DECODE_ERROR]
+
+            @test _tls_native_wait_task(client_task::Task, 5.0) != :timed_out
+            client_err = fetch(client_task::Task)
+            @test client_err isa TLN.TLSError
+            if client_err isa TLN.TLSError
+                @test client_err.cause isa TLN._TLSAlertError
+                if client_err.cause isa TLN._TLSAlertError
+                    @test (client_err.cause::TLN._TLSAlertError).alert == TLN._TLS_ALERT_DECODE_ERROR
+                end
+            end
+        finally
+            _tls_native_close_quiet!(server_tcp)
+            _tls_native_close_quiet!(listener)
+            client_task isa Task && !istaskdone(client_task) && wait(client_task)
+            IPN.shutdown!()
+        end
+    end
+
     @testset "record EOF distinguishes boundaries from truncation" begin
         cases = (
             ("record boundary", UInt8[], EOFError),
@@ -714,6 +771,39 @@ end
             _tls_native_close_quiet!(client_tcp)
             _tls_native_close_quiet!(listener)
             IPN.shutdown!()
+        end
+    end
+
+    @testset "record-layer session tickets preserve Go validation alerts" begin
+        function ticket_raw(; lifetime = UInt32(60), label = UInt8[0xa0])
+            ticket = TLN._NewSessionTicketMsgTLS13()
+            ticket.lifetime = lifetime
+            ticket.age_add = UInt32(1)
+            ticket.nonce = UInt8[0x01]
+            ticket.label = copy(label)
+            return TLN._marshal_handshake_message(ticket)
+        end
+
+        cases = (
+            (
+                ticket_raw(lifetime = TLN._TLS13_MAX_SESSION_TICKET_LIFETIME + UInt32(1)),
+                TLN._TLS_ALERT_ILLEGAL_PARAMETER,
+            ),
+            (ticket_raw(label = UInt8[]), TLN._TLS_ALERT_DECODE_ERROR),
+            (
+                UInt8[TLN._HANDSHAKE_TYPE_NEW_SESSION_TICKET, 0x00, 0x00, 0x01, 0x00],
+                TLN._TLS_ALERT_DECODE_ERROR,
+            ),
+        )
+        for (raw, expected_alert) in cases
+            err = try
+                TLN._tls13_validate_new_session_ticket(raw)
+                nothing
+            catch ex
+                ex
+            end
+            @test err isa TLN._TLSAlertError
+            err isa TLN._TLSAlertError && @test err.alert == expected_alert
         end
     end
 
@@ -1722,6 +1812,38 @@ end
             alert_header, alert_payload = _read_tls_record(client_tcp)
             @test alert_header[1] == TLN._TLS_RECORD_TYPE_ALERT
             @test alert_payload == UInt8[TLN._TLS_ALERT_LEVEL_FATAL, TLN._TLS_ALERT_UNEXPECTED_MESSAGE]
+        finally
+            _tls_native_close_quiet!(client_tcp)
+            server_task isa Task && _finish_tls13_native_server!(server_task)
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+    end
+
+    @testset "native server sends decode_error for a malformed ClientHello" begin
+        IPN.shutdown!()
+        listener = nothing
+        client_tcp = nothing
+        server_task = nothing
+        try
+            listener, addr, server_task, _ = _start_tls13_native_server(_tls13_native_server_config())
+            client_tcp = NCN.connect(addr)
+            malformed_client_hello = UInt8[
+                TLN._HANDSHAKE_TYPE_CLIENT_HELLO,
+                0x00,
+                0x00,
+                0x01,
+                0x00,
+            ]
+            TLN._tls_write_tls_plaintext!(
+                client_tcp,
+                TLN._TLS_RECORD_TYPE_HANDSHAKE,
+                malformed_client_hello,
+                TLN._TLS_LEGACY_RECORD_VERSION,
+            )
+            alert_header, alert_payload = _read_tls_record(client_tcp)
+            @test alert_header[1] == TLN._TLS_RECORD_TYPE_ALERT
+            @test alert_payload == UInt8[TLN._TLS_ALERT_LEVEL_FATAL, TLN._TLS_ALERT_DECODE_ERROR]
         finally
             _tls_native_close_quiet!(client_tcp)
             server_task isa Task && _finish_tls13_native_server!(server_task)

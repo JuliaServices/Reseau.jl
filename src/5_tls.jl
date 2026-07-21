@@ -1424,8 +1424,10 @@ function _native_tls_auto_client_handshake!(conn::Conn)::Nothing
     try
         _write_client_hello!(state13, io13)
         raw_server_hello = _read_handshake_bytes!(io13)
-        server_hello = _unmarshal_server_hello(raw_server_hello)
-        server_hello === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: native mixed-version client expected ServerHello")
+        parsed_server_hello = _unmarshal_handshake_message_or_fail(raw_server_hello)
+        parsed_server_hello isa _ServerHelloMsg ||
+            _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: native mixed-version client expected ServerHello")
+        server_hello = parsed_server_hello::_ServerHelloMsg
         state13.server_hello_raw = raw_server_hello
         state13.server_hello = server_hello
         state13.have_server_hello = true
@@ -1467,8 +1469,10 @@ function _native_tls_auto_server_handshake!(conn::Conn)::Nothing
     native_state13 = _native_tls13_state(conn)
     io13 = _TLS13HandshakeRecordIO(conn.tcp, native_state13)
     raw_client_hello = _read_handshake_bytes!(io13)
-    client_hello = _unmarshal_client_hello(raw_client_hello)
-    client_hello === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: native mixed-version server expected ClientHello")
+    parsed_client_hello = _unmarshal_handshake_message_or_fail(raw_client_hello)
+    parsed_client_hello isa _ClientHelloMsg ||
+        _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: native mixed-version server expected ClientHello")
+    client_hello = parsed_client_hello::_ClientHelloMsg
     negotiated_version = _tls_mutual_supported_version(conn.config, _tls_client_hello_supported_versions(client_hello))
     native_state13.version = negotiated_version
     _tls_check_inappropriate_fallback!(conn.config, client_hello, negotiated_version)

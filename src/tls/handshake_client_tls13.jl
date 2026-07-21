@@ -571,8 +571,10 @@ function _check_server_hello_or_hrr!(state::_TLS13ClientHandshakeState)::Nothing
 end
 
 function _tls13_set_server_hello!(state::_TLS13ClientHandshakeState, raw::Vector{UInt8})::Nothing
-    msg = _unmarshal_server_hello(raw)
-    msg === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 client handshake expected ServerHello")
+    parsed = _unmarshal_handshake_message_or_fail(raw)
+    parsed isa _ServerHelloMsg ||
+        _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 client handshake expected ServerHello")
+    msg = parsed::_ServerHelloMsg
     state.server_hello_raw = raw
     state.server_hello = msg
     state.have_server_hello = true
@@ -712,9 +714,10 @@ end
 
 function _read_server_parameters!(state::_TLS13ClientHandshakeState, io)::Nothing
     raw = _read_handshake_bytes!(io)
-    msg = _unmarshal_encrypted_extensions(raw)
-    msg === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 client handshake expected EncryptedExtensions")
-    _transcript_update!(_tls13_selected_transcript(state), raw)
+    parsed = _unmarshal_handshake_message_or_fail(raw, _tls13_selected_transcript(state))
+    parsed isa _EncryptedExtensionsMsg ||
+        _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 client handshake expected EncryptedExtensions")
+    msg = parsed::_EncryptedExtensionsMsg
 
     server_protocol = msg.alpn_protocol
     if !isempty(server_protocol)
@@ -753,32 +756,35 @@ function _read_server_certificate!(state::_TLS13ClientHandshakeState, io)::Nothi
     state.using_psk && return nothing
 
     raw = _read_handshake_bytes!(io)
-    msg = _unmarshal_handshake_message(raw)
-    msg === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 client handshake expected Certificate or CertificateRequest")
+    transcript = _tls13_selected_transcript(state)
+    msg = _unmarshal_handshake_message_or_fail(raw, transcript)
 
     if msg isa _CertificateRequestMsgTLS13
         state.certificate_request = msg
         state.have_certificate_request = true
-        _transcript_update!(_tls13_selected_transcript(state), raw)
         raw = _read_handshake_bytes!(io)
-        msg = _unmarshal_certificate_tls13(raw)
-        msg === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 client handshake expected Certificate after CertificateRequest")
+        msg = _unmarshal_handshake_message_or_fail(raw, transcript)
     end
 
     certificate = msg isa _CertificateMsgTLS13 ? msg : nothing
     certificate === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 client handshake expected Certificate")
-    isempty(certificate.certificates) && _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: received empty certificates message")
+    isempty(certificate.certificates) && _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received empty certificates message")
 
-    _transcript_update!(_tls13_selected_transcript(state), raw)
     state.server_certificate = certificate
     state.have_server_certificate = true
     _tls13_verify_server_certificates!(state.certificate_verifier, certificate, state.client_hello.server_name)
 
     raw = _read_handshake_bytes!(io)
-    certificate_verify = _unmarshal_certificate_verify(raw)
-    certificate_verify === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 client handshake expected CertificateVerify")
+    parsed_verify = _unmarshal_handshake_message_or_fail(raw)
+    parsed_verify isa _CertificateVerifyMsg ||
+        _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 client handshake expected CertificateVerify")
+    certificate_verify = parsed_verify::_CertificateVerifyMsg
     in(certificate_verify.signature_algorithm, state.client_hello.supported_signature_algorithms) ||
-        _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: certificate used with invalid signature algorithm")
+        _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: certificate used with invalid signature algorithm")
+    _tls13_signature_scheme_matches_public_key(
+        certificate_verify.signature_algorithm,
+        state.certificate_verifier.leaf_public_key::_TLSPublicKey,
+    ) || _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: certificate used with invalid signature algorithm")
     _tls13_verify_server_certificate_signature!(state.certificate_verifier, _tls13_selected_transcript(state), certificate_verify)
     state.server_certificate_verify = certificate_verify
     state.have_server_certificate_verify = true
@@ -788,8 +794,10 @@ end
 
 function _read_server_finished!(state::_TLS13ClientHandshakeState, io)::Nothing
     raw = _read_handshake_bytes!(io)
-    msg = _unmarshal_finished(raw)
-    msg === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 client handshake expected Finished")
+    parsed = _unmarshal_handshake_message_or_fail(raw)
+    parsed isa _FinishedMsg ||
+        _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 client handshake expected Finished")
+    msg = parsed::_FinishedMsg
     transcript = _tls13_selected_transcript(state)
     hash_kind = state.cipher_spec.hash_kind
     expected_verify_data = _tls13_finished_verify_data(hash_kind, state.server_handshake_traffic_secret, transcript)
@@ -861,12 +869,14 @@ end
 function _read_post_handshake_messages!(state::_TLS13ClientHandshakeState, io)::Nothing
     while _remaining_handshake_messages(io) > 0
         raw = _read_handshake_bytes!(io)
-        msg = _unmarshal_new_session_ticket_tls13(raw)
-        msg === nothing && throw(ArgumentError("tls13 client handshake expected only NewSessionTicket post-handshake messages"))
+        parsed = _unmarshal_handshake_message_or_fail(raw)
+        parsed isa _NewSessionTicketMsgTLS13 ||
+            _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 client handshake expected only NewSessionTicket post-handshake messages")
+        msg = parsed::_NewSessionTicketMsgTLS13
         msg.lifetime == 0x00000000 && continue
         msg.lifetime <= _TLS13_MAX_SESSION_TICKET_LIFETIME ||
-            throw(ArgumentError("tls: received a session ticket with invalid lifetime"))
-        isempty(msg.label) && throw(ArgumentError("tls: received a session ticket with empty opaque ticket label"))
+            _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: received a session ticket with invalid lifetime")
+        isempty(msg.label) && _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received a session ticket with empty opaque ticket label")
         push!(state.peer_new_session_tickets, msg)
     end
     return nothing

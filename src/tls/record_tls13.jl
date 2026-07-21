@@ -547,12 +547,14 @@ function _tls13_store_new_session_ticket!(conn, msg::_NewSessionTicketMsgTLS13):
 end
 
 function _tls13_validate_new_session_ticket(raw::Vector{UInt8})::_NewSessionTicketMsgTLS13
-    msg = _unmarshal_new_session_ticket_tls13(raw)
-    msg === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: unexpected post-handshake TLS 1.3 message")
+    parsed = _unmarshal_handshake_message_or_fail(raw)
+    parsed isa _NewSessionTicketMsgTLS13 ||
+        _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: unexpected post-handshake TLS 1.3 message")
+    msg = parsed::_NewSessionTicketMsgTLS13
     msg.lifetime == 0x00000000 && return msg
     msg.lifetime <= _TLS13_MAX_SESSION_TICKET_LIFETIME ||
         _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: received a session ticket with invalid lifetime")
-    isempty(msg.label) && _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: received a session ticket with empty opaque ticket label")
+    isempty(msg.label) && _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received a session ticket with empty opaque ticket label")
     return msg
 end
 

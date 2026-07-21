@@ -20,6 +20,27 @@ end
 @inline _tls_should_request_client_certificate(config)::Bool =
     config.client_auth != ClientAuthMode.NoClientCert
 
+@inline function _tls13_signature_scheme_matches_public_key(
+    signature_algorithm::UInt16,
+    public_key::_TLSPublicKey,
+)::Bool
+    if public_key isa _TLSRSAPublicKey
+        return signature_algorithm == _TLS_SIGNATURE_RSA_PSS_RSAE_SHA256 ||
+            signature_algorithm == _TLS_SIGNATURE_RSA_PSS_RSAE_SHA384 ||
+            signature_algorithm == _TLS_SIGNATURE_RSA_PSS_RSAE_SHA512 ||
+            signature_algorithm == _TLS_SIGNATURE_RSA_PSS_PSS_SHA256 ||
+            signature_algorithm == _TLS_SIGNATURE_RSA_PSS_PSS_SHA384 ||
+            signature_algorithm == _TLS_SIGNATURE_RSA_PSS_PSS_SHA512
+    end
+    if public_key isa _TLSECPublicKey
+        curve_id = (public_key::_TLSECPublicKey).curve_id
+        return (curve_id == _TLS_GROUP_SECP256R1 && signature_algorithm == _TLS_SIGNATURE_ECDSA_SECP256R1_SHA256) ||
+            (curve_id == UInt16(0x0018) && signature_algorithm == _TLS_SIGNATURE_ECDSA_SECP384R1_SHA384) ||
+            (curve_id == UInt16(0x0019) && signature_algorithm == _TLS_SIGNATURE_ECDSA_SECP521R1_SHA512)
+    end
+    return public_key isa _TLSEd25519PublicKey && signature_algorithm == _TLS_SIGNATURE_ED25519
+end
+
 # Used when deciding whether a cached resumption session is still valid for the
 # current server-side client-auth policy. Resumption should not bypass a stricter
 # certificate requirement than the original session satisfied.

@@ -910,7 +910,41 @@ end
         end
         @test err isa TLHC._TLSAlertError
         if err isa TLHC._TLSAlertError
-            @test err.alert == TLHC._TLS_ALERT_BAD_CERTIFICATE
+            @test err.alert == TLHC._TLS_ALERT_ILLEGAL_PARAMETER
+        end
+        @test length(io.outbound) == 1
+        @test !state.complete
+    end
+
+    @testset "certificate verify algorithms must match the certificate key" begin
+        expected_hello = _tls13_cert_client_hello()
+        push!(expected_hello.supported_signature_algorithms, TLHC._TLS_SIGNATURE_ECDSA_SECP256R1_SHA256)
+        expected = _compute_tls13_real_certificate_server_flight(expected_hello)
+        incompatible_verify = TLHC._CertificateVerifyMsg(
+            TLHC._TLS_SIGNATURE_ECDSA_SECP256R1_SHA256,
+            copy(expected.certificate_verify.signature),
+        )
+        inbound = copy(expected.inbound)
+        inbound[4] = TLHC._marshal_handshake_message(incompatible_verify)
+
+        state_hello = _tls13_cert_client_hello()
+        push!(state_hello.supported_signature_algorithms, TLHC._TLS_SIGNATURE_ECDSA_SECP256R1_SHA256)
+        state = TLHC._TLS13ClientHandshakeState(
+            state_hello,
+            TLHC._TLS13_AES_128_GCM_SHA256_ID,
+            _tls13_openssl_key_share_provider(),
+            _tls13_certificate_verifier(),
+        )
+        io = _HandshakeMessageFlightIO(inbound)
+        err = try
+            TLHC._client_handshake_tls13!(state, io)
+            nothing
+        catch ex
+            ex
+        end
+        @test err isa TLHC._TLSAlertError
+        if err isa TLHC._TLSAlertError
+            @test err.alert == TLHC._TLS_ALERT_ILLEGAL_PARAMETER
         end
         @test length(io.outbound) == 1
         @test !state.complete
@@ -933,7 +967,7 @@ end
         end
         @test err isa TLHC._TLSAlertError
         if err isa TLHC._TLSAlertError
-            @test err.alert == TLHC._TLS_ALERT_BAD_CERTIFICATE
+            @test err.alert == TLHC._TLS_ALERT_DECODE_ERROR
         end
         @test length(io.outbound) == 1
         @test !state.complete
@@ -960,21 +994,53 @@ end
         @test length(io.outbound) == 1
     end
 
-    @testset "post-handshake tickets reject invalid lifetimes" begin
-        psk = UInt8[0x41, 0x42, 0x43, 0x44, 0x45, 0x46]
-        expected = _compute_tls13_psk_server_flight(_tls13_psk_client_hello(), psk)
-        bad_ticket = TLHC._NewSessionTicketMsgTLS13()
-        bad_ticket.lifetime = TLHC._TLS13_MAX_SESSION_TICKET_LIFETIME + UInt32(1)
-        bad_ticket.age_add = 0x05060708
-        bad_ticket.nonce = UInt8[0x90, 0x91]
-        bad_ticket.label = UInt8[0xa0, 0xa1, 0xa2]
-        bad_ticket.max_early_data = 0x0b0c0d0e
-        inbound = copy(expected.inbound)
-        inbound[end] = TLHC._marshal_handshake_message(bad_ticket)
+    @testset "post-handshake tickets preserve parse and validation alerts" begin
+        function ticket_raw(; lifetime = UInt32(60), label = UInt8[0xa0])
+            ticket = TLHC._NewSessionTicketMsgTLS13()
+            ticket.lifetime = lifetime
+            ticket.age_add = 0x05060708
+            ticket.nonce = UInt8[0x90, 0x91]
+            ticket.label = copy(label)
+            return TLHC._marshal_handshake_message(ticket)
+        end
 
-        state = _tls13_psk_handshake_state(_tls13_psk_client_hello(), psk)
-        io = _HandshakeMessageFlightIO(inbound)
-
-        @test_throws ArgumentError TLHC._client_handshake_tls13!(state, io)
+        cases = (
+            (
+                "invalid lifetime",
+                ticket_raw(lifetime = TLHC._TLS13_MAX_SESSION_TICKET_LIFETIME + UInt32(1)),
+                TLHC._TLS_ALERT_ILLEGAL_PARAMETER,
+            ),
+            ("empty ticket label", ticket_raw(label = UInt8[]), TLHC._TLS_ALERT_DECODE_ERROR),
+            (
+                "malformed ticket",
+                UInt8[TLHC._HANDSHAKE_TYPE_NEW_SESSION_TICKET, 0x00, 0x00, 0x01, 0x00],
+                TLHC._TLS_ALERT_DECODE_ERROR,
+            ),
+            (
+                "valid wrong message type",
+                TLHC._marshal_handshake_message(TLHC._FinishedMsg(UInt8[0x01])),
+                TLHC._TLS_ALERT_UNEXPECTED_MESSAGE,
+            ),
+        )
+        for (label, raw, expected_alert) in cases
+            @testset "$label" begin
+                state = _tls13_psk_handshake_state(
+                    _tls13_psk_client_hello(),
+                    UInt8[0x41, 0x42, 0x43],
+                )
+                try
+                    err = try
+                        TLHC._read_post_handshake_messages!(state, _HandshakeMessageFlightIO([raw]))
+                        nothing
+                    catch ex
+                        ex
+                    end
+                    @test err isa TLHC._TLSAlertError
+                    err isa TLHC._TLSAlertError && @test err.alert == expected_alert
+                finally
+                    TLHC._securezero_tls13_client_handshake_state!(state)
+                end
+            end
+        end
     end
 end

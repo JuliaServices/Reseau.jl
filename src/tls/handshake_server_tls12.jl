@@ -305,8 +305,10 @@ function _tls12_select_server_curve(client_hello::_ClientHelloMsg, config)::UInt
 end
 
 function _tls12_set_client_hello!(state::_TLS12ServerHandshakeState, raw::Vector{UInt8})::Nothing
-    client_hello = _unmarshal_client_hello(raw)
-    client_hello === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls12 server handshake expected ClientHello")
+    parsed = _unmarshal_handshake_message_or_fail(raw, nothing, TLS1_2_VERSION)
+    parsed isa _ClientHelloMsg ||
+        _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls12 server handshake expected ClientHello")
+    client_hello = parsed::_ClientHelloMsg
     versions = client_hello.supported_versions
     if isempty(versions)
         client_hello.vers == TLS1_2_VERSION ||
