@@ -103,6 +103,66 @@ function _tls12_run_public_roundtrip(server_config::TL12N.Config, client_config:
     end
 end
 
+function _tls12_connect_with_ems(
+    remote_addr::NC12N.SocketAddr,
+    config::TL12N.Config,
+    extended_master_secret::Bool,
+)
+    tcp = NC12N.connect(remote_addr)
+    conn = nothing
+    state = nothing
+    try
+        conn = TL12N.client(tcp, config)
+        cache_key = TL12N._tls13_client_session_cache_key(config, tcp)
+        client_hello = TL12N._tls12_client_hello(config)
+        client_hello.extended_master_secret = extended_master_secret
+        session = TL12N._tls12_try_load_client_session(config, cache_key, client_hello)
+        state = TL12N._TLS12ClientHandshakeState(client_hello, session)
+        io = TL12N._TLS12HandshakeRecordIO(tcp, TL12N._native_tls12_state(conn))
+        TL12N._client_handshake_tls12!(state, io, config)
+        negotiated_ems = state.server_hello.extended_master_secret
+        TL12N._finish_native_tls12_client_handshake!(conn, state)
+        return conn, negotiated_ems
+    catch
+        _tls12_native_close_quiet!(conn === nothing ? tcp : conn)
+        rethrow()
+    finally
+        state === nothing || TL12N._securezero_tls12_client_handshake_state!(state)
+    end
+end
+
+function _tls12_run_roundtrip_with_ems(
+    server_config::TL12N.Config,
+    client_config::TL12N.Config,
+    extended_master_secret::Bool,
+)
+    listener = nothing
+    client = nothing
+    task = nothing
+    try
+        listener, addr, task = _start_tls12_server(server_config; handler = conn -> begin
+            write(conn, UInt8[0x6f, 0x6b])
+            read(conn, 2) == UInt8[0x61, 0x63] || error("unexpected TLS 1.2 client ack")
+            return TL12N.connection_state(conn)
+        end)
+        client, negotiated_ems = _tls12_connect_with_ems(addr, client_config, extended_master_secret)
+        client_state = TL12N.connection_state(client)
+        read(client, 2) == UInt8[0x6f, 0x6b] || error("unexpected TLS 1.2 server bytes")
+        write(client, UInt8[0x61, 0x63]) == 2 || error("unexpected TLS 1.2 client ack write")
+        _tls12_native_wait_task(task, 5.0) != :timed_out || error("timed out waiting for TLS 1.2 server task")
+        return client_state, fetch(task)::TL12N.ConnectionState, negotiated_ems
+    finally
+        _tls12_native_close_quiet!(client)
+        if task !== nothing
+            try
+                wait(task)
+            catch
+            end
+        end
+        _tls12_native_close_quiet!(listener)
+    end
+end
+
 function _start_tls12_server(config::TL12N.Config; handler)
     listener = TL12N.listen(NC12N.loopback_addr(0), config; backlog = 8)
     addr = TL12N.addr(listener)::NC12N.SocketAddrV4
@@ -274,6 +334,7 @@ end
             listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
             state = TL12N._TLS12ServerHandshakeState(_tls12_server_config())
             hello = TL12N._tls12_client_hello(_tls12_native_client_config(alpn_protocols = ["h2"]))
+            hello.extended_master_secret = false
             state.client_hello = hello
             state.cipher_suite = TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID
             state.selected_alpn = "h2"
@@ -282,6 +343,7 @@ end
             TL12N._tls12_send_server_hello!(state, io, transcript, TL12N._marshal_handshake_message(hello), _tls12_server_config())
             @test !isempty(hello.session_id)
             @test isempty(state.server_hello.session_id)
+            @test !state.server_hello.extended_master_secret
         finally
             state === nothing || TL12N._securezero_tls12_server_handshake_state!(state)
             _tls12_native_close_quiet!(server_tcp)
@@ -368,6 +430,62 @@ end
                 catch
                 end
             end
+            _tls12_native_close_quiet!(listener)
+        end
+    end
+
+    @testset "TLS 1.2 server negotiates optional EMS and enforces resumption mode" begin
+        server_cfg = _tls12_server_config()
+        client_cfg = _tls12_native_client_config()
+
+        legacy_client1, legacy_server1, negotiated_ems1 =
+            _tls12_run_roundtrip_with_ems(server_cfg, client_cfg, false)
+        @test !negotiated_ems1
+        @test !legacy_client1.did_resume
+        @test !legacy_server1.did_resume
+
+        legacy_client2, legacy_server2, negotiated_ems2 =
+            _tls12_run_roundtrip_with_ems(server_cfg, client_cfg, false)
+        @test !negotiated_ems2
+        @test legacy_client2.did_resume
+        @test legacy_server2.did_resume
+
+        # RFC 7627 section 5.3: a legacy ticket presented by an EMS-capable
+        # client is not resumed. The server performs a fresh EMS handshake.
+        upgraded_client, upgraded_server = _tls12_run_public_roundtrip(server_cfg, client_cfg)
+        @test !upgraded_client.did_resume
+        @test !upgraded_server.did_resume
+
+        resumed_ems_client, resumed_ems_server = _tls12_run_public_roundtrip(server_cfg, client_cfg)
+        @test resumed_ems_client.did_resume
+        @test resumed_ems_server.did_resume
+
+        # The inverse transition is a fatal downgrade: an EMS session must not
+        # be resumed when the client no longer advertises EMS.
+        listener = nothing
+        server_task = nothing
+        try
+            listener, addr, server_task = _start_tls12_server(server_cfg; handler = _ -> nothing)
+            client_err = try
+                _tls12_connect_with_ems(addr, client_cfg, false)
+                nothing
+            catch ex
+                ex
+            end
+            @test client_err isa TL12N._TLSAlertError
+            if client_err isa TL12N._TLSAlertError
+                @test client_err.from_peer
+                @test client_err.alert == TL12N._TLS_ALERT_HANDSHAKE_FAILURE
+            end
+            @test _tls12_native_wait_task(server_task, 5.0) != :timed_out
+            server_err = try
+                wait(server_task)
+                nothing
+            catch ex
+                ex
+            end
+            @test server_err !== nothing
+        finally
             _tls12_native_close_quiet!(listener)
         end
     end

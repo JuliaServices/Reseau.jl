@@ -2,7 +2,7 @@
 #
 # This file mirrors the server side of Go's `crypto/tls/handshake_server.go`
 # for the subset of TLS 1.2 we support natively: ECDHE + AES-GCM, optional
-# client certificates, EMS, and session-ticket resumption.
+# client certificates, optional EMS, and session-ticket resumption.
 
 """
     _TLS12ServerSession
@@ -318,8 +318,6 @@ function _tls12_set_client_hello!(state::_TLS12ServerHandshakeState, raw::Vector
         _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: client does not support uncompressed TLS 1.2 connections")
     isempty(client_hello.secure_renegotiation) ||
         _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: initial TLS 1.2 handshake had non-empty renegotiation extension")
-    client_hello.extended_master_secret ||
-        _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: native TLS 1.2 server requires extended master secret")
     has_supported_curve = false
     for group in client_hello.supported_curves
         if _native_curve_supported(group)
@@ -356,26 +354,40 @@ function _tls12_select_server_parameters!(state::_TLS12ServerHandshakeState, con
                     keep_session = false
                     try
                         now_s = UInt64(floor(time()))
-                        if session.version == TLS1_2_VERSION &&
-                           now_s <= session.use_by_s &&
-                           in(session.cipher_suite, state.client_hello.cipher_suites) &&
-                           session.alpn_protocol == state.selected_alpn &&
-                           session.ext_master_secret &&
-                           _tls12_cipher_spec(session.cipher_suite) !== nothing &&
-                           _tls_server_session_client_auth_ok(session.client_certificates, config) do client_certificates
-                               _tls13_verify_client_certificate_chain(
-                                   client_certificates;
-                                   verify_peer = true,
-                                   ca_file = _effective_ca_file(config; is_server = true),
-                               )
-                           end
-                            state.resumption_session = session
-                            state.using_resumption = true
-                            state.cipher_suite = session.cipher_suite
-                            state.curve_id = session.curve_id
-                            state.peer_certificates = [copy(cert) for cert in session.client_certificates]
-                            keep_session = true
-                            return nothing
+                        session_compatible = session.version == TLS1_2_VERSION &&
+                            now_s <= session.use_by_s &&
+                            in(session.cipher_suite, state.client_hello.cipher_suites) &&
+                            session.alpn_protocol == state.selected_alpn &&
+                            _tls12_cipher_spec(session.cipher_suite) !== nothing &&
+                            _tls_server_session_client_auth_ok(session.client_certificates, config) do client_certificates
+                                _tls13_verify_client_certificate_chain(
+                                    client_certificates;
+                                    verify_peer = true,
+                                    ca_file = _effective_ca_file(config; is_server = true),
+                                )
+                            end
+                        if session_compatible
+                            # RFC 7627 section 5.3 deliberately treats the two
+                            # cross-mode cases differently. An old non-EMS
+                            # session offered by an EMS-capable client falls
+                            # back to a full handshake, while resuming an EMS
+                            # session without EMS is a fatal downgrade.
+                            if !session.ext_master_secret && state.client_hello.extended_master_secret
+                                # Continue below with a fresh EMS handshake.
+                            elseif session.ext_master_secret && !state.client_hello.extended_master_secret
+                                _tls_fail(
+                                    _TLS_ALERT_HANDSHAKE_FAILURE,
+                                    "tls: session supported extended_master_secret but client does not",
+                                )
+                            else
+                                state.resumption_session = session
+                                state.using_resumption = true
+                                state.cipher_suite = session.cipher_suite
+                                state.curve_id = session.curve_id
+                                state.peer_certificates = [copy(cert) for cert in session.client_certificates]
+                                keep_session = true
+                                return nothing
+                            end
                         end
                     finally
                         keep_session || _securezero_tls12_server_session!(session::_TLS12ServerSession)
@@ -417,7 +429,7 @@ function _tls12_send_server_hello!(
     server_hello.session_id = state.using_resumption ? copy(state.client_hello.session_id) : UInt8[]
     server_hello.cipher_suite = state.cipher_suite
     server_hello.compression_method = _TLS_COMPRESSION_NONE
-    server_hello.extended_master_secret = true
+    server_hello.extended_master_secret = state.client_hello.extended_master_secret
     server_hello.ticket_supported = state.client_hello.ticket_supported && !config.session_tickets_disabled
     server_hello.secure_renegotiation_supported = state.client_hello.secure_renegotiation_supported
     server_hello.server_name_ack = !isempty(state.client_hello.server_name)
@@ -761,11 +773,20 @@ function _server_handshake_tls12_for_suite!(
         _tls12_read_client_certificate!(state, io, transcript, config)
         client_key_exchange = _tls12_read_client_key_exchange!(state, io, transcript)
         shared_secret = _tls12_server_shared_secret(state, client_key_exchange)
-        master_secret = _tls12_extended_master_from_pre_master_secret(
-            hash_kind,
-            shared_secret,
-            _transcript_digest(transcript),
-        )
+        master_secret = if state.server_hello.extended_master_secret
+            _tls12_extended_master_from_pre_master_secret(
+                hash_kind,
+                shared_secret,
+                _transcript_digest(transcript),
+            )
+        else
+            _tls12_master_from_pre_master_secret(
+                hash_kind,
+                shared_secret,
+                state.client_hello.random,
+                state.server_hello.random,
+            )
+        end
         _tls12_read_client_certificate_verify!(state, io, transcript)
         _discard_transcript_buffer!(transcript)
         key_block = _tls12_keys_from_master_secret(
