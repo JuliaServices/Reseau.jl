@@ -24,6 +24,7 @@ Base.@enum T::UInt8 begin
     EMPTY = 0x00
     WAITING = 0x01
     NOTIFIED = 0x02
+    CANCELED = 0x03
 end
 end
 
@@ -68,10 +69,9 @@ task at a time.
 """
 mutable struct PollWaiter
     @atomic state::PollWaiterState.T
-    @atomic reason::PollWakeReason.T
     task::Union{Nothing, Task}
     function PollWaiter()
-        return new(PollWaiterState.EMPTY, PollWakeReason.READY, nothing)
+        return new(PollWaiterState.EMPTY, nothing)
     end
 end
 
@@ -100,28 +100,25 @@ function pollwait!(waiter::PollWaiter)::PollWakeReason.T
         if ok
             wait()
         else
-            state == PollWaiterState.NOTIFIED || throw(ArgumentError("concurrent wait on PollWaiter"))
+            (state == PollWaiterState.NOTIFIED || state == PollWaiterState.CANCELED) ||
+                throw(ArgumentError("concurrent wait on PollWaiter"))
         end
         while true
-            # A notifier can win the race before we actually reach `wait()`, so
-            # we loop until the NOTIFIED token is consumed or a clean EMPTY
-            # state is observed.
+            # The notification state carries its reason in the same atomic word,
+            # so consuming the token cannot race a separate reason publication.
             state, ok = @atomicreplace(waiter.state, PollWaiterState.NOTIFIED => PollWaiterState.EMPTY)
-            ok && return @atomic :acquire waiter.reason
-            state == PollWaiterState.EMPTY && return @atomic :acquire waiter.reason
+            ok && return PollWakeReason.READY
+            if state == PollWaiterState.CANCELED
+                state, ok = @atomicreplace(waiter.state, PollWaiterState.CANCELED => PollWaiterState.EMPTY)
+                ok && return PollWakeReason.CANCELED
+                continue
+            end
             state == PollWaiterState.WAITING || throw(ArgumentError("invalid PollWaiter state"))
             wait()
         end
     finally
         waiter.task = nothing
     end
-end
-
-@inline function _merge_wake_reason(
-        current::PollWakeReason.T,
-        incoming::PollWakeReason.T,
-    )::PollWakeReason.T
-    return current == PollWakeReason.READY ? current : incoming
 end
 
 """
@@ -140,23 +137,26 @@ function pollnotify!(waiter::PollWaiter, reason::PollWakeReason.T = PollWakeReas
     state = @atomic :acquire waiter.state
     while true
         if state == PollWaiterState.NOTIFIED
-            current = @atomic :acquire waiter.reason
-            merged = _merge_wake_reason(current, reason)
-            merged == current && return false
-            @atomic :release waiter.reason = merged
             return false
         end
-        state, ok = @atomicreplace(waiter.state, state => PollWaiterState.NOTIFIED)
+        if state == PollWaiterState.CANCELED
+            reason == PollWakeReason.CANCELED && return false
+            state, ok = @atomicreplace(waiter.state, PollWaiterState.CANCELED => PollWaiterState.NOTIFIED)
+            ok && return false
+            continue
+        end
+        notified_state = reason == PollWakeReason.READY ? PollWaiterState.NOTIFIED : PollWaiterState.CANCELED
+        previous_state = state
+        state, ok = @atomicreplace(waiter.state, previous_state => notified_state)
         ok || continue
-        @atomic :release waiter.reason = reason
-        if state == PollWaiterState.WAITING
+        if previous_state == PollWaiterState.WAITING
             task = waiter.task
             task isa Task || throw(ArgumentError("invalid PollWaiter task state"))
             # `schedule(task)` is the low-level dual of the `wait()` above.
             schedule(task)
             return true
         end
-        state == PollWaiterState.EMPTY || throw(ArgumentError("invalid PollWaiter state"))
+        previous_state == PollWaiterState.EMPTY || throw(ArgumentError("invalid PollWaiter state"))
         return false
     end
 end

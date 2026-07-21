@@ -155,13 +155,36 @@ end
         @testset "pollwait wake reason precedence" begin
             waiter = NP.PollWaiter()
             @test !NP.pollnotify!(waiter, NP.PollWakeReason.CANCELED)
+            @test (@atomic :acquire waiter.state) == NP.PollWaiterState.CANCELED
             @test !NP.pollnotify!(waiter, NP.PollWakeReason.READY)
+            @test (@atomic :acquire waiter.state) == NP.PollWaiterState.NOTIFIED
             @test NP.pollwait!(waiter) == NP.PollWakeReason.READY
+            @test (@atomic :acquire waiter.state) == NP.PollWaiterState.EMPTY
 
             waiter = NP.PollWaiter()
             @test !NP.pollnotify!(waiter, NP.PollWakeReason.READY)
             @test !NP.pollnotify!(waiter, NP.PollWakeReason.CANCELED)
+            @test (@atomic :acquire waiter.state) == NP.PollWaiterState.NOTIFIED
             @test NP.pollwait!(waiter) == NP.PollWakeReason.READY
+
+            waiter = NP.PollWaiter()
+            @test !NP.pollnotify!(waiter, NP.PollWakeReason.CANCELED)
+            @test NP.pollwait!(waiter) == NP.PollWakeReason.CANCELED
+            @test (@atomic :acquire waiter.state) == NP.PollWaiterState.EMPTY
+
+            for i in 1:128
+                waiter = NP.PollWaiter()
+                expected = isodd(i) ? NP.PollWakeReason.READY : NP.PollWakeReason.CANCELED
+                waiter_task = errormonitor(Threads.@spawn NP.pollwait!(waiter))
+                deadline = time_ns() + 2_000_000_000
+                while (@atomic :acquire waiter.state) != NP.PollWaiterState.WAITING && !istaskdone(waiter_task)
+                    time_ns() < deadline || error("timed out waiting for PollWaiter to park")
+                    yield()
+                end
+                @test NP.pollnotify!(waiter, expected)
+                @test fetch(waiter_task) == expected
+                @test (@atomic :acquire waiter.state) == NP.PollWaiterState.EMPTY
+            end
         end
         _el_log_test_progress("DONE: pollwait wake reason precedence")
         _el_log_test_progress("START: backend delay semantics")
