@@ -478,7 +478,7 @@ end
             @test length(connect_addrs) == 2
             @test connect_addrs[1] isa NC.SocketAddrV4
             @test connect_addrs[2] isa NC.SocketAddrV6
-            fake_fd = NC._new_netfd(Cint(-1))
+            fake_fd = NC._new_netfd(SO.INVALID_SOCKET)
             fake_fd.laddr = NC.loopback_addr(5000)
             fake_fd.raddr = NC.loopback_addr(5000)
             @test NC._is_self_connect(NC.Conn(fake_fd))

@@ -12,7 +12,7 @@ Fields:
 """
 mutable struct FD
     fdlock::FDLock
-    sysfd::Cint
+    sysfd::SysFD
     pd::PollState
     csema::Base.Semaphore
     @atomic is_blocking::Bool
@@ -20,14 +20,14 @@ mutable struct FD
     zero_read_is_eof::Bool
     is_file::Bool
     function FD(
-            sysfd::Integer;
+            sysfd::SysFD;
             is_stream::Bool = true,
             zero_read_is_eof::Bool = true,
             is_file::Bool = false,
         )
         return new(
             FDLock(),
-            Cint(sysfd),
+            sysfd,
             PollState(),
             _new_binary_semaphore0(),
             false,
@@ -295,7 +295,7 @@ function Base.close(pd::PollState)
     finally
         unlock(pd.lock)
     end
-    was_pollable && pd.sysfd >= 0 && deregister!(pd)
+    was_pollable && _is_valid_fd(pd.sysfd) && deregister!(pd)
     return nothing
 end
 
@@ -477,7 +477,7 @@ function set_write_deadline!(fd::FD, deadline_ns::Integer)
     return nothing
 end
 
-function _set_nonblocking!(fd::Cint)
+function _set_nonblocking!(fd::SysFD)
     SocketOps.set_nonblocking!(fd, true)
     return nothing
 end
@@ -565,9 +565,9 @@ end
 
 function _destroy!(fd::FD)
     close(fd.pd)
-    if fd.sysfd >= 0
+    if _is_valid_fd(fd.sysfd)
         SocketOps.close_socket_nothrow(fd.sysfd)
-        fd.sysfd = Cint(-1)
+        fd.sysfd = INVALID_FD
     end
     Base.release(fd.csema)
     return nothing
@@ -651,7 +651,7 @@ Accept one non-blocking child fd from `fd`.
 This mirrors Go `internal/poll` accept semantics: read-lock + prepare + retry
 on `EINTR`/`ECONNABORTED`, wait on `EAGAIN`.
 """
-function accept!(fd::FD, family::Cint, sotype::Cint)::Tuple{Cint, SocketOps.AcceptPeer}
+function accept!(fd::FD, family::Cint, sotype::Cint)::Tuple{SysFD, SocketOps.AcceptPeer}
     _fd_read_lock!(fd)
     try
         prepareread(fd.pd, fd.is_file)
@@ -692,7 +692,7 @@ function accept!(fd::FD, family::Cint, sotype::Cint)::Tuple{Cint, SocketOps.Acce
                 throw(SystemError("acceptex", Int(errno)))
             end
             child_sysfd, peer_addr, errno = SocketOps.try_accept_socket(fd.sysfd)
-            if child_sysfd != Cint(-1)
+            if _is_valid_fd(child_sysfd)
                 return child_sysfd, peer_addr
             end
             if errno == Int32(Base.Libc.EAGAIN) && pollable(fd.pd)

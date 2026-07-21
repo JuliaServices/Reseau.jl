@@ -24,7 +24,7 @@ function _close_quiet!(x)
 end
 
 function _fake_dial_conn(; self_connect::Bool)::NC.Conn
-    fd = NC._new_netfd(Cint(-1))
+    fd = NC._new_netfd(SO.INVALID_SOCKET)
     fd.laddr = NC.loopback_addr(self_connect ? 5000 : 5001)
     fd.raddr = NC.loopback_addr(5000)
     return NC.Conn(fd)
@@ -774,14 +774,14 @@ end
                     pollint = 0.001,
                 ) != :timed_out
                 @test !isopen(server)
-                @test server.fd.pfd.sysfd >= 0
+                @test IP._is_valid_fd(server.fd.pfd.sysfd)
                 @test _nc_wait_task_done(close_task, 0.05) == :timed_out
 
                 IP._fd_read_unlock!(server.fd.pfd)
                 read_lock_held = false
                 @test _nc_wait_task_done(close_task, 2.0) != :timed_out
                 @test fetch(close_task) === nothing
-                @test server.fd.pfd.sysfd == Cint(-1)
+                @test server.fd.pfd.sysfd == IP.INVALID_FD
             finally
                 read_lock_held && IP._fd_read_unlock!(server.fd.pfd)
                 close_task isa Task && !istaskdone(close_task) && wait(close_task)
@@ -835,12 +835,12 @@ end
             fd = nothing
             try
                 fd = NC.open_tcp_fd!()
-                @test fd.pfd.sysfd >= 0
+                @test IP._is_valid_fd(fd.pfd.sysfd)
                 sysfd_before = fd.pfd.sysfd
                 finalize(fd)
                 @test fd.pfd.sysfd == sysfd_before
                 close(fd)
-                @test fd.pfd.sysfd == Cint(-1)
+                @test fd.pfd.sysfd == IP.INVALID_FD
             finally
                 _close_quiet!(fd)
                 IP.shutdown!()
@@ -925,7 +925,7 @@ end
                     end
                     @test _nc_wait_task_done(close_task, 2.0) != :timed_out
                     @test fetch(close_task) === nothing
-                    @test client.fd.pfd.sysfd == Cint(-1)
+                    @test client.fd.pfd.sysfd == IP.INVALID_FD
                 finally
                     for task in control_tasks
                         istaskdone(task) || wait(task)

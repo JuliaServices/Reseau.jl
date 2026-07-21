@@ -7,9 +7,9 @@ const SO = Reseau.SocketOps
 const _EL_EWOULDBLOCK = @static isdefined(Base.Libc, :EWOULDBLOCK) ? Int32(getfield(Base.Libc, :EWOULDBLOCK)) : Int32(Base.Libc.EAGAIN)
 
 function _el_socketpair_stream()
-    listener = Cint(-1)
-    client = Cint(-1)
-    accepted = Cint(-1)
+    listener = SO.INVALID_SOCKET
+    client = SO.INVALID_SOCKET
+    accepted = SO.INVALID_SOCKET
     try
         _el_log_test_progress("_el_socketpair_stream: listener")
         listener = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
@@ -31,27 +31,27 @@ function _el_socketpair_stream()
         accepted, _ = _el_accept_with_retry(listener)
         stream_client = client
         stream_server = accepted
-        client = Cint(-1)
-        accepted = Cint(-1)
+        client = SO.INVALID_SOCKET
+        accepted = SO.INVALID_SOCKET
         return stream_client, stream_server
     finally
-        accepted >= 0 && SO.close_socket_nothrow(accepted)
-        client >= 0 && SO.close_socket_nothrow(client)
-        listener >= 0 && SO.close_socket_nothrow(listener)
+        SO.is_valid_socket(accepted) && SO.close_socket_nothrow(accepted)
+        SO.is_valid_socket(client) && SO.close_socket_nothrow(client)
+        SO.is_valid_socket(listener) && SO.close_socket_nothrow(listener)
     end
 end
 
-function _el_open_stream_fd()::Cint
+function _el_open_stream_fd()::SO.SocketFD
     return SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
 end
 
-function _el_close_fd(fd::Cint)
-    fd < 0 && return nothing
+function _el_close_fd(fd::SO.SocketFD)
+    SO.is_valid_socket(fd) || return nothing
     SO.close_socket_nothrow(fd)
     return nothing
 end
 
-function _el_write_byte(fd::Cint, b::UInt8)
+function _el_write_byte(fd::SO.SocketFD, b::UInt8)
     buf = Ref{UInt8}(b)
     for _ in 1:5000
         n = GC.@preserve buf SO.write_once!(fd, Base.unsafe_convert(Ptr{UInt8}, buf), Csize_t(1))
@@ -65,7 +65,7 @@ function _el_write_byte(fd::Cint, b::UInt8)
     throw(ArgumentError("timed out writing byte"))
 end
 
-function _el_read_byte(fd::Cint)
+function _el_read_byte(fd::SO.SocketFD)
     buf = Ref{UInt8}(0x00)
     for _ in 1:5000
         n = GC.@preserve buf SO.read_once!(fd, Base.unsafe_convert(Ptr{UInt8}, buf), Csize_t(1))
@@ -101,10 +101,10 @@ end
 # them would starve the companion task that is supposed to drive the wakeup.
 _el_can_block_julia_worker() = Threads.nthreads() > 1
 
-function _el_accept_with_retry(listener::Cint)::Tuple{Cint, SO.AcceptPeer}
+function _el_accept_with_retry(listener::SO.SocketFD)::Tuple{SO.SocketFD, SO.AcceptPeer}
     for _ in 1:5000
         accepted, peer, errno = SO.try_accept_socket(listener)
-        accepted != -1 && return accepted, peer
+        SO.is_valid_socket(accepted) && return accepted, peer
         errno == Int32(Base.Libc.EAGAIN) && (yield(); continue)
         errno == _EL_EWOULDBLOCK && (yield(); continue)
         errno == Int32(Base.Libc.EINTR) && continue
@@ -113,7 +113,7 @@ function _el_accept_with_retry(listener::Cint)::Tuple{Cint, SO.AcceptPeer}
     throw(ArgumentError("timed out waiting for accepted socket"))
 end
 
-function _el_wait_connect_ready!(fd::Cint)
+function _el_wait_connect_ready!(fd::SO.SocketFD)
     registration = IP.register!(fd; mode = IP.PollMode.WRITE)
     try
         # Unix backends observe writability directly from the registration, but
@@ -287,15 +287,15 @@ end
             old_poller = NP.POLLER[]
             state = NP.Poller()
             poll_task = nothing
-            fd0 = Cint(-1)
-            fd1 = Cint(-1)
+            fd0 = SO.INVALID_SOCKET
+            fd1 = SO.INVALID_SOCKET
             try
                 errno = NP._backend_init!(state)
                 @test errno == Int32(0)
                 @atomic :release state.running = true
                 NP.POLLER[] = state
                 fd0 = _el_open_stream_fd()
-                fd1 = Cint(-1)
+                fd1 = SO.INVALID_SOCKET
                 token = UInt64(41)
                 registration = NP.Registration(fd0, token, NP.PollMode.READWRITE, NP.PollWaiter(), NP.PollWaiter(), false)
                 state.registrations[fd0] = registration
@@ -390,8 +390,8 @@ end
                 NP.deregister!(fd0)
                 _el_close_fd(fd0)
                 _el_close_fd(fd1)
-                fd0 = Cint(-1)
-                fd1 = Cint(-1)
+                fd0 = SO.INVALID_SOCKET
+                fd1 = SO.INVALID_SOCKET
                 fd0, fd1 = _el_socketpair_stream()
                 registration2 = NP.register!(fd0; mode = NP.PollMode.READ)
                 token2 = registration2.token
@@ -406,7 +406,7 @@ end
                     return nothing
                 end)
                 @test _el_wait_channel_ready(wait_started, 2.0) != :timed_out
-                stale = NP.PollEvent(Cint(-1), token1, NP.PollMode.READ, false)
+                stale = NP.PollEvent(NP.INVALID_FD, token1, NP.PollMode.READ, false)
                 NP._dispatch_ready_event!(state, stale)
                 stale_status = timedwait(() -> isready(wait_ch), 0.05; pollint = 0.001)
                 @test stale_status == :timed_out

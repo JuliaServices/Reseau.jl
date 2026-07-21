@@ -14,10 +14,10 @@ end
 
 const _PC_EWOULDBLOCK = @static isdefined(Base.Libc, :EWOULDBLOCK) ? Int32(getfield(Base.Libc, :EWOULDBLOCK)) : Int32(Base.Libc.EAGAIN)
 
-function _pc_stream_pair()::Tuple{Cint, Cint}
-    listener = Cint(-1)
-    client = Cint(-1)
-    accepted = Cint(-1)
+function _pc_stream_pair()::Tuple{SO.SocketFD, SO.SocketFD}
+    listener = SO.INVALID_SOCKET
+    client = SO.INVALID_SOCKET
+    accepted = SO.INVALID_SOCKET
     try
         listener = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
         SO.set_sockopt_int(listener, SO.SOL_SOCKET, SO.SO_REUSEADDR, 1)
@@ -36,23 +36,23 @@ function _pc_stream_pair()::Tuple{Cint, Cint}
         accepted = _pc_accept_with_retry!(listener)
         stream_client = client
         stream_server = accepted
-        client = Cint(-1)
-        accepted = Cint(-1)
+        client = SO.INVALID_SOCKET
+        accepted = SO.INVALID_SOCKET
         return stream_client, stream_server
     finally
-        accepted >= 0 && SO.close_socket_nothrow(accepted)
-        client >= 0 && SO.close_socket_nothrow(client)
-        listener >= 0 && SO.close_socket_nothrow(listener)
+        SO.is_valid_socket(accepted) && SO.close_socket_nothrow(accepted)
+        SO.is_valid_socket(client) && SO.close_socket_nothrow(client)
+        SO.is_valid_socket(listener) && SO.close_socket_nothrow(listener)
     end
 end
 
-function _pc_close_fd(fd::Cint)
-    fd < 0 && return nothing
+function _pc_close_fd(fd::SO.SocketFD)
+    SO.is_valid_socket(fd) || return nothing
     SO.close_socket_nothrow(fd)
     return nothing
 end
 
-function _pc_write_byte(fd::Cint, b::UInt8)
+function _pc_write_byte(fd::SO.SocketFD, b::UInt8)
     buf = Ref{UInt8}(b)
     for _ in 1:5000
         n = GC.@preserve buf SO.write_once!(fd, Base.unsafe_convert(Ptr{UInt8}, buf), Csize_t(1))
@@ -66,7 +66,7 @@ function _pc_write_byte(fd::Cint, b::UInt8)
     throw(ArgumentError("timed out writing byte"))
 end
 
-function _pc_write_all!(fd::Cint, data::Vector{UInt8})::Nothing
+function _pc_write_all!(fd::SO.SocketFD, data::Vector{UInt8})::Nothing
     offset = 0
     while offset < length(data)
         n = GC.@preserve data SO.write_once!(fd, pointer(data, offset + 1), Csize_t(length(data) - offset))
@@ -83,7 +83,7 @@ function _pc_write_all!(fd::Cint, data::Vector{UInt8})::Nothing
     return nothing
 end
 
-function _pc_read_exact_fd!(fd::Cint, data::Vector{UInt8})::Nothing
+function _pc_read_exact_fd!(fd::SO.SocketFD, data::Vector{UInt8})::Nothing
     offset = 0
     while offset < length(data)
         n = GC.@preserve data SO.read_once!(fd, pointer(data, offset + 1), Csize_t(length(data) - offset))
@@ -106,7 +106,7 @@ function _pc_read_exact!(conn::NC.Conn, buf::Vector{UInt8})::Int
     return length(buf)
 end
 
-function _pc_wait_connect_ready!(fd::Cint)
+function _pc_wait_connect_ready!(fd::SO.SocketFD)
     registration = IP.register!(fd; mode = IP.PollMode.WRITE)
     try
         IP.arm_waiter!(registration, IP.PollMode.WRITE)
@@ -117,10 +117,10 @@ function _pc_wait_connect_ready!(fd::Cint)
     return nothing
 end
 
-function _pc_accept_with_retry!(listener::Cint)::Cint
+function _pc_accept_with_retry!(listener::SO.SocketFD)::SO.SocketFD
     for _ in 1:5000
         accepted, _, errno = SO.try_accept_socket(listener)
-        accepted != -1 && return accepted
+        SO.is_valid_socket(accepted) && return accepted
         errno == Int32(Base.Libc.EAGAIN) && (yield(); continue)
         errno == _PC_EWOULDBLOCK && (yield(); continue)
         errno == Int32(Base.Libc.EINTR) && continue
@@ -153,8 +153,8 @@ function _pc_run_eventloops_workload!()
     IP.pollwait!(waiter)
     _pc_runtime_supported() || return nothing
     state = IP.Poller()
-    fd0 = Cint(-1)
-    fd1 = Cint(-1)
+    fd0 = SO.INVALID_SOCKET
+    fd1 = SO.INVALID_SOCKET
     backend_open = false
     try
         errno = IP._backend_init!(state)
@@ -198,7 +198,7 @@ function _pc_run_internal_poll_workload!()
     _pc_runtime_supported() || return nothing
     fd0, fd1 = _pc_stream_pair()
     ipfd = IP.FD(fd0)
-    fd0 = Cint(-1)
+    fd0 = SO.INVALID_SOCKET
     try
         IP._set_nonblocking!(ipfd.sysfd)
         IP.register!(ipfd)
@@ -213,7 +213,7 @@ function _pc_run_internal_poll_workload!()
         n = IP.read!(ipfd, Vector{UInt8}(undef, 1))
         n == 1 || error("internal poll workload expected one-byte read")
     finally
-        ipfd.sysfd >= 0 && close(ipfd)
+        IP._is_valid_fd(ipfd.sysfd) && close(ipfd)
         _pc_close_fd(fd1)
         IP.shutdown!()
     end
@@ -222,9 +222,9 @@ end
 
 function _pc_run_socket_ops_workload!()
     _pc_runtime_supported() || return nothing
-    listener = Cint(-1)
-    client = Cint(-1)
-    accepted = Cint(-1)
+    listener = SO.INVALID_SOCKET
+    client = SO.INVALID_SOCKET
+    accepted = SO.INVALID_SOCKET
     try
         listener = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
         SO.set_sockopt_int(listener, SO.SOL_SOCKET, SO.SO_REUSEADDR, 1)
@@ -248,9 +248,9 @@ function _pc_run_socket_ops_workload!()
         _pc_write_all!(client, payload)
         _pc_read_exact_fd!(accepted, recv_buf)
     finally
-        accepted >= 0 && SO.close_socket_nothrow(accepted)
-        client >= 0 && SO.close_socket_nothrow(client)
-        listener >= 0 && SO.close_socket_nothrow(listener)
+        SO.is_valid_socket(accepted) && SO.close_socket_nothrow(accepted)
+        SO.is_valid_socket(client) && SO.close_socket_nothrow(client)
+        SO.is_valid_socket(listener) && SO.close_socket_nothrow(listener)
         IP.shutdown!()
     end
     return nothing

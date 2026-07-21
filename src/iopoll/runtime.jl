@@ -22,7 +22,7 @@ end
     return Sys.isapple() || Sys.islinux() || Sys.iswindows() || Sys.isfreebsd()
 end
 
-function _new_registration(fd::Cint, token::UInt64, mode::PollMode.T)::Registration
+function _new_registration(fd::SysFD, token::UInt64, mode::PollMode.T)::Registration
     return Registration(fd, token, mode, PollWaiter(), PollWaiter(), false)
 end
 
@@ -222,28 +222,28 @@ Returns the created `Registration`.
 Throws `ArgumentError` if `mode` is empty, or `SystemError` if the descriptor is
 already registered or the backend registration syscall fails.
 """
-function register!(fd::Integer; mode::PollMode.T = PollMode.READWRITE, pollstate::Union{Nothing, PollState} = nothing)::Registration
+function register!(fd::SysFD; mode::PollMode.T = PollMode.READWRITE, pollstate::Union{Nothing, PollState} = nothing)::Registration
     _mode_is_empty(mode) && throw(ArgumentError("register! requires READ and/or WRITE mode"))
     state = init!()
-    cfd = Cint(fd)
+    sysfd = fd
     token = UInt64(0)
     registration = nothing
     errno = Int32(0)
     lock(state.lock)
     try
         (@atomic :acquire state.running) || throw(SystemError("iopoll register", Int(Base.Libc.EBADF)))
-        existing = get(state.registrations, cfd, nothing)
+        existing = get(state.registrations, sysfd, nothing)
         existing === nothing || throw(SystemError("iopoll register", Int(Base.Libc.EEXIST)))
         token = _next_token!(state)
-        errno = _backend_open_fd!(state, cfd, mode, token)
+        errno = _backend_open_fd!(state, sysfd, mode, token)
         if errno == Int32(0)
-            registration = _new_registration(cfd, token, mode)
+            registration = _new_registration(sysfd, token, mode)
             if pollstate !== nothing
                 registration.pollstate = pollstate::PollState
             end
-            registration.pollstate.sysfd = cfd
+            registration.pollstate.sysfd = sysfd
             registration.pollstate.token = token
-            state.registrations[cfd] = registration
+            state.registrations[sysfd] = registration
             state.registrations_by_token[token] = registration
         end
     finally
@@ -263,19 +263,19 @@ Returns `nothing`.
 Any parked waiters are notified so they can re-check descriptor state and see
 the close/eviction condition promptly.
 """
-function deregister!(fd::Integer)
+function deregister!(fd::SysFD)
     isassigned(POLLER) || return nothing
     state = POLLER[]
     (@atomic :acquire state.running) || return nothing
-    cfd = Cint(fd)
+    sysfd = fd
     registration = nothing
     errno = Int32(0)
     lock(state.lock)
     try
         (@atomic :acquire state.running) || return nothing
-        registration = pop!(state.registrations, cfd, nothing)
+        registration = pop!(state.registrations, sysfd, nothing)
         registration === nothing || delete!(state.registrations_by_token, registration.token)
-        errno = _backend_close_fd!(state, cfd)
+        errno = _backend_close_fd!(state, sysfd)
     finally
         unlock(state.lock)
     end
@@ -362,7 +362,7 @@ function _dispatch_ready_event!(state::Poller, event::PollEvent)
         if registration === nothing
             return nothing
         end
-        if event.fd != Cint(-1)
+        if _is_valid_fd(event.fd)
             registration.fd == event.fd || return nothing
         end
         event.errored && (@atomic :release registration.event_err = true)

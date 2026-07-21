@@ -336,7 +336,7 @@ end
 end
 
 function _new_netfd(
-        sysfd::Cint;
+        sysfd::SocketOps.SocketFD;
         family::Cint = SocketOps.AF_INET,
         sotype::Cint = SocketOps.SOCK_STREAM,
         net::Symbol = :tcp,

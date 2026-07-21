@@ -2748,8 +2748,8 @@ end
 end
 
 @inline _show_role(conn::Conn) = conn.is_server ? "server" : "client"
-@inline _show_state(listener::Listener) = listener.listener.fd.pfd.sysfd >= 0 ? "active" : "closed"
-@inline _show_closed(conn::Conn) = _is_closed(conn) || conn.native_state === nothing || conn.tcp.fd.pfd.sysfd < 0
+@inline _show_state(listener::Listener) = IOPoll._is_valid_fd(listener.listener.fd.pfd.sysfd) ? "active" : "closed"
+@inline _show_closed(conn::Conn) = _is_closed(conn) || conn.native_state === nothing || !IOPoll._is_valid_fd(conn.tcp.fd.pfd.sysfd)
 
 function Base.show(io::IO, conn::Conn)
     print(io, "TLS.Conn(")

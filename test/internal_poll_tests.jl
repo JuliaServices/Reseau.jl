@@ -6,9 +6,9 @@ const SO = Reseau.SocketOps
 const _IP_EWOULDBLOCK = @static isdefined(Base.Libc, :EWOULDBLOCK) ? Int32(getfield(Base.Libc, :EWOULDBLOCK)) : Int32(Base.Libc.EAGAIN)
 
 function _ip_socketpair_stream()
-    listener = Cint(-1)
-    client = Cint(-1)
-    accepted = Cint(-1)
+    listener = SO.INVALID_SOCKET
+    client = SO.INVALID_SOCKET
+    accepted = SO.INVALID_SOCKET
     try
         listener = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
         SO.set_sockopt_int(listener, SO.SOL_SOCKET, SO.SO_REUSEADDR, 1)
@@ -27,23 +27,23 @@ function _ip_socketpair_stream()
         accepted, _ = _ip_accept_with_retry(listener)
         stream_client = client
         stream_server = accepted
-        client = Cint(-1)
-        accepted = Cint(-1)
+        client = SO.INVALID_SOCKET
+        accepted = SO.INVALID_SOCKET
         return stream_client, stream_server
     finally
-        accepted >= 0 && SO.close_socket_nothrow(accepted)
-        client >= 0 && SO.close_socket_nothrow(client)
-        listener >= 0 && SO.close_socket_nothrow(listener)
+        SO.is_valid_socket(accepted) && SO.close_socket_nothrow(accepted)
+        SO.is_valid_socket(client) && SO.close_socket_nothrow(client)
+        SO.is_valid_socket(listener) && SO.close_socket_nothrow(listener)
     end
 end
 
-function _ip_close_fd(fd::Cint)
-    fd < 0 && return nothing
+function _ip_close_fd(fd::SO.SocketFD)
+    SO.is_valid_socket(fd) || return nothing
     SO.close_socket_nothrow(fd)
     return nothing
 end
 
-function _ip_write_byte(fd::Cint, b::UInt8)
+function _ip_write_byte(fd::SO.SocketFD, b::UInt8)
     buf = Ref{UInt8}(b)
     for _ in 1:5000
         n = GC.@preserve buf SO.write_once!(fd, Base.unsafe_convert(Ptr{UInt8}, buf), Csize_t(1))
@@ -57,10 +57,10 @@ function _ip_write_byte(fd::Cint, b::UInt8)
     throw(ArgumentError("timed out writing byte"))
 end
 
-function _ip_accept_with_retry(listener::Cint)::Tuple{Cint, SO.AcceptPeer}
+function _ip_accept_with_retry(listener::SO.SocketFD)::Tuple{SO.SocketFD, SO.AcceptPeer}
     for _ in 1:5000
         accepted, peer, errno = SO.try_accept_socket(listener)
-        accepted != -1 && return accepted, peer
+        SO.is_valid_socket(accepted) && return accepted, peer
         errno == Int32(Base.Libc.EAGAIN) && (yield(); continue)
         errno == _IP_EWOULDBLOCK && (yield(); continue)
         errno == Int32(Base.Libc.EINTR) && continue
@@ -69,7 +69,7 @@ function _ip_accept_with_retry(listener::Cint)::Tuple{Cint, SO.AcceptPeer}
     throw(ArgumentError("timed out waiting for accepted socket"))
 end
 
-function _ip_wait_connect_ready!(fd::Cint)
+function _ip_wait_connect_ready!(fd::SO.SocketFD)
     registration = IP.register!(fd; mode = IP.PollMode.WRITE)
     try
         IP.arm_waiter!(registration, IP.PollMode.WRITE)
@@ -104,7 +104,7 @@ end
             fd0, fd1 = _ip_socketpair_stream()
             ipfd = IP.FD(fd0)
             read_task = nothing
-            fd0 = Cint(-1)
+            fd0 = SO.INVALID_SOCKET
             try
                 IP._set_nonblocking!(ipfd.sysfd)
                 IP.register!(ipfd)
@@ -127,7 +127,7 @@ end
                 if read_task isa Task && !istaskdone(read_task)
                     close(ipfd)
                 end
-                if ipfd.sysfd >= 0
+                if IP._is_valid_fd(ipfd.sysfd)
                     close(ipfd)
                 end
                 _ip_close_fd(fd1)
@@ -137,7 +137,7 @@ end
         @testset "read accepts contiguous byte views" begin
             fd0, fd1 = _ip_socketpair_stream()
             ipfd = IP.FD(fd0)
-            fd0 = Cint(-1)
+            fd0 = SO.INVALID_SOCKET
             try
                 IP._set_nonblocking!(ipfd.sysfd)
                 IP.register!(ipfd)
@@ -148,7 +148,7 @@ end
                 @test n == 1
                 @test backing == UInt8[0x00, 0x6a, 0x00]
             finally
-                ipfd.sysfd >= 0 && close(ipfd)
+                IP._is_valid_fd(ipfd.sysfd) && close(ipfd)
                 _ip_close_fd(fd1)
                 IP.shutdown!()
             end
@@ -156,7 +156,7 @@ end
         @testset "read deadline timeout" begin
             fd0, fd1 = _ip_socketpair_stream()
             ipfd = IP.FD(fd0)
-            fd0 = Cint(-1)
+            fd0 = SO.INVALID_SOCKET
             try
                 IP._set_nonblocking!(ipfd.sysfd)
                 IP.register!(ipfd)
@@ -167,7 +167,7 @@ end
                 n = IP.read!(ipfd, Vector{UInt8}(undef, 1))
                 @test n == 1
             finally
-                ipfd.sysfd >= 0 && close(ipfd)
+                IP._is_valid_fd(ipfd.sysfd) && close(ipfd)
                 _ip_close_fd(fd1)
                 IP.shutdown!()
             end
@@ -175,7 +175,7 @@ end
         @testset "stale deadline timer does not poison future waits" begin
             fd0, fd1 = _ip_socketpair_stream()
             ipfd = IP.FD(fd0)
-            fd0 = Cint(-1)
+            fd0 = SO.INVALID_SOCKET
             try
                 IP._set_nonblocking!(ipfd.sysfd)
                 IP.register!(ipfd)
@@ -190,7 +190,7 @@ end
                 @test n == 1
                 @test buf[1] == 0x63
             finally
-                ipfd.sysfd >= 0 && close(ipfd)
+                IP._is_valid_fd(ipfd.sysfd) && close(ipfd)
                 _ip_close_fd(fd1)
                 IP.shutdown!()
             end
@@ -199,7 +199,7 @@ end
             fd0, fd1 = _ip_socketpair_stream()
             ipfd = IP.FD(fd0)
             wait_task = nothing
-            fd0 = Cint(-1)
+            fd0 = SO.INVALID_SOCKET
             try
                 IP._set_nonblocking!(ipfd.sysfd)
                 IP.register!(ipfd)
@@ -231,7 +231,7 @@ end
                 if wait_task isa Task && !istaskdone(wait_task)
                     close(ipfd)
                 end
-                ipfd.sysfd >= 0 && close(ipfd)
+                IP._is_valid_fd(ipfd.sysfd) && close(ipfd)
                 _ip_close_fd(fd1)
                 IP.shutdown!()
             end
@@ -251,7 +251,7 @@ end
         @testset "set_deadline uses one combined heap entry and expires both sides" begin
             fd0, fd1 = _ip_socketpair_stream()
             ipfd = IP.FD(fd0)
-            fd0 = Cint(-1)
+            fd0 = SO.INVALID_SOCKET
             try
                 IP._set_nonblocking!(ipfd.sysfd)
                 IP.register!(ipfd)
@@ -276,7 +276,7 @@ end
                 @test IP._check_error(ipfd.pd, IP.PollMode.READ) == Int32(0)
                 @test IP._check_error(ipfd.pd, IP.PollMode.WRITE) == Int32(0)
             finally
-                ipfd.sysfd >= 0 && close(ipfd)
+                IP._is_valid_fd(ipfd.sysfd) && close(ipfd)
                 _ip_close_fd(fd1)
                 IP.shutdown!()
             end
@@ -285,7 +285,7 @@ end
             fd0, fd1 = _ip_socketpair_stream()
             ipfd = IP.FD(fd0)
             read_task = nothing
-            fd0 = Cint(-1)
+            fd0 = SO.INVALID_SOCKET
             try
                 IP._set_nonblocking!(ipfd.sysfd)
                 IP.register!(ipfd)
@@ -317,7 +317,7 @@ end
             control_task = nothing
             close_task = nothing
             release_control = Channel{Nothing}(1)
-            fd0 = Cint(-1)
+            fd0 = SO.INVALID_SOCKET
             try
                 held_fd = Channel{Cint}(1)
                 control_task = errormonitor(Threads.@spawn begin
@@ -340,7 +340,7 @@ end
                 @test fetch(control_task) == sysfd
                 @test IP.timedwait(() -> istaskdone(close_task), 2.0; pollint = 0.001) != :timed_out
                 @test fetch(close_task) === nothing
-                @test ipfd.sysfd == Cint(-1)
+                @test ipfd.sysfd == IP.INVALID_FD
 
                 @test_throws IP.NetClosingError IP.shutdown_socket!(ipfd, SO.SHUT_RD)
                 @test_throws IP.NetClosingError IP.set_sockopt_int!(ipfd, SO.SOL_SOCKET, SO.SO_KEEPALIVE, 1)
@@ -352,7 +352,7 @@ end
                 if close_task isa Task && !istaskdone(close_task)
                     wait(close_task)
                 end
-                ipfd.sysfd >= 0 && close(ipfd)
+                IP._is_valid_fd(ipfd.sysfd) && close(ipfd)
                 _ip_close_fd(fd1)
                 IP.shutdown!()
             end
@@ -360,7 +360,7 @@ end
         @testset "event error maps to not pollable" begin
             fd0, fd1 = _ip_socketpair_stream()
             ipfd = IP.FD(fd0)
-            fd0 = Cint(-1)
+            fd0 = SO.INVALID_SOCKET
             try
                 IP._set_nonblocking!(ipfd.sysfd)
                 IP.register!(ipfd)
@@ -369,7 +369,7 @@ end
                 IP._dispatch_ready_event!(state, event)
                 @test_throws IP.NotPollableError IP.prepareread(ipfd.pd)
             finally
-                ipfd.sysfd >= 0 && close(ipfd)
+                IP._is_valid_fd(ipfd.sysfd) && close(ipfd)
                 _ip_close_fd(fd1)
                 IP.shutdown!()
             end
@@ -378,7 +378,7 @@ end
             fd0, fd1 = _ip_socketpair_stream()
             ipfd = IP.FD(fd0)
             wait_task = nothing
-            fd0 = Cint(-1)
+            fd0 = SO.INVALID_SOCKET
             try
                 IP._set_nonblocking!(ipfd.sysfd)
                 IP.register!(ipfd)
@@ -398,7 +398,7 @@ end
                 if wait_task isa Task && !istaskdone(wait_task)
                     close(ipfd)
                 end
-                ipfd.sysfd >= 0 && close(ipfd)
+                IP._is_valid_fd(ipfd.sysfd) && close(ipfd)
                 _ip_close_fd(fd1)
                 IP.shutdown!()
             end

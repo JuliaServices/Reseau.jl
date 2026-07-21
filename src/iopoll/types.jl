@@ -1,3 +1,8 @@
+const SysFD = SocketOps.SocketFD
+const INVALID_FD = SocketOps.INVALID_SOCKET
+
+@inline _is_valid_fd(fd::SysFD)::Bool = SocketOps.is_valid_socket(fd)
+
 """
     PollMode
 
@@ -256,7 +261,7 @@ Fields:
 - `errored`: whether the backend reported an error/hangup condition
 """
 struct PollEvent
-    fd::Cint
+    fd::SysFD
     token::UInt64
     mode::PollMode.T
     errored::Bool
@@ -275,7 +280,7 @@ deadline entries after deadline changes without mutating the heap in place.
 """
 mutable struct PollState
     lock::ReentrantLock
-    sysfd::Cint
+    sysfd::SysFD
     token::UInt64
     @atomic pollable::Bool
     @atomic closing::Bool
@@ -284,10 +289,10 @@ mutable struct PollState
     @atomic wd_ns::Int64
     @atomic rseq::UInt64
     @atomic wseq::UInt64
-    function PollState(sysfd::Integer = Cint(-1), token::UInt64 = UInt64(0))
+    function PollState(sysfd::SysFD = INVALID_FD, token::UInt64 = UInt64(0))
         return new(
             ReentrantLock(),
-            Cint(sysfd),
+            sysfd,
             token,
             false,
             false,
@@ -312,7 +317,7 @@ Each active OS descriptor has one `Registration`, which is the home for:
 - the `PollState` consumed by higher layers
 """
 mutable struct Registration
-    fd::Cint
+    fd::SysFD
     token::UInt64
     mode::PollMode.T
     read_waiter::PollWaiter
@@ -322,7 +327,7 @@ mutable struct Registration
 end
 
 function Registration(
-        fd::Cint,
+        fd::SysFD,
         token::UInt64,
         mode::PollMode.T,
         read_waiter::PollWaiter,
@@ -373,7 +378,7 @@ abstract type BackendState end
 
 mutable struct Poller
     lock::ReentrantLock
-    registrations::Dict{Cint, Registration}
+    registrations::Dict{SysFD, Registration}
     registrations_by_token::Dict{UInt64, Registration}
     time_heap::Vector{TimeEntry}
     shutdown_event::Base.Threads.Event
@@ -386,7 +391,7 @@ end
 function Poller()
     return Poller(
         ReentrantLock(),
-        Dict{Cint, Registration}(),
+        Dict{SysFD, Registration}(),
         Dict{UInt64, Registration}(),
         TimeEntry[],
         Base.Threads.Event(),
