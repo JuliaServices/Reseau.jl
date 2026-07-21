@@ -765,11 +765,15 @@ by `pointer`, such as `@view bytes[2:5]`.
 """
 function read!(fd::FD, p::MutableByteBuffer)::Int
     GC.@preserve p begin
-        return _read_ptr_some!(fd, pointer(p), length(p))
+        return _read_ptr_some!(fd, pointer(p), length(p), p)
     end
 end
 
-function _read_ptr_some!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
+# `root` (when given) is the object backing `p`; on Windows it is rooted in the
+# overlapped op so the kernel-owned WSARecv buffer stays reachable for the op's
+# full lifetime. Raw-pointer callers (e.g. tcp `unsafe` reads) pass nothing and
+# rely on their own `GC.@preserve` plus the cancel/drain path.
+function _read_ptr_some!(fd::FD, p::Ptr{UInt8}, nbytes::Int, root=nothing)::Int
     _fd_read_lock!(fd)
     try
         nbytes == 0 && return 0
@@ -778,7 +782,7 @@ function _read_ptr_some!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
             registration = _poll_registration(fd.pd)
             n = UInt32(_max_rw_chunk(nbytes))
             while true
-                errno = _iocp_submit_read!(registration, p, n)
+                errno = _iocp_submit_read!(registration, p, n, root)
                 errno == Int32(0) && break
                 if errno == Int32(Base.Libc.EALREADY)
                     waitread(fd.pd, fd.is_file)
@@ -840,7 +844,7 @@ function write!(fd::FD, p::AbstractVector{UInt8})::Int
         Vector{UInt8}(p)
     end
     GC.@preserve data begin
-        return _write_ptr!(fd, pointer(data), length(data))
+        return _write_ptr!(fd, pointer(data), length(data), data)
     end
 end
 
@@ -855,11 +859,13 @@ function write!(fd::FD, p::ByteMemory, nbytes::Integer)::Int
     n < 0 && throw(ArgumentError("nbytes must be >= 0"))
     n <= length(p) || throw(ArgumentError("nbytes exceeds buffer length"))
     GC.@preserve p begin
-        return _write_ptr!(fd, pointer(p), n)
+        return _write_ptr!(fd, pointer(p), n, p)
     end
 end
 
-function _write_ptr!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
+# See `_read_ptr_some!`: `root`, when supplied, keeps the WSASend source buffer
+# reachable for the overlapped op's full lifetime on Windows.
+function _write_ptr!(fd::FD, p::Ptr{UInt8}, nbytes::Int, root=nothing)::Int
     _fd_write_lock!(fd)
     nn = 0
     try
@@ -869,7 +875,7 @@ function _write_ptr!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
                 registration = _poll_registration(fd.pd)
                 chunk = UInt32(_max_rw_chunk(nbytes - nn))
                 while true
-                    errno = _iocp_submit_write!(registration, p + nn, chunk)
+                    errno = _iocp_submit_write!(registration, p + nn, chunk, root)
                     errno == Int32(0) && break
                     if errno == Int32(Base.Libc.EALREADY)
                         waitwrite(fd.pd, fd.is_file)
