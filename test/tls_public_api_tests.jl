@@ -495,11 +495,12 @@ end
                         end
                         @test err isa TL.TLSError || err isa EOFError
                         if err isa TL.TLSError
-                            # A clean peer close must surface as EOFError; a
-                            # TLSError here is only legitimate for the
-                            # RST/transport race, never the catch-all wrapping
-                            # a swallowed EOFError.
-                            @test err.message != "unexpected TLS failure"
+                            # A clean peer close must surface as EOFError, so a
+                            # TLSError here must never be the catch-all wrapping
+                            # a swallowed EOFError. Transport errors are still
+                            # legitimate: Linux/Windows reset the connection in
+                            # this race where macOS delivers a clean FIN.
+                            @test !(err.cause isa EOFError)
                         end
                         @test !TL.connection_state(client_tls).handshake_complete
                     finally
