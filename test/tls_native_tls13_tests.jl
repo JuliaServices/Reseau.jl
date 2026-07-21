@@ -156,6 +156,63 @@ end
     ))
     @test TLN._native_tls13_server_enabled(_tls13_native_server_config())
 
+    @testset "record EOF distinguishes boundaries from truncation" begin
+        cases = (
+            ("record boundary", UInt8[], EOFError),
+            ("partial header", UInt8[TLN._TLS_RECORD_TYPE_HANDSHAKE, 0x03], TLN._TLSUnexpectedEOFError),
+            (
+                "partial payload",
+                UInt8[TLN._TLS_RECORD_TYPE_HANDSHAKE, 0x03, 0x03, 0x00, 0x04, 0xaa, 0xbb],
+                TLN._TLSUnexpectedEOFError,
+            ),
+        )
+        for (label, wire, expected_error) in cases
+            @testset "$label" begin
+                IPN.shutdown!()
+                listener = nothing
+                client_tcp = nothing
+                server_tcp = nothing
+                try
+                    listener, client_tcp, server_tcp = _open_tcp_pair()
+                    isempty(wire) || write(client_tcp, wire)
+                    close(client_tcp)
+                    client_tcp = nothing
+                    err = try
+                        TLN._tls_read_wire_record!(server_tcp, UInt8[], TLN._TLS13_MAX_CIPHERTEXT)
+                        nothing
+                    catch ex
+                        ex
+                    end
+                    @test typeof(err) === expected_error
+                finally
+                    _tls_native_close_quiet!(server_tcp)
+                    _tls_native_close_quiet!(client_tcp)
+                    _tls_native_close_quiet!(listener)
+                    IPN.shutdown!()
+                end
+            end
+        end
+
+        IPN.shutdown!()
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        try
+            listener, client_tcp, server_tcp = _open_tcp_pair()
+            write(client_tcp, UInt8[TLN._TLS_RECORD_TYPE_HANDSHAKE, 0x03, 0x03, 0x00, 0x00])
+            close(client_tcp)
+            client_tcp = nothing
+            record_buffer = UInt8[]
+            @test TLN._tls_read_wire_record!(server_tcp, record_buffer, TLN._TLS13_MAX_CIPHERTEXT) == 0
+            @test_throws EOFError TLN._tls_read_wire_record!(server_tcp, record_buffer, TLN._TLS13_MAX_CIPHERTEXT)
+        finally
+            _tls_native_close_quiet!(server_tcp)
+            _tls_native_close_quiet!(client_tcp)
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+    end
+
     @testset "record layer fragments oversized handshake payloads" begin
         IPN.shutdown!()
         listener = nothing

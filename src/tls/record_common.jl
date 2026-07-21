@@ -37,6 +37,14 @@ end
 
 Base.showerror(io::IO, err::_TLSAlertError) = print(io, err.message)
 
+# A transport EOF is compatible with Go's TLS behavior only before any bytes of
+# a new record have arrived. Once a header or announced payload is partial, the
+# peer truncated the TLS framing and callers must not mistake that for a clean
+# record-boundary close.
+struct _TLSUnexpectedEOFError <: Exception end
+
+Base.showerror(io::IO, ::_TLSUnexpectedEOFError) = print(io, "unexpected EOF")
+
 @inline _tls_protocol_error(alert::UInt8, message::AbstractString) = _TLSAlertError(String(message), alert, false)
 @inline _tls_peer_alert_error(alert::UInt8, message::AbstractString) = _TLSAlertError(String(message), alert, true)
 @inline _tls_fail(alert::UInt8, message::AbstractString)::Union{} = throw(_tls_protocol_error(alert, message))
@@ -92,14 +100,43 @@ function _tls_write_tls_plaintext!(tcp::TCP.Conn, content_type::UInt8, payload::
     return nothing
 end
 
+function _tls_read_record_bytes!(
+        tcp::TCP.Conn,
+        ptr::Ptr{UInt8},
+        nbytes::Int,
+        allow_boundary_eof::Bool,
+    )::Nothing
+    offset = 0
+    while offset < nbytes
+        n = try
+            TCP._read_some!(tcp, ptr + offset, nbytes - offset)
+        catch err
+            if err isa EOFError
+                allow_boundary_eof && offset == 0 && rethrow()
+                throw(_TLSUnexpectedEOFError())
+            end
+            rethrow()
+        end
+        # Stream TCP reads throw EOFError for a zero-byte peer close, but keep
+        # this helper correct for any future transport with Reader-like zero
+        # progress semantics.
+        if n == 0
+            allow_boundary_eof && offset == 0 && throw(EOFError())
+            throw(_TLSUnexpectedEOFError())
+        end
+        offset += n
+    end
+    return nothing
+end
+
 function _tls_read_wire_record!(tcp::TCP.Conn, record_buffer::Vector{UInt8}, max_ciphertext::Int)::Int
     resize!(record_buffer, 5)
-    GC.@preserve record_buffer Base.unsafe_read(tcp, pointer(record_buffer), UInt(5))
+    GC.@preserve record_buffer _tls_read_record_bytes!(tcp, pointer(record_buffer), 5, true)
     payload_len = (Int(record_buffer[4]) << 8) | Int(record_buffer[5])
     payload_len <= max_ciphertext || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received oversized TLS record")
     resize!(record_buffer, 5 + payload_len)
     if payload_len != 0
-        GC.@preserve record_buffer Base.unsafe_read(tcp, pointer(record_buffer, 6), UInt(payload_len))
+        GC.@preserve record_buffer _tls_read_record_bytes!(tcp, pointer(record_buffer, 6), payload_len, false)
     end
     return payload_len
 end

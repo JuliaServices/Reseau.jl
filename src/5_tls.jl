@@ -1610,6 +1610,11 @@ function handshake!(conn::Conn)
                 conn.handshake_error = ex
                 throw(ex)
             end
+            if ex isa _TLSUnexpectedEOFError
+                handshake_error = TLSError("handshake", Int32(0), "unexpected EOF", ex)
+                conn.handshake_error = handshake_error
+                throw(handshake_error)
+            end
             if ex isa IOPoll.NetClosingError || _is_closed(conn)
                 handshake_error = _closed_error("handshake", ex)
                 conn.handshake_error = handshake_error
@@ -1744,6 +1749,7 @@ function _read_some!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
         ex = _as_exception(err)
         ex isa EOFError && rethrow()
         ex isa TLSError && rethrow()
+        ex isa _TLSUnexpectedEOFError && throw(TLSError("read", Int32(0), "unexpected EOF", ex))
         if ex isa IOPoll.NetClosingError || _is_closed(conn)
             throw(_closed_error("read", ex))
         end
@@ -1807,6 +1813,7 @@ function _peek_eof(conn::Conn)::Bool
     catch err
         ex = _as_exception(err)
         ex isa TLSError && rethrow()
+        ex isa _TLSUnexpectedEOFError && throw(TLSError("peek", Int32(0), "unexpected EOF", ex))
         if ex isa IOPoll.NetClosingError || _is_closed(conn)
             throw(_closed_error("peek", ex))
         end
