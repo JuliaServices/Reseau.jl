@@ -70,6 +70,9 @@ mutable struct _TLS12NativeState
     did_resume::Bool
     curve_id::UInt16
     cipher_suite::UInt16
+    # Set once the handshake finishes; gates acceptance of application data
+    # (rejected before this as unexpected_message, matching Go).
+    handshake_complete::Bool
 end
 
 _TLS12NativeState() = _TLS12NativeState(
@@ -89,6 +92,7 @@ _TLS12NativeState() = _TLS12NativeState(
     false,
     UInt16(0),
     UInt16(0),
+    false,
 )
 
 """
@@ -396,6 +400,10 @@ function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeState)::Nothing
                 _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received too much buffered TLS 1.2 handshake data")
             _tls_reset_useless_record_count!(state)
         elseif content_type == _TLS_RECORD_TYPE_APPLICATION_DATA
+            # Application data before the handshake completes is illegal and
+            # would otherwise grow plaintext_buffer without bound; reject it.
+            state.handshake_complete ||
+                _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received application data before handshake completion")
             if isempty(plaintext)
                 _tls_note_useless_record!(state, "tls: too many ignored TLS records")
             else

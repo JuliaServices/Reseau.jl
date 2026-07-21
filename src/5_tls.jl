@@ -1318,6 +1318,9 @@ end
 
 function _finish_native_tls13_client_handshake!(conn::Conn, state::_TLS13ClientHandshakeState, cache_key::String)::Nothing
     native_state = _native_tls13_state(conn)
+    # Publish before the conn-level release below so a reader that clears
+    # `_ensure_handshake!` also observes the record layer as post-handshake.
+    native_state.handshake_complete = true
     if state.using_psk
         _tls_session_cache_put!(conn.config._client_session_cache, cache_key, nothing, _securezero_tls13_client_session!)
     end
@@ -1357,6 +1360,7 @@ end
 
 function _finish_native_tls12_client_handshake!(conn::Conn, state::_TLS12ClientHandshakeState)::Nothing
     native_state = _native_tls12_state(conn)
+    native_state.handshake_complete = true
     native_state.did_resume = state.did_resume
     native_state.curve_id = state.curve_id
     native_state.cipher_suite = state.cipher_suite
@@ -1373,6 +1377,7 @@ end
 
 function _finish_native_tls13_server_handshake!(conn::Conn, state::_TLS13ServerHandshakeState)::Nothing
     native_state = _native_tls13_state(conn)
+    native_state.handshake_complete = true
     native_state.session_cipher_suite = state.cipher_suite
     native_state.session_alpn = state.selected_alpn
     native_state.did_resume = state.using_psk
@@ -1391,6 +1396,7 @@ end
 
 function _finish_native_tls12_server_handshake!(conn::Conn, state::_TLS12ServerHandshakeState)::Nothing
     native_state = _native_tls12_state(conn)
+    native_state.handshake_complete = true
     native_state.did_resume = state.using_resumption
     native_state.curve_id = state.curve_id
     native_state.cipher_suite = state.cipher_suite

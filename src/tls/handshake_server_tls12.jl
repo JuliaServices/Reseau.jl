@@ -356,8 +356,16 @@ function _tls12_select_server_parameters!(state::_TLS12ServerHandshakeState, con
                     keep_session = false
                     try
                         now_s = UInt64(floor(time()))
+                        # Match Go's checkForResumption: refuse to resume once the
+                        # ORIGINAL master secret is older than the max lifetime, so a
+                        # client cannot renew the same secret indefinitely by resuming
+                        # every week. A created_at in the future (clock skew) is treated
+                        # as fresh, mirroring Go's signed time.Sub.
+                        secret_age_ok = now_s < session.created_at_s ||
+                            now_s - session.created_at_s < UInt64(_TLS12_MAX_SESSION_TICKET_LIFETIME)
                         session_compatible = session.version == TLS1_2_VERSION &&
                             now_s <= session.use_by_s &&
+                            secret_age_ok &&
                             in(session.cipher_suite, state.client_hello.cipher_suites) &&
                             session.alpn_protocol == state.selected_alpn &&
                             _tls12_cipher_spec(session.cipher_suite) !== nothing &&
@@ -684,11 +692,29 @@ function _tls12_send_new_session_ticket!(
     state.server_hello.ticket_supported || return nothing
     label = UInt8[]
     plaintext = UInt8[]
+    now_s = UInt64(floor(time()))
+    # Go's sendSessionTicket re-wraps a resumed session under the ORIGINAL creation
+    # time so the master secret's absolute expiry never advances; only a fresh (full)
+    # handshake starts the clock at now. Carrying both created_at and use_by keeps the
+    # anchored expiry from being reset, closing the unbounded-renewal window.
+    resumption = state.resumption_session
+    if resumption === nothing
+        created_at_s = now_s
+        use_by_s = now_s + UInt64(_TLS12_MAX_SESSION_TICKET_LIFETIME)
+    else
+        created_at_s = (resumption::_TLS12ServerSession).created_at_s
+        use_by_s = (resumption::_TLS12ServerSession).use_by_s
+    end
+    # The lifetime hint advertises the REMAINING absolute lifetime, not a fresh 7 days,
+    # so a resumed ticket cannot re-introduce unbounded extension through the hint.
+    lifetime_hint = use_by_s > now_s ?
+        UInt32(min(use_by_s - now_s, UInt64(typemax(UInt32)))) :
+        UInt32(0)
     session = _owned_tls12_server_session(
         TLS1_2_VERSION,
         state.cipher_suite,
-        UInt64(floor(time())),
-        UInt64(floor(time())) + UInt64(_TLS12_MAX_SESSION_TICKET_LIFETIME),
+        created_at_s,
+        use_by_s,
         UInt8[],
         master_secret,
         state.peer_certificates,
@@ -700,7 +726,7 @@ function _tls12_send_new_session_ticket!(
     try
         plaintext = _serialize_tls12_server_session(session)
         label = _tls_encrypt_server_session_ticket(keys[1], plaintext)
-        raw = _write_handshake_message(_NewSessionTicketMsgTLS12(_TLS12_MAX_SESSION_TICKET_LIFETIME, label), transcript)
+        raw = _write_handshake_message(_NewSessionTicketMsgTLS12(lifetime_hint, label), transcript)
         _write_handshake_bytes!(io, raw)
     finally
         _securezero_tls12_server_session!(session)

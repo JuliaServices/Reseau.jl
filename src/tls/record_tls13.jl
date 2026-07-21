@@ -74,6 +74,10 @@ mutable struct _TLS13NativeClientState
     did_resume::Bool
     did_hello_retry_request::Bool
     curve_id::UInt16
+    # Set once the handshake finishes. Application data is illegal before this
+    # (Reseau supports neither 0-RTT nor 0.5-RTT), so the record layer rejects
+    # pre-Finished application records instead of buffering them unbounded.
+    handshake_complete::Bool
 end
 
 _TLS13NativeClientState() = _TLS13NativeClientState(
@@ -97,6 +101,7 @@ _TLS13NativeClientState() = _TLS13NativeClientState(
     false,
     false,
     UInt16(0),
+    false,
 )
 
 """
@@ -357,6 +362,12 @@ function _tls13_process_inner_plaintext!(state::_TLS13NativeClientState, inner::
         return true
     end
     if content_type == _TLS_RECORD_TYPE_APPLICATION_DATA
+        # RFC 8446: application data is illegal before the handshake completes.
+        # Rejecting (rather than buffering) it also caps an unauthenticated
+        # peer's memory footprint during the handshake, since plaintext_buffer
+        # is otherwise unbounded.
+        state.handshake_complete ||
+            _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received application data before handshake completion")
         if payload_len == 0
             _tls_note_useless_record!(state, "tls: too many ignored TLS records")
             return false
@@ -493,17 +504,57 @@ end
     ]
 end
 
-function _tls13_handle_key_update!(tcp::TCP.Conn, state::_TLS13NativeClientState, request_update::Bool)::Nothing
-    if request_update
-        raw = _tls13_key_update_message(false)
-        try
-            _tls13_write_record!(tcp, state, _TLS_RECORD_TYPE_HANDSHAKE, raw)
-            _tls13_advance_write_cipher!(state)
-        finally
-            _securezero!(raw)
-        end
+# Send the responding KeyUpdate and rotate the write cipher. Both touch the
+# shared write `_TLS13RecordCipherState` (outbuf, nonce_buf, seq, EVP context),
+# so a caller that can race an application writer MUST hold the write lock
+# around this (see the conn-aware handler below).
+function _tls13_write_key_update_response!(tcp::TCP.Conn, state::_TLS13NativeClientState)::Nothing
+    raw = _tls13_key_update_message(false)
+    try
+        _tls13_write_record!(tcp, state, _TLS_RECORD_TYPE_HANDSHAKE, raw)
+        _tls13_advance_write_cipher!(state)
+    finally
+        _securezero!(raw)
     end
+    return nothing
+end
+
+# Low-level handler with no connection context: used only by direct
+# record-layer callers with no concurrent application writer (tests and
+# handshake-internal drives). The conn-aware method below is what production
+# read paths use.
+function _tls13_handle_key_update!(tcp::TCP.Conn, state::_TLS13NativeClientState, request_update::Bool)::Nothing
+    request_update && _tls13_write_key_update_response!(tcp, state)
     _tls13_advance_read_cipher!(state)
+    return nothing
+end
+
+# Conn-aware handler. The read cipher is owned by the caller's read lock and the
+# application writer never touches it, so it rotates here directly. The response
+# write and write-cipher rotation share write state with a concurrent writer, so
+# they run under `conn.write_lock` — mirroring Go's `handleKeyUpdate`, which
+# takes `c.out.Lock()` before writing the response and calling
+# `c.out.setTrafficSecret`. A failed response write becomes the permanent
+# write-side error (Go's `setErrorLocked`) instead of corrupting the read path.
+function _tls13_handle_key_update!(conn, state::_TLS13NativeClientState, request_update::Bool)::Nothing
+    _tls13_advance_read_cipher!(state)
+    request_update || return nothing
+    lock(conn.write_lock)
+    try
+        conn.write_permanent_error === nothing || return nothing
+        try
+            _tls13_write_key_update_response!(conn.tcp, state)
+        catch err
+            conn.write_permanent_error = TLSError(
+                "write",
+                Int32(0),
+                "tls: failed to send key update",
+                _as_exception(err),
+            )
+        end
+    finally
+        unlock(conn.write_lock)
+    end
     return nothing
 end
 
@@ -607,7 +658,7 @@ function _tls13_handle_post_handshake_messages!(conn, state::_TLS13NativeClientS
             request_update = _tls13_parse_key_update(raw)
             request_update === nothing && _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.3 key update message")
             _tls_note_useless_record!(state, "tls: too many non-advancing TLS 1.3 records")
-            _tls13_handle_key_update!(conn.tcp, state, request_update::Bool)
+            _tls13_handle_key_update!(conn, state, request_update::Bool)
             continue
         end
         _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: unexpected post-handshake TLS 1.3 message")

@@ -366,6 +366,45 @@ end
         @test_throws ArgumentError TLX._tls_parse_subject_public_key_info(oversized_spki, 1, length(oversized_spki))
     end
 
+    @testset "RSA certificate key size floor and public exponent are validated" begin
+        # Bit-length helper sanity: these moduli straddle the 1024-bit floor.
+        modulus_2048 = vcat(UInt8[0x80], zeros(UInt8, 255))
+        modulus_1024 = vcat(UInt8[0x80], zeros(UInt8, 127))
+        modulus_1023 = vcat(UInt8[0x40], zeros(UInt8, 127))
+        modulus_512 = vcat(UInt8[0x80], zeros(UInt8, 63))
+        @test TLX._tls_rsa_modulus_bit_length(modulus_2048) == 2048
+        @test TLX._tls_rsa_modulus_bit_length(modulus_1024) == TLX._TLS_MIN_RSA_CERT_KEY_BITS
+        @test TLX._tls_rsa_modulus_bit_length(modulus_1023) == TLX._TLS_MIN_RSA_CERT_KEY_BITS - 1
+        @test TLX._tls_rsa_modulus_bit_length(modulus_512) == 512
+
+        # (a) sub-1024-bit RSA keys are rejected at the key-size check, (b) a
+        # 2048-bit key (and the 1024-bit boundary) still passes.
+        @test TLX._tls_check_rsa_certificate_key_size!(modulus_2048) === nothing
+        @test TLX._tls_check_rsa_certificate_key_size!(modulus_1024) === nothing
+        @test_throws ArgumentError TLX._tls_check_rsa_certificate_key_size!(modulus_1023)
+        @test_throws ArgumentError TLX._tls_check_rsa_certificate_key_size!(modulus_512)
+
+        # Same behavior through the full SubjectPublicKeyInfo parse path. The
+        # parser takes the SPKI *content* range, so unwrap the outer SEQUENCE.
+        _parse_spki(spki) = TLX._tls_parse_subject_public_key_info(
+            spki, TLX._asn1_expect_tlv(spki, 1, TLX._ASN1_SEQUENCE, length(spki))[1:2]...)
+        @test _parse_spki(_rsa_spki_der(modulus_2048)) isa TLX._TLSRSAPublicKey
+        @test_throws ArgumentError _parse_spki(_rsa_spki_der(modulus_512))
+
+        # (c) Degenerate public exponents are rejected at the SPKI parse layer.
+        @test_throws ArgumentError _parse_spki(_rsa_spki_der(modulus_2048, UInt8[0x01]))
+        @test_throws ArgumentError _parse_spki(_rsa_spki_der(modulus_2048, UInt8[0x04]))
+
+        # Public-exponent check directly: must be odd, >= 3, and <= 1<<31-1.
+        @test_throws ArgumentError TLX._tls_check_rsa_public_exponent!(1)
+        @test_throws ArgumentError TLX._tls_check_rsa_public_exponent!(2)
+        @test_throws ArgumentError TLX._tls_check_rsa_public_exponent!(4)
+        @test_throws ArgumentError TLX._tls_check_rsa_public_exponent!(TLX._TLS_MAX_RSA_PUBLIC_EXPONENT + 1)
+        @test TLX._tls_check_rsa_public_exponent!(3) === nothing
+        @test TLX._tls_check_rsa_public_exponent!(65537) === nothing
+        @test TLX._tls_check_rsa_public_exponent!(TLX._TLS_MAX_RSA_PUBLIC_EXPONENT) === nothing
+    end
+
     @testset "native trust verifier accepts valid server and client chains" begin
         server_certs = TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CERT_PATH))
         client_certs = TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CLIENT_CERT_PATH))

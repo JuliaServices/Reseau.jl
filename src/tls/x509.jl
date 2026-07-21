@@ -216,7 +216,9 @@ const _ASN1_OID_CURVE_P521 = (
     UInt8(0x2b), UInt8(0x81), UInt8(0x04), UInt8(0x00), UInt8(0x23),
 )
 
+const _TLS_MIN_RSA_CERT_KEY_BITS = 1024
 const _TLS_MAX_RSA_CERT_KEY_BITS = 8192
+const _TLS_MAX_RSA_PUBLIC_EXPONENT = (1 << 31) - 1
 
 const _TLS_KEY_USAGE_DIGITAL_SIGNATURE = UInt16(1) << 0
 const _TLS_KEY_USAGE_KEY_ENCIPHERMENT = UInt16(1) << 2
@@ -430,8 +432,20 @@ end
 
 function _tls_check_rsa_certificate_key_size!(modulus::AbstractVector{UInt8})::Nothing
     bits = _tls_rsa_modulus_bit_length(modulus)
+    bits >= _TLS_MIN_RSA_CERT_KEY_BITS ||
+        throw(ArgumentError("tls: RSA certificate public key is smaller than $(_TLS_MIN_RSA_CERT_KEY_BITS) bits"))
     bits <= _TLS_MAX_RSA_CERT_KEY_BITS ||
         throw(ArgumentError("tls: RSA certificate public key is larger than $(_TLS_MAX_RSA_CERT_KEY_BITS) bits"))
+    return nothing
+end
+
+function _tls_check_rsa_public_exponent!(exponent::Int)::Nothing
+    exponent >= 3 ||
+        throw(ArgumentError("tls: RSA certificate public exponent is smaller than 3"))
+    exponent <= _TLS_MAX_RSA_PUBLIC_EXPONENT ||
+        throw(ArgumentError("tls: RSA certificate public exponent is larger than $(_TLS_MAX_RSA_PUBLIC_EXPONENT)"))
+    isodd(exponent) ||
+        throw(ArgumentError("tls: RSA certificate public exponent is not odd"))
     return nothing
 end
 
@@ -579,6 +593,7 @@ function _tls_parse_subject_public_key_info(bytes::AbstractVector{UInt8}, value_
         key_pos == key_end + 1 || throw(ArgumentError("tls: malformed RSA public key"))
         modulus = _asn1_integer_bytes(key_bytes, modulus_start, modulus_end)
         _tls_check_rsa_certificate_key_size!(modulus)
+        _tls_check_rsa_public_exponent!(_asn1_integer_value(key_bytes, exponent_start, exponent_end))
         exponent = _asn1_integer_bytes(key_bytes, exponent_start, exponent_end)
         return _TLSRSAPublicKey(modulus, exponent)
     elseif _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_ID_EC_PUBLIC_KEY)

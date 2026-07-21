@@ -80,7 +80,20 @@ function _tls13_record_state_pair()
     TLN._tls13_set_write_cipher!(client_state, TLN._TLS13_AES_128_GCM_SHA256, client_to_server_secret)
     TLN._tls13_set_write_cipher!(server_state, TLN._TLS13_AES_128_GCM_SHA256, server_to_client_secret)
     TLN._tls13_set_read_cipher!(server_state, TLN._TLS13_AES_128_GCM_SHA256, client_to_server_secret)
+    # These pairs model an established (post-handshake) connection, so the
+    # record layer must accept application data.
+    client_state.handshake_complete = true
+    server_state.handshake_complete = true
     return client_state, server_state, server_to_client_secret, client_to_server_secret
+end
+
+# Minimal duck-typed stand-in for TLS.Conn exposing just the fields the
+# conn-aware KeyUpdate handler touches, so the write-lock serialization can be
+# exercised without a full handshake.
+mutable struct _MockKeyUpdateConn
+    tcp::Any
+    write_lock::ReentrantLock
+    write_permanent_error::Any
 end
 
 function _tls13_native_client_config(;
@@ -1001,6 +1014,9 @@ end
 
     @testset "empty TLS 1.3 application records are bounded" begin
         state = TLN._TLS13NativeClientState()
+        # Post-handshake connection: empty application records are legal but
+        # counted as useless so they stay bounded.
+        state.handshake_complete = true
         try
             for _ in 1:TLN._TLS_MAX_USELESS_RECORDS
                 @test !TLN._tls13_process_inner_plaintext!(state, UInt8[TLN._TLS_RECORD_TYPE_APPLICATION_DATA])
@@ -1018,6 +1034,112 @@ end
             end
         finally
             TLN._securezero_tls13_native_client_state!(state)
+        end
+    end
+
+    @testset "TLS 1.3 application data before handshake completion is rejected" begin
+        # Unauthenticated peers must not be able to grow plaintext_buffer during
+        # the handshake; pre-Finished application data is unexpected_message and
+        # does not accumulate.
+        for payload in (UInt8[TLN._TLS_RECORD_TYPE_APPLICATION_DATA], UInt8[0x42, TLN._TLS_RECORD_TYPE_APPLICATION_DATA])
+            state = TLN._TLS13NativeClientState()
+            @test !state.handshake_complete
+            try
+                err = try
+                    TLN._tls13_process_inner_plaintext!(state, payload)
+                    nothing
+                catch ex
+                    ex
+                end
+                @test err isa TLN._TLSAlertError
+                if err isa TLN._TLSAlertError
+                    @test err.alert == TLN._TLS_ALERT_UNEXPECTED_MESSAGE
+                    @test occursin("application data before handshake", err.message)
+                end
+                @test isempty(state.plaintext_buffer)
+            finally
+                TLN._securezero_tls13_native_client_state!(state)
+            end
+        end
+    end
+
+    @testset "peer KeyUpdate response serializes under the write lock" begin
+        IPN.shutdown!()
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        client_state = nothing
+        server_state = nothing
+        try
+            listener, client_tcp, server_tcp = _open_tcp_pair()
+            client_state, server_state, _, client_to_server_secret = _tls13_record_state_pair()
+            conn = _MockKeyUpdateConn(client_tcp, ReentrantLock(), nothing)
+            expected_next_write = TLN._tls13_next_traffic_secret(TLN._TLS13_AES_128_GCM_SHA256, client_to_server_secret)
+            before_secret = copy((client_state.write_cipher::TLN._TLS13RecordCipherState).traffic_secret)
+            try
+                # Hold the write lock: the response write and write-cipher
+                # rotation share write state with an application writer, so the
+                # handler must block here rather than race.
+                lock(conn.write_lock)
+                handler = errormonitor(Threads.@spawn TLN._tls13_handle_key_update!(conn, client_state, true))
+                @test timedwait(() -> istaskdone(handler), 0.3) == :timed_out
+                @test (client_state.write_cipher::TLN._TLS13RecordCipherState).traffic_secret == before_secret
+                unlock(conn.write_lock)
+                @test timedwait(() -> istaskdone(handler), 2.0) == :ok
+                fetch(handler)
+                @test (client_state.write_cipher::TLN._TLS13RecordCipherState).traffic_secret == expected_next_write
+                @test conn.write_permanent_error === nothing
+                # The peer receives exactly the responding KeyUpdate record.
+                TLN._tls13_read_record!(server_tcp, server_state)
+                raw = TLN._tls13_try_take_handshake_message!(server_state)
+                @test raw !== nothing
+                @test TLN._tls13_parse_key_update(raw::Vector{UInt8}) === false
+            finally
+                TLN._securezero!(expected_next_write)
+                TLN._securezero!(before_secret)
+            end
+        finally
+            client_state isa TLN._TLS13NativeClientState && TLN._securezero_tls13_native_client_state!(client_state)
+            server_state isa TLN._TLS13NativeClientState && TLN._securezero_tls13_native_client_state!(server_state)
+            _tls_native_close_quiet!(server_tcp)
+            _tls_native_close_quiet!(client_tcp)
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+    end
+
+    @testset "peer KeyUpdate response failure becomes the permanent write error" begin
+        IPN.shutdown!()
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        client_state = nothing
+        server_state = nothing
+        try
+            listener, client_tcp, server_tcp = _open_tcp_pair()
+            client_state, server_state, _, _ = _tls13_record_state_pair()
+            conn = _MockKeyUpdateConn(client_tcp, ReentrantLock(), nothing)
+            read_secret_before = copy((client_state.read_cipher::TLN._TLS13RecordCipherState).traffic_secret)
+            try
+                # Break the transport so writing the response fails.
+                close(client_tcp)
+                # The handler must not propagate the failure into the read path;
+                # it records it as the permanent write-side error instead.
+                TLN._tls13_handle_key_update!(conn, client_state, true)
+                @test conn.write_permanent_error isa TLN.TLSError
+                # The read cipher still advances (it is owned by the read path
+                # and independent of the write failure).
+                @test (client_state.read_cipher::TLN._TLS13RecordCipherState).traffic_secret != read_secret_before
+            finally
+                TLN._securezero!(read_secret_before)
+            end
+        finally
+            client_state isa TLN._TLS13NativeClientState && TLN._securezero_tls13_native_client_state!(client_state)
+            server_state isa TLN._TLS13NativeClientState && TLN._securezero_tls13_native_client_state!(server_state)
+            _tls_native_close_quiet!(server_tcp)
+            _tls_native_close_quiet!(client_tcp)
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
         end
     end
 
