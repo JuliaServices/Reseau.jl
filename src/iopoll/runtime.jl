@@ -158,6 +158,12 @@ The backend wake is the only thing that gets a parked poller thread out of its
 (possibly indefinite) backend wait, so `_backend_close!` must stay strictly
 ordered after `wait(state.shutdown_event)`: tearing down backend resources
 while the poller thread can still touch them would race the poll loop.
+
+Registrations remain parked until backend teardown is complete. On Windows,
+their `GC.@preserve` scopes may be the last roots for raw buffers owned by an
+outstanding overlapped operation; waking those tasks before IOCP has delivered
+every terminal completion would let them return while the kernel still holds a
+pointer into Julia memory.
 """
 function shutdown!()
     lock(POLLER_LOCK)
@@ -185,9 +191,6 @@ function shutdown!()
         finally
             unlock(state.lock)
         end
-        for registration in registrations
-            _notify_registration!(registration, PollMode.READWRITE, PollWakeReason.CANCELED)
-        end
         for timer in timers
             _close_timer!(timer)
         end
@@ -200,6 +203,21 @@ function shutdown!()
             wait(state.shutdown_event)
         end
         _backend_close!(state)
+        # Backend teardown has relinquished all kernel ownership, so blocked
+        # descriptor tasks may now leave their GC.@preserve scopes safely.
+        for registration in registrations
+            pd = registration.pollstate
+            lock(pd.lock)
+            try
+                @atomic :release pd.closing = true
+                @atomic :release pd.pollable = false
+                @atomic pd.rseq += UInt64(1)
+                @atomic pd.wseq += UInt64(1)
+            finally
+                unlock(pd.lock)
+            end
+            _notify_registration!(registration, PollMode.READWRITE, PollWakeReason.CANCELED)
+        end
     finally
         unlock(POLLER_LOCK)
     end

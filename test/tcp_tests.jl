@@ -645,6 +645,9 @@ end
                 NC.set_deadline!(listener, Int64(time_ns()) - Int64(1))
                 @test_throws NC.DeadlineExceededError NC.accept(listener)
 
+                NC.set_deadline!(listener, Int64(-1))
+                @test_throws NC.DeadlineExceededError NC.accept(listener)
+
                 NC.set_deadline!(listener, Int64(0))
                 accept_task = errormonitor(@async begin
                     try

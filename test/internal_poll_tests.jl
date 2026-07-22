@@ -172,24 +172,21 @@ end
                 IP.shutdown!()
             end
         end
-        @testset "overflowed deadline saturates instead of expiring" begin
+        @testset "absolute deadline semantics" begin
             fd0, fd1 = _ip_socketpair_stream()
             ipfd = IP.FD(fd0)
             fd0 = SO.INVALID_SOCKET
             try
                 IP._set_nonblocking!(ipfd.sysfd)
                 IP.register!(ipfd)
-                # `now + huge_timeout` can wrap negative; Go parity says a
-                # deadline in the distant future means "never fires", not
-                # "fires instantly". Assert via the internal deadline words
-                # instead of end-to-end waiting.
-                overflowed = Int64(time_ns()) + typemax(Int64)
-                @test overflowed < 0
-                IP.set_deadline!(ipfd, overflowed)
-                @test (@atomic :acquire ipfd.pd.rd_ns) == typemax(Int64)
-                @test (@atomic :acquire ipfd.pd.wd_ns) == typemax(Int64)
-                @test IP._check_error(ipfd.pd, IP.PollMode.READ) == Int32(0)
-                @test IP._check_error(ipfd.pd, IP.PollMode.WRITE) == Int32(0)
+                # The API accepts absolute monotonic timestamps. Negative
+                # values are therefore already expired; overflow prevention
+                # belongs where relative durations are added to the clock.
+                IP.set_deadline!(ipfd, Int64(-1))
+                @test (@atomic :acquire ipfd.pd.rd_ns) == Int64(-1)
+                @test (@atomic :acquire ipfd.pd.wd_ns) == Int64(-1)
+                @test IP._check_error(ipfd.pd, IP.PollMode.READ) == Int32(2)
+                @test IP._check_error(ipfd.pd, IP.PollMode.WRITE) == Int32(2)
                 near_max = typemax(Int64) - Int64(1)
                 IP.set_read_deadline!(ipfd, near_max)
                 @test (@atomic :acquire ipfd.pd.rd_ns) == near_max
@@ -340,6 +337,102 @@ end
             finally
                 _ip_close_fd(fd1)
                 IP.shutdown!()
+            end
+        end
+        @testset "shutdown closes blocked descriptor waiters" begin
+            IP.shutdown!()
+            fd0, fd1 = _ip_socketpair_stream()
+            ipfd = IP.FD(fd0)
+            read_task = nothing
+            fd0 = SO.INVALID_SOCKET
+            try
+                IP._set_nonblocking!(ipfd.sysfd)
+                IP.register!(ipfd)
+                read_task = errormonitor(Threads.@spawn begin
+                    try
+                        IP.read!(ipfd, Vector{UInt8}(undef, 1))
+                        return :ok
+                    catch err
+                        return err
+                    end
+                end)
+                @test IP.timedwait(() -> istaskdone(read_task), 0.05; pollint = 0.001) == :timed_out
+                IP.shutdown!()
+                @test IP.timedwait(() -> istaskdone(read_task), 2.0; pollint = 0.001) != :timed_out
+                result = fetch(read_task)
+                @test result isa IP.NetClosingError
+                @test (@atomic :acquire ipfd.pd.closing)
+                @test !(@atomic :acquire ipfd.pd.pollable)
+            finally
+                if read_task isa Task && istaskdone(read_task)
+                    wait(read_task)
+                end
+                IP._is_valid_fd(ipfd.sysfd) && close(ipfd)
+                _ip_close_fd(fd1)
+                IP.shutdown!()
+            end
+        end
+        @static if Sys.iswindows()
+            @testset "shutdown drains pending IOCP before releasing raw buffers" begin
+                IP.shutdown!()
+                fd0, fd1 = _ip_socketpair_stream()
+                ipfd = IP.FD(fd0)
+                read_task = nothing
+                shutdown_task = nothing
+                fd0 = SO.INVALID_SOCKET
+                try
+                    IP._set_nonblocking!(ipfd.sysfd)
+                    IP.register!(ipfd)
+                    # Exercise the raw-pointer path used by TCP/TLS: the IOCP op
+                    # has no object in its buffer root slot, so the task's
+                    # GC.@preserve scope must remain parked until shutdown has
+                    # observed the terminal completion.
+                    read_task = errormonitor(Threads.@spawn begin
+                        buf = Vector{UInt8}(undef, 1)
+                        return GC.@preserve buf begin
+                            try
+                                IP._read_ptr_some!(ipfd, pointer(buf), 1)
+                                :ok
+                            catch err
+                                err
+                            end
+                        end
+                    end)
+                    state = IP.POLLER[]
+                    active = IP.timedwait(2.0; pollint = 0.001) do
+                        lock(state.lock)
+                        try
+                            backend = IP._iocp_backend(state)
+                            backend === nothing && return false
+                            reg = get(backend.by_fd, ipfd.sysfd, nothing)
+                            reg === nothing && return false
+                            return (@atomic :acquire reg.read_op.active) && reg.read_op.buffer === nothing
+                        finally
+                            unlock(state.lock)
+                        end
+                    end
+                    @test active != :timed_out
+                    @test !istaskdone(read_task)
+
+                    shutdown_task = errormonitor(Threads.@spawn IP.shutdown!())
+                    @test IP.timedwait(() -> istaskdone(shutdown_task), 5.0; pollint = 0.001) != :timed_out
+                    wait(shutdown_task)
+                    @test IP.timedwait(() -> istaskdone(read_task), 2.0; pollint = 0.001) != :timed_out
+                    result = fetch(read_task)
+                    @test result isa IP.NetClosingError
+                    @test (@atomic :acquire ipfd.pd.closing)
+                    @test !(@atomic :acquire ipfd.pd.pollable)
+                finally
+                    if read_task isa Task && istaskdone(read_task)
+                        wait(read_task)
+                    end
+                    if shutdown_task isa Task && istaskdone(shutdown_task)
+                        wait(shutdown_task)
+                    end
+                    IP._is_valid_fd(ipfd.sysfd) && close(ipfd)
+                    _ip_close_fd(fd1)
+                    IP.shutdown!()
+                end
             end
         end
         @testset "control references delay descriptor destruction" begin

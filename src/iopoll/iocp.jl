@@ -317,7 +317,7 @@ function _cleanup_registration_if_done!(backend::IocpBackendState, reg::IocpRegi
     return nothing
 end
 
-function _cancel_iocp_op!(reg::IocpRegistration, op::IocpOp)::Bool
+function _cancel_iocp_op!(reg::IocpRegistration, op::IocpOp; strict::Bool = false)::Bool
     (@atomic :acquire op.active) || return false
     ok = @gcsafe_ccall _KERNEL32.CancelIoEx(
         _socket_handle(reg.fd)::Ptr{Cvoid},
@@ -329,6 +329,13 @@ function _cancel_iocp_op!(reg::IocpRegistration, op::IocpOp)::Bool
             @atomic :release op.active = false
             return false
         end
+        # Ordinary deadline/close cancellation keeps waiting for terminal
+        # completion even if cancellation itself failed. During global backend
+        # teardown, however, there may be no future event capable of completing
+        # the operation. Surface that failure before closing the port or
+        # dropping any roots; shutdown! deliberately leaves waiters parked in
+        # this case, preserving raw-pointer callers' GC.@preserve scopes.
+        strict && throw(SystemError("CancelIoEx", Int(_map_win_errno(err))))
     end
     return true
 end
@@ -709,13 +716,6 @@ function _backend_init!(state::Poller)::Int32
     return Int32(0)
 end
 
-# Per-call timeout and consecutive-idle cap for the teardown completion drain.
-# After `CancelIoEx` every still-active op is guaranteed a completion packet, so
-# these only bound the pathological case where a packet never arrives (the
-# kernel already released the OVERLAPPED, e.g. the handle was torn down).
-const _CLOSE_DRAIN_TIMEOUT_MS = UInt32(100)
-const _CLOSE_DRAIN_MAX_IDLE = 20
-
 function _iocp_any_op_active(backend::IocpBackendState)::Bool
     for reg in values(backend.by_fd)
         _registration_has_active(reg) && return true
@@ -751,38 +751,45 @@ wait, leaving this drain with exclusive access to the port and op state.
 function _drain_pending_ops_on_close!(backend::IocpBackendState)
     backend.port == C_NULL && return nothing
     for reg in values(backend.by_fd)
-        _cancel_iocp_op!(reg, reg.read_op)
-        _cancel_iocp_op!(reg, reg.write_op)
+        _cancel_iocp_op!(reg, reg.read_op; strict = true)
+        _cancel_iocp_op!(reg, reg.write_op; strict = true)
     end
     for reg in backend.zombies
-        _cancel_iocp_op!(reg, reg.read_op)
-        _cancel_iocp_op!(reg, reg.write_op)
+        _cancel_iocp_op!(reg, reg.read_op; strict = true)
+        _cancel_iocp_op!(reg, reg.write_op; strict = true)
     end
     bytes_ref = Ref{UInt32}(UInt32(0))
     key_ref = Ref{UInt}(UInt(0))
     ov_ref = Ref{Ptr{Cvoid}}(C_NULL)
-    idle = 0
     while _iocp_any_op_active(backend)
         ov_ref[] = C_NULL
-        _ = GC.@preserve bytes_ref key_ref ov_ref begin
+        ok = GC.@preserve bytes_ref key_ref ov_ref begin
             @gcsafe_ccall _KERNEL32.GetQueuedCompletionStatus(
                 backend.port::Ptr{Cvoid},
                 bytes_ref::Ref{UInt32},
                 key_ref::Ref{UInt},
                 ov_ref::Ref{Ptr{Cvoid}},
-                _CLOSE_DRAIN_TIMEOUT_MS::UInt32,
+                _INFINITE::UInt32,
             )::Int32
         end
         ov = ov_ref[]
         if ov == C_NULL
-            # WAIT_TIMEOUT (or the residual wake packet): nothing was cleared.
-            idle += 1
-            idle >= _CLOSE_DRAIN_MAX_IDLE && break
+            # A successful null-overlapped result is the residual wake packet.
+            # With an infinite wait, a failed null result is a real API failure:
+            # retain the backend and every operation root rather than freeing
+            # memory that the kernel may still own.
+            ok != 0 && continue
+            throw(SystemError(
+                "GetQueuedCompletionStatus",
+                Int(_map_win_errno(_win_get_last_error())),
+            ))
+        end
+        reg = get(backend.by_ptr, ov, nothing)
+        if reg === nothing
+            # Stale/foreign packets do not prove anything about the operations
+            # still marked active; keep draining until each one is terminal.
             continue
         end
-        idle = 0
-        reg = get(backend.by_ptr, ov, nothing)
-        reg === nothing && continue
         if ov == _op_ptr(reg.read_op)
             @atomic :release reg.read_op.active = false
         elseif ov == _op_ptr(reg.write_op)

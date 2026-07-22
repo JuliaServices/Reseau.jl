@@ -182,10 +182,11 @@ end
 Set read/write deadline state on an `FD`.
 
 `deadline_ns == 0` disables deadlines for the selected mode.
-`0 < deadline_ns <= time_ns()` triggers immediate timeout.
-`deadline_ns < 0` means an absolute deadline computed as `now + timeout`
-overflowed; like Go's `poll_runtime_pollSetDeadline`, a deadline in the distant
-future is treated as effectively infinite rather than already expired.
+`deadline_ns <= time_ns()` triggers immediate timeout.
+
+Callers that derive an absolute deadline from a relative duration must
+saturate that addition before calling this function. A negative value is an
+already-expired absolute deadline, not an overflow sentinel.
 
 Returns `nothing`.
 
@@ -195,7 +196,6 @@ Throws:
 """
 function _set_deadline_impl!(fd::FD, deadline_ns::Integer, mode::PollMode.T)
     deadline = Int64(deadline_ns)
-    deadline < 0 && (deadline = typemax(Int64))
     _fdlock_incref!(fd.fdlock) || throw(_closing_error(fd.is_file))
     try
         pd = fd.pd
