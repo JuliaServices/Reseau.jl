@@ -21,6 +21,10 @@ module SocketOps
 using ..Reseau: @gcsafe_ccall
 
 const SockLen = @static Sys.iswindows() ? Cint : UInt32
+const SocketFD = @static Sys.iswindows() ? UInt : Cint
+const INVALID_SOCKET = @static Sys.iswindows() ? typemax(UInt) : Cint(-1)
+
+@inline is_valid_socket(fd::SocketFD)::Bool = fd != INVALID_SOCKET
 
 const AF_UNIX = Cint(1)
 const AF_INET = Cint(2)
@@ -41,6 +45,8 @@ const MSG_PEEK = Cint(0x02)
 
 const SOL_SOCKET = @static Sys.islinux() ? Cint(1) : Cint(0xffff)
 const IPPROTO_TCP = Cint(6)
+const IPPROTO_IPV6 = Cint(41)
+const IPV6_V6ONLY = @static Sys.islinux() ? Cint(26) : Cint(27)
 const SO_ERROR = @static Sys.islinux() ? Cint(0x0004) : Cint(0x1007)
 const SO_REUSEADDR = @static Sys.islinux() ? Cint(0x0002) : Cint(0x0004)
 const SO_KEEPALIVE = @static Sys.islinux() ? Cint(0x0009) : Cint(0x0008)
@@ -380,7 +386,11 @@ end
 
 @static if Sys.isapple()
 include("socket_ops/darwin.jl")
-elseif Sys.islinux() || Sys.isbsd()
+elseif Sys.islinux() || Sys.isfreebsd()
+# The atomic-flag backend hardcodes per-kernel SOCK_CLOEXEC/SOCK_NONBLOCK
+# constants that are only vetted for Linux and FreeBSD. Other BSDs (OpenBSD,
+# NetBSD, DragonFly) use different values, so they take the ENOSYS stub below
+# until their constants are vetted.
 include("socket_ops/linux.jl")
 elseif Sys.iswindows()
 include("socket_ops/windows.jl")
@@ -390,106 +400,106 @@ else
 # This lets trim/smoke tests and higher-level code compile while still making the
 # lack of backend support obvious at runtime.
 
-function fd_is_cloexec(fd::Cint)::Bool
+function fd_is_cloexec(fd::SocketFD)::Bool
     _ = fd
     _throw_enosys("fcntl(F_GETFD)")
 end
 
-function fd_is_nonblocking(fd::Cint)::Bool
+function fd_is_nonblocking(fd::SocketFD)::Bool
     _ = fd
     _throw_enosys("fcntl(F_GETFL)")
 end
 
-function set_close_on_exec!(fd::Cint)
+function set_close_on_exec!(fd::SocketFD)
     _ = fd
     _throw_enosys("fcntl(F_SETFD)")
 end
 
-function set_nonblocking!(fd::Cint, enabled::Bool = true)
+function set_nonblocking!(fd::SocketFD, enabled::Bool = true)
     _ = fd
     _ = enabled
     _throw_enosys("ioctl(FIONBIO)")
 end
 
-function open_socket(family::Integer, sotype::Integer, proto::Integer = 0)::Cint
+function open_socket(family::Integer, sotype::Integer, proto::Integer = 0)::SocketFD
     _ = family
     _ = sotype
     _ = proto
     _throw_enosys("socket")
 end
 
-function close_socket_nothrow(fd::Cint)::Int32
+function close_socket_nothrow(fd::SocketFD)::Int32
     _ = fd
     return Int32(Base.Libc.ENOSYS)
 end
 
-function close_socket(fd::Cint)
+function close_socket(fd::SocketFD)
     _ = fd
     _throw_enosys("close")
 end
 
-function bind_socket(fd::Cint, addr::SockAddrIn)
+function bind_socket(fd::SocketFD, addr::SockAddrIn)
     _ = fd
     _ = addr
     _throw_enosys("bind")
 end
 
-function bind_socket(fd::Cint, addr::SockAddrIn6)
+function bind_socket(fd::SocketFD, addr::SockAddrIn6)
     _ = fd
     _ = addr
     _throw_enosys("bind")
 end
 
-function bind_socket(fd::Cint, addr::Ptr{Cvoid}, addrlen::SockLen)
+function bind_socket(fd::SocketFD, addr::Ptr{Cvoid}, addrlen::SockLen)
     _ = fd
     _ = addr
     _ = addrlen
     _throw_enosys("bind")
 end
 
-function listen_socket(fd::Cint, backlog::Integer)
+function listen_socket(fd::SocketFD, backlog::Integer)
     _ = fd
     _ = backlog
     _throw_enosys("listen")
 end
 
-function connect_socket(fd::Cint, addr::SockAddrIn)::Int32
+function connect_socket(fd::SocketFD, addr::SockAddrIn)::Int32
     _ = fd
     _ = addr
     return Int32(Base.Libc.ENOSYS)
 end
 
-function connect_socket(fd::Cint, addr::SockAddrIn6)::Int32
+function connect_socket(fd::SocketFD, addr::SockAddrIn6)::Int32
     _ = fd
     _ = addr
     return Int32(Base.Libc.ENOSYS)
 end
 
-function connect_socket(fd::Cint, addr::Ptr{Cvoid}, addrlen::SockLen)::Int32
+function connect_socket(fd::SocketFD, addr::Ptr{Cvoid}, addrlen::SockLen)::Int32
     _ = fd
     _ = addr
     _ = addrlen
     return Int32(Base.Libc.ENOSYS)
 end
 
-function try_accept_socket(fd::Cint)::Tuple{Cint, AcceptPeer, Int32}
+function try_accept_socket(fd::SocketFD)::Tuple{SocketFD, AcceptPeer, Int32}
     _ = fd
-    return Cint(-1), nothing, Int32(Base.Libc.ENOSYS)
+    return INVALID_SOCKET, nothing, Int32(Base.Libc.ENOSYS)
 end
 
-function accept_socket(fd::Cint)::Cint
+function accept_socket(fd::SocketFD)::SocketFD
     _ = fd
     _throw_enosys("accept")
 end
 
-function get_sockopt_int(fd::Cint, level::Cint, optname::Cint)::Int32
+function get_sockopt_int(fd::SocketFD, level::Cint, optname::Cint)::Int32
     _ = fd
     _ = level
     _ = optname
     _throw_enosys("getsockopt")
 end
 
-function set_sockopt_int(fd::Cint, level::Cint, optname::Cint, value::Integer)
+function set_sockopt_int(fd::SocketFD, level::Cint, optname::Cint, value::Integer)
     _ = fd
     _ = level
     _ = optname
@@ -497,45 +507,45 @@ function set_sockopt_int(fd::Cint, level::Cint, optname::Cint, value::Integer)
     _throw_enosys("setsockopt")
 end
 
-function get_socket_error(fd::Cint)::Int32
+function get_socket_error(fd::SocketFD)::Int32
     _ = fd
     _throw_enosys("getsockopt")
 end
 
-function get_socket_name_in(fd::Cint)::SockAddrIn
+function get_socket_name_in(fd::SocketFD)::SockAddrIn
     _ = fd
     _throw_enosys("getsockname")
 end
 
-function get_socket_name_in6(fd::Cint)::SockAddrIn6
+function get_socket_name_in6(fd::SocketFD)::SockAddrIn6
     _ = fd
     _throw_enosys("getsockname")
 end
 
-function get_peer_name_in(fd::Cint)::SockAddrIn
+function get_peer_name_in(fd::SocketFD)::SockAddrIn
     _ = fd
     _throw_enosys("getpeername")
 end
 
-function get_peer_name_in6(fd::Cint)::SockAddrIn6
+function get_peer_name_in6(fd::SocketFD)::SockAddrIn6
     _ = fd
     _throw_enosys("getpeername")
 end
 
-function shutdown_socket(fd::Cint, how::Integer)
+function shutdown_socket(fd::SocketFD, how::Integer)
     _ = fd
     _ = how
     _throw_enosys("shutdown")
 end
 
-function read_once!(fd::Cint, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
+function read_once!(fd::SocketFD, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
     _ = fd
     _ = ptr
     _ = nbytes
     _throw_enosys("read")
 end
 
-function write_once!(fd::Cint, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
+function write_once!(fd::SocketFD, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
     _ = fd
     _ = ptr
     _ = nbytes
@@ -543,7 +553,7 @@ function write_once!(fd::Cint, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
 end
 
 function recv_from!(
-        fd::Cint,
+        fd::SocketFD,
         ptr::Ptr{UInt8},
         nbytes::Csize_t,
         flags::Cint = Cint(0),
@@ -560,7 +570,7 @@ function recv_from!(
 end
 
 function send_to!(
-        fd::Cint,
+        fd::SocketFD,
         ptr::Ptr{UInt8},
         nbytes::Csize_t,
         flags::Cint = Cint(0),
@@ -576,14 +586,14 @@ function send_to!(
     _throw_enosys("sendto")
 end
 
-function recv_msg!(fd::Cint, msg::Ref{MsgHdr}, flags::Cint = Cint(0))::Cssize_t
+function recv_msg!(fd::SocketFD, msg::Ref{MsgHdr}, flags::Cint = Cint(0))::Cssize_t
     _ = fd
     _ = msg
     _ = flags
     _throw_enosys("recvmsg")
 end
 
-function send_msg!(fd::Cint, msg::Ref{MsgHdr}, flags::Cint = Cint(0))::Cssize_t
+function send_msg!(fd::SocketFD, msg::Ref{MsgHdr}, flags::Cint = Cint(0))::Cssize_t
     _ = fd
     _ = msg
     _ = flags

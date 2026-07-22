@@ -692,6 +692,178 @@ end
         end
     end
 
+    @testset "ServerHello and HRR validation preserves Go alert semantics" begin
+        capture_alert(f) = try
+            f()
+            nothing
+        catch ex
+            ex
+        end
+
+        function validation_state()
+            hello = _tls13_cert_client_hello()
+            provider = _tls13_openssl_key_share_provider()
+            state = TLHC._TLS13ClientHandshakeState(
+                hello,
+                TLHC._TLS13_AES_128_GCM_SHA256_ID,
+                provider,
+                _tls13_certificate_verifier(),
+            )
+            client_share = state.client_hello.key_shares[1]::TLHC._TLSKeyShare
+            server_share = _tls13_server_share_and_secret(client_share)
+            state.server_hello = _tls13_certificate_server_hello(
+                hello.session_id,
+                server_share.group,
+                copy(server_share.share_data),
+            )
+            state.have_server_hello = true
+            return state
+        end
+
+        shared_cases = (
+            ("missing supported_versions", TLHC._TLS_ALERT_MISSING_EXTENSION,
+             sh -> (sh.supported_version = UInt16(0))),
+            ("invalid supported_versions", TLHC._TLS_ALERT_ILLEGAL_PARAMETER,
+             sh -> (sh.supported_version = TLHC.TLS1_2_VERSION)),
+            ("incorrect legacy version", TLHC._TLS_ALERT_ILLEGAL_PARAMETER,
+             sh -> (sh.vers = UInt16(0x0302))),
+            ("forbidden legacy extension", TLHC._TLS_ALERT_UNSUPPORTED_EXTENSION,
+             sh -> (sh.ocsp_stapling = true)),
+            ("nonzero legacy compression", TLHC._TLS_ALERT_DECODE_ERROR,
+             sh -> (sh.compression_method = UInt8(1))),
+        )
+        for (label, expected_alert, mutate!) in shared_cases
+            @testset "$label" begin
+                state = validation_state()
+                try
+                    mutate!(state.server_hello)
+                    err = capture_alert() do
+                        TLHC._check_server_hello_or_hrr!(state)
+                    end
+                    @test err isa TLHC._TLSAlertError
+                    err isa TLHC._TLSAlertError && @test err.alert == expected_alert
+                finally
+                    TLHC._securezero_tls13_client_handshake_state!(state)
+                end
+            end
+        end
+
+        normal_server_hello_cases = (
+            ("cookie", TLHC._TLS_ALERT_UNSUPPORTED_EXTENSION,
+             sh -> (sh.cookie = UInt8[0x01])),
+            ("HRR-form key share", TLHC._TLS_ALERT_DECODE_ERROR,
+             sh -> (sh.selected_group = TLHC._TLS_GROUP_SECP256R1)),
+            ("unsolicited ECH", TLHC._TLS_ALERT_UNSUPPORTED_EXTENSION,
+             sh -> (sh.encrypted_client_hello = UInt8[0x01])),
+            ("invalid X25519 key share", TLHC._TLS_ALERT_ILLEGAL_PARAMETER,
+             sh -> (sh.server_share = TLHC._TLSKeyShare(TLHC._TLS_GROUP_X25519, zeros(UInt8, 31)))),
+        )
+        for (label, expected_alert, mutate!) in normal_server_hello_cases
+            @testset "normal ServerHello $label" begin
+                state = validation_state()
+                try
+                    mutate!(state.server_hello)
+                    err = capture_alert() do
+                        TLHC._check_server_hello_or_hrr!(state)
+                        TLHC._process_server_hello!(state)
+                    end
+                    @test err isa TLHC._TLSAlertError
+                    err isa TLHC._TLSAlertError && @test err.alert == expected_alert
+                finally
+                    TLHC._securezero_tls13_client_handshake_state!(state)
+                end
+            end
+        end
+
+        hrr_cases = (
+            ("malformed ServerHello-form key share", TLHC._TLS_ALERT_DECODE_ERROR,
+             sh -> begin
+                 sh.selected_group = UInt16(0)
+                 sh.cookie = UInt8[0x01]
+                 sh.server_share = TLHC._TLSKeyShare(TLHC._TLS_GROUP_X25519, zeros(UInt8, 32))
+            end),
+            ("unsupported selected group", TLHC._TLS_ALERT_ILLEGAL_PARAMETER,
+             sh -> (sh.selected_group = UInt16(0x0018))),
+            ("redundant selected group", TLHC._TLS_ALERT_ILLEGAL_PARAMETER,
+             sh -> (sh.selected_group = TLHC._TLS_GROUP_X25519)),
+            ("unsolicited ECH", TLHC._TLS_ALERT_UNSUPPORTED_EXTENSION,
+             sh -> (sh.encrypted_client_hello = UInt8[0x01])),
+        )
+        for (label, expected_alert, mutate!) in hrr_cases
+            @testset "HRR $label" begin
+                state = validation_state()
+                try
+                    state.server_hello = _tls13_hello_retry_request(
+                        state.client_hello.session_id,
+                        TLHC._TLS_GROUP_SECP256R1,
+                        UInt8[0xa1],
+                    )
+                    mutate!(state.server_hello)
+                    err = capture_alert() do
+                        TLHC._check_server_hello_or_hrr!(state)
+                        TLHC._process_hello_retry_request!(state, _HandshakeMessageFlightIO())
+                    end
+                    @test err isa TLHC._TLSAlertError
+                    err isa TLHC._TLSAlertError && @test err.alert == expected_alert
+                finally
+                    TLHC._securezero_tls13_client_handshake_state!(state)
+                end
+            end
+        end
+    end
+
+    @testset "EncryptedExtensions validation preserves Go alert semantics" begin
+        capture_alert(f) = try
+            f()
+            nothing
+        catch ex
+            ex
+        end
+
+        parameter_cases = (
+            ("unrequested ALPN", TLHC._TLS_ALERT_NO_APPLICATION_PROTOCOL,
+             hello -> empty!(hello.alpn_protocols),
+             msg -> (msg.alpn_protocol = "h2")),
+            ("incompatible ALPN", TLHC._TLS_ALERT_NO_APPLICATION_PROTOCOL,
+             _hello -> nothing,
+             msg -> (msg.alpn_protocol = "http/1.1")),
+            ("unexpected QUIC parameters", TLHC._TLS_ALERT_UNSUPPORTED_EXTENSION,
+             _hello -> nothing,
+             msg -> (msg.quic_transport_parameters = UInt8[])),
+            ("missing QUIC parameters", TLHC._TLS_ALERT_MISSING_EXTENSION,
+             hello -> (hello.quic_transport_parameters = UInt8[]),
+             _msg -> nothing),
+            ("unsolicited early data", TLHC._TLS_ALERT_UNSUPPORTED_EXTENSION,
+             _hello -> nothing,
+             msg -> (msg.early_data = true)),
+        )
+        for (label, expected_alert, mutate_hello!, mutate_msg!) in parameter_cases
+            @testset "$label" begin
+                hello = _tls13_cert_client_hello()
+                mutate_hello!(hello)
+                state = TLHC._TLS13ClientHandshakeState(
+                    hello,
+                    TLHC._TLS13_AES_128_GCM_SHA256_ID,
+                    _tls13_openssl_key_share_provider(),
+                    _tls13_certificate_verifier(),
+                )
+                try
+                    state.transcript = TLHC._TranscriptHash(TLHC._HASH_SHA256)
+                    msg = TLHC._EncryptedExtensionsMsg()
+                    mutate_msg!(msg)
+                    io = _HandshakeMessageFlightIO([TLHC._marshal_handshake_message(msg)])
+                    err = capture_alert() do
+                        TLHC._read_server_parameters!(state, io)
+                    end
+                    @test err isa TLHC._TLSAlertError
+                    err isa TLHC._TLSAlertError && @test err.alert == expected_alert
+                finally
+                    TLHC._securezero_tls13_client_handshake_state!(state)
+                end
+            end
+        end
+    end
+
     @testset "certificate verify mismatches are rejected before client finished" begin
         key_share_provider = _tls13_openssl_key_share_provider()
         expected = _compute_tls13_real_certificate_server_flight(_tls13_cert_client_hello())
@@ -738,7 +910,81 @@ end
         end
         @test err isa TLHC._TLSAlertError
         if err isa TLHC._TLSAlertError
-            @test err.alert == TLHC._TLS_ALERT_BAD_CERTIFICATE
+            @test err.alert == TLHC._TLS_ALERT_ILLEGAL_PARAMETER
+        end
+        @test length(io.outbound) == 1
+        @test !state.complete
+    end
+
+    @testset "certificate verify algorithms must match the certificate key" begin
+        expected_hello = _tls13_cert_client_hello()
+        push!(expected_hello.supported_signature_algorithms, TLHC._TLS_SIGNATURE_ECDSA_SECP256R1_SHA256)
+        expected = _compute_tls13_real_certificate_server_flight(expected_hello)
+        incompatible_verify = TLHC._CertificateVerifyMsg(
+            TLHC._TLS_SIGNATURE_ECDSA_SECP256R1_SHA256,
+            copy(expected.certificate_verify.signature),
+        )
+        inbound = copy(expected.inbound)
+        inbound[4] = TLHC._marshal_handshake_message(incompatible_verify)
+
+        state_hello = _tls13_cert_client_hello()
+        push!(state_hello.supported_signature_algorithms, TLHC._TLS_SIGNATURE_ECDSA_SECP256R1_SHA256)
+        state = TLHC._TLS13ClientHandshakeState(
+            state_hello,
+            TLHC._TLS13_AES_128_GCM_SHA256_ID,
+            _tls13_openssl_key_share_provider(),
+            _tls13_certificate_verifier(),
+        )
+        io = _HandshakeMessageFlightIO(inbound)
+        err = try
+            TLHC._client_handshake_tls13!(state, io)
+            nothing
+        catch ex
+            ex
+        end
+        # Go surfaces a scheme-vs-key mismatch through verifyHandshakeSignature
+        # as decrypt_error, not as an illegal_parameter pre-check.
+        @test err isa TLHC._TLSAlertError
+        if err isa TLHC._TLSAlertError
+            @test err.alert == TLHC._TLS_ALERT_DECRYPT_ERROR
+            @test occursin("invalid signature by the server certificate", err.message)
+        end
+        @test length(io.outbound) == 1
+        @test !state.complete
+    end
+
+    @testset "certificate verify rejects PKCS#1 v1.5 schemes with illegal_parameter" begin
+        expected_hello = _tls13_cert_client_hello()
+        push!(expected_hello.supported_signature_algorithms, TLHC._TLS_SIGNATURE_RSA_PKCS1_SHA256)
+        expected = _compute_tls13_real_certificate_server_flight(expected_hello)
+        pkcs1_verify = TLHC._CertificateVerifyMsg(
+            TLHC._TLS_SIGNATURE_RSA_PKCS1_SHA256,
+            copy(expected.certificate_verify.signature),
+        )
+        inbound = copy(expected.inbound)
+        inbound[4] = TLHC._marshal_handshake_message(pkcs1_verify)
+
+        state_hello = _tls13_cert_client_hello()
+        push!(state_hello.supported_signature_algorithms, TLHC._TLS_SIGNATURE_RSA_PKCS1_SHA256)
+        state = TLHC._TLS13ClientHandshakeState(
+            state_hello,
+            TLHC._TLS13_AES_128_GCM_SHA256_ID,
+            _tls13_openssl_key_share_provider(),
+            _tls13_certificate_verifier(),
+        )
+        io = _HandshakeMessageFlightIO(inbound)
+        err = try
+            TLHC._client_handshake_tls13!(state, io)
+            nothing
+        catch ex
+            ex
+        end
+        # RFC 8446 section 4.4.3: PKCS#1 v1.5 is invalid for a TLS 1.3
+        # CertificateVerify even when the scheme was offered for TLS 1.2.
+        @test err isa TLHC._TLSAlertError
+        if err isa TLHC._TLSAlertError
+            @test err.alert == TLHC._TLS_ALERT_ILLEGAL_PARAMETER
+            @test occursin("certificate used with invalid signature algorithm", err.message)
         end
         @test length(io.outbound) == 1
         @test !state.complete
@@ -761,7 +1007,7 @@ end
         end
         @test err isa TLHC._TLSAlertError
         if err isa TLHC._TLSAlertError
-            @test err.alert == TLHC._TLS_ALERT_BAD_CERTIFICATE
+            @test err.alert == TLHC._TLS_ALERT_DECODE_ERROR
         end
         @test length(io.outbound) == 1
         @test !state.complete
@@ -788,21 +1034,53 @@ end
         @test length(io.outbound) == 1
     end
 
-    @testset "post-handshake tickets reject invalid lifetimes" begin
-        psk = UInt8[0x41, 0x42, 0x43, 0x44, 0x45, 0x46]
-        expected = _compute_tls13_psk_server_flight(_tls13_psk_client_hello(), psk)
-        bad_ticket = TLHC._NewSessionTicketMsgTLS13()
-        bad_ticket.lifetime = TLHC._TLS13_MAX_SESSION_TICKET_LIFETIME + UInt32(1)
-        bad_ticket.age_add = 0x05060708
-        bad_ticket.nonce = UInt8[0x90, 0x91]
-        bad_ticket.label = UInt8[0xa0, 0xa1, 0xa2]
-        bad_ticket.max_early_data = 0x0b0c0d0e
-        inbound = copy(expected.inbound)
-        inbound[end] = TLHC._marshal_handshake_message(bad_ticket)
+    @testset "post-handshake tickets preserve parse and validation alerts" begin
+        function ticket_raw(; lifetime = UInt32(60), label = UInt8[0xa0])
+            ticket = TLHC._NewSessionTicketMsgTLS13()
+            ticket.lifetime = lifetime
+            ticket.age_add = 0x05060708
+            ticket.nonce = UInt8[0x90, 0x91]
+            ticket.label = copy(label)
+            return TLHC._marshal_handshake_message(ticket)
+        end
 
-        state = _tls13_psk_handshake_state(_tls13_psk_client_hello(), psk)
-        io = _HandshakeMessageFlightIO(inbound)
-
-        @test_throws ArgumentError TLHC._client_handshake_tls13!(state, io)
+        cases = (
+            (
+                "invalid lifetime",
+                ticket_raw(lifetime = TLHC._TLS13_MAX_SESSION_TICKET_LIFETIME + UInt32(1)),
+                TLHC._TLS_ALERT_ILLEGAL_PARAMETER,
+            ),
+            ("empty ticket label", ticket_raw(label = UInt8[]), TLHC._TLS_ALERT_DECODE_ERROR),
+            (
+                "malformed ticket",
+                UInt8[TLHC._HANDSHAKE_TYPE_NEW_SESSION_TICKET, 0x00, 0x00, 0x01, 0x00],
+                TLHC._TLS_ALERT_DECODE_ERROR,
+            ),
+            (
+                "valid wrong message type",
+                TLHC._marshal_handshake_message(TLHC._FinishedMsg(UInt8[0x01])),
+                TLHC._TLS_ALERT_UNEXPECTED_MESSAGE,
+            ),
+        )
+        for (label, raw, expected_alert) in cases
+            @testset "$label" begin
+                state = _tls13_psk_handshake_state(
+                    _tls13_psk_client_hello(),
+                    UInt8[0x41, 0x42, 0x43],
+                )
+                try
+                    err = try
+                        TLHC._read_post_handshake_messages!(state, _HandshakeMessageFlightIO([raw]))
+                        nothing
+                    catch ex
+                        ex
+                    end
+                    @test err isa TLHC._TLSAlertError
+                    err isa TLHC._TLSAlertError && @test err.alert == expected_alert
+                finally
+                    TLHC._securezero_tls13_client_handshake_state!(state)
+                end
+            end
+        end
     end
 end

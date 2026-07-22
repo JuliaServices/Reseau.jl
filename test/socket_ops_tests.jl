@@ -5,16 +5,16 @@ const IP = Reseau.IOPoll
 const SO = Reseau.SocketOps
 const _SO_EWOULDBLOCK = @static isdefined(Base.Libc, :EWOULDBLOCK) ? Int32(getfield(Base.Libc, :EWOULDBLOCK)) : Int32(Base.Libc.EAGAIN)
 
-function _close_fd_raw(fd::Cint)
-    fd < 0 && return nothing
+function _close_fd_raw(fd::SO.SocketFD)
+    SO.is_valid_socket(fd) || return nothing
     SO.close_socket_nothrow(fd)
     return nothing
 end
 
-function _accept_with_retry(listener::Cint)::Tuple{Cint, SO.AcceptPeer}
+function _accept_with_retry(listener::SO.SocketFD)::Tuple{SO.SocketFD, SO.AcceptPeer}
     for _ in 1:5000
         accepted, peer, errno = SO.try_accept_socket(listener)
-        accepted != -1 && return accepted, peer
+        SO.is_valid_socket(accepted) && return accepted, peer
         errno == Int32(Base.Libc.EAGAIN) && (yield(); continue)
         errno == _SO_EWOULDBLOCK && (yield(); continue)
         errno == Int32(Base.Libc.EINTR) && continue
@@ -23,7 +23,7 @@ function _accept_with_retry(listener::Cint)::Tuple{Cint, SO.AcceptPeer}
     throw(ArgumentError("timed out waiting for accepted socket"))
 end
 
-function _wait_connect_ready!(fd::Cint)
+function _wait_connect_ready!(fd::SO.SocketFD)
     registration = IP.register!(fd; mode = IP.PollMode.WRITE)
     try
         IP.arm_waiter!(registration, IP.PollMode.WRITE)
@@ -34,10 +34,10 @@ function _wait_connect_ready!(fd::Cint)
     return nothing
 end
 
-function _stream_pair()::Tuple{Cint, Cint}
-    listener = Cint(-1)
-    client = Cint(-1)
-    accepted = Cint(-1)
+function _stream_pair()::Tuple{SO.SocketFD, SO.SocketFD}
+    listener = SO.INVALID_SOCKET
+    client = SO.INVALID_SOCKET
+    accepted = SO.INVALID_SOCKET
     try
         listener = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
         SO.set_sockopt_int(listener, SO.SOL_SOCKET, SO.SO_REUSEADDR, 1)
@@ -56,19 +56,19 @@ function _stream_pair()::Tuple{Cint, Cint}
         accepted, _ = _accept_with_retry(listener)
         stream_client = client
         stream_server = accepted
-        client = Cint(-1)
-        accepted = Cint(-1)
+        client = SO.INVALID_SOCKET
+        accepted = SO.INVALID_SOCKET
         return stream_client, stream_server
     finally
-        accepted >= 0 && SO.close_socket_nothrow(accepted)
-        client >= 0 && SO.close_socket_nothrow(client)
-        listener >= 0 && SO.close_socket_nothrow(listener)
+        SO.is_valid_socket(accepted) && SO.close_socket_nothrow(accepted)
+        SO.is_valid_socket(client) && SO.close_socket_nothrow(client)
+        SO.is_valid_socket(listener) && SO.close_socket_nothrow(listener)
     end
 end
 
-function _dgram_pair()::Tuple{Cint, Cint, SO.SockAddrIn, SO.SockAddrIn}
-    fd0 = Cint(-1)
-    fd1 = Cint(-1)
+function _dgram_pair()::Tuple{SO.SocketFD, SO.SocketFD, SO.SockAddrIn, SO.SockAddrIn}
+    fd0 = SO.INVALID_SOCKET
+    fd1 = SO.INVALID_SOCKET
     try
         fd0 = SO.open_socket(SO.AF_INET, SO.SOCK_DGRAM)
         fd1 = SO.open_socket(SO.AF_INET, SO.SOCK_DGRAM)
@@ -78,13 +78,38 @@ function _dgram_pair()::Tuple{Cint, Cint, SO.SockAddrIn, SO.SockAddrIn}
         addr1 = SO.get_socket_name_in(fd1)
         return fd0, fd1, addr0, addr1
     catch
-        fd1 >= 0 && SO.close_socket_nothrow(fd1)
-        fd0 >= 0 && SO.close_socket_nothrow(fd0)
+        SO.is_valid_socket(fd1) && SO.close_socket_nothrow(fd1)
+        SO.is_valid_socket(fd0) && SO.close_socket_nothrow(fd0)
         rethrow()
     end
 end
 
 @testset "SocketOps phase 3" begin
+        @static if Sys.iswindows()
+            @testset "pointer-sized WinSock handles" begin
+                @test SO.SocketFD === UInt
+                @test IP.SysFD === UInt
+                high_handle = (UInt(1) << 40) | UInt(0x1234)
+                @test high_handle > UInt(typemax(UInt32))
+                @test SO.is_valid_socket(high_handle)
+                @test SO._socket_value(high_handle) == high_handle
+                pollstate = IP.PollState(high_handle, UInt64(7))
+                @test pollstate.sysfd == high_handle
+                registration = IP.Registration(
+                    high_handle,
+                    UInt64(7),
+                    IP.PollMode.READWRITE,
+                    IP.PollWaiter(),
+                    IP.PollWaiter(),
+                    false,
+                )
+                poller = IP.Poller()
+                poller.registrations[high_handle] = registration
+                @test poller.registrations[high_handle].fd == high_handle
+                iocp_registration = IP._new_iocp_registration(high_handle, UInt64(7))
+                @test iocp_registration.fd == high_handle
+            end
+        end
         @testset "open sets cloexec and nonblocking" begin
             fd = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
             try
@@ -95,13 +120,13 @@ end
             end
         end
         @testset "close reports only invalid descriptor errors" begin
-            @test SO.close_socket_nothrow(Cint(-1)) == Int32(Base.Libc.EBADF)
-            @test_throws SystemError SO.close_socket(Cint(-1))
+            @test SO.close_socket_nothrow(SO.INVALID_SOCKET) == Int32(Base.Libc.EBADF)
+            @test_throws SystemError SO.close_socket(SO.INVALID_SOCKET)
         end
         @testset "read/write and recv/send wrappers" begin
             fd0, fd1 = _stream_pair()
-            d0 = Cint(-1)
-            d1 = Cint(-1)
+            d0 = SO.INVALID_SOCKET
+            d1 = SO.INVALID_SOCKET
             try
                 d0 = fd0
                 d1 = fd1
@@ -129,8 +154,8 @@ end
                 _close_fd_raw(d1)
             end
             fd2, fd3, addr2, addr3 = _dgram_pair()
-            d2 = Cint(-1)
-            d3 = Cint(-1)
+            d2 = SO.INVALID_SOCKET
+            d3 = SO.INVALID_SOCKET
             try
                 d2 = fd2
                 d3 = fd3
@@ -158,9 +183,9 @@ end
         end
         @testset "connect completion and accept flags" begin
             IP.shutdown!()
-            listener = Cint(-1)
-            client = Cint(-1)
-            accepted = Cint(-1)
+            listener = SO.INVALID_SOCKET
+            client = SO.INVALID_SOCKET
+            accepted = SO.INVALID_SOCKET
             try
                 listener = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
                 SO.set_sockopt_int(listener, SO.SOL_SOCKET, SO.SO_REUSEADDR, 1)
@@ -181,9 +206,9 @@ end
                 @test peer !== nothing
                 @test peer isa SO.SockAddrIn || peer isa SO.SockAddrIn6
             finally
-                accepted >= 0 && SO.close_socket_nothrow(accepted)
-                client >= 0 && SO.close_socket_nothrow(client)
-                listener >= 0 && SO.close_socket_nothrow(listener)
+                SO.is_valid_socket(accepted) && SO.close_socket_nothrow(accepted)
+                SO.is_valid_socket(client) && SO.close_socket_nothrow(client)
+                SO.is_valid_socket(listener) && SO.close_socket_nothrow(listener)
                 IP.shutdown!()
             end
         end

@@ -364,10 +364,21 @@ function _tls13_illegal_client_hello_change(client_hello::_ClientHelloMsg, first
 end
 
 function _tls13_set_client_hello!(state::_TLS13ServerHandshakeState, raw::Vector{UInt8})::Nothing
-    client_hello = _unmarshal_client_hello(raw)
-    client_hello === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 server handshake expected ClientHello")
+    parsed = _unmarshal_handshake_message_or_fail(raw)
+    parsed isa _ClientHelloMsg ||
+        _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 server handshake expected ClientHello")
+    client_hello = parsed::_ClientHelloMsg
+    isempty(client_hello.supported_versions) &&
+        _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: client used the legacy version field to negotiate TLS 1.3")
     in(TLS1_3_VERSION, client_hello.supported_versions) || _tls_fail(_TLS_ALERT_PROTOCOL_VERSION, "tls: client did not offer TLS 1.3")
-    in(_TLS_COMPRESSION_NONE, client_hello.compression_methods) || _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: client sent unsupported compression methods")
+    client_hello.compression_methods == UInt8[_TLS_COMPRESSION_NONE] ||
+        _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: TLS 1.3 client supports illegal compression methods")
+    isempty(client_hello.secure_renegotiation) ||
+        _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: initial handshake had non-empty renegotiation extension")
+    client_hello.early_data &&
+        _tls_fail(_TLS_ALERT_UNSUPPORTED_EXTENSION, "tls: client sent unexpected early data")
+    client_hello.quic_transport_parameters === nothing ||
+        _tls_fail(_TLS_ALERT_UNSUPPORTED_EXTENSION, "tls: client sent an unexpected quic_transport_parameters extension")
     state.client_hello = client_hello
     state.client_hello_raw = raw
     return nothing
@@ -404,8 +415,10 @@ end
 function _read_second_client_hello!(state::_TLS13ServerHandshakeState, io, selected_group::UInt16)::Nothing
     first_hello = state.client_hello
     raw = _read_handshake_bytes!(io)
-    client_hello = _unmarshal_client_hello(raw)
-    client_hello === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 server handshake expected second ClientHello")
+    parsed = _unmarshal_handshake_message_or_fail(raw)
+    parsed isa _ClientHelloMsg ||
+        _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 server handshake expected second ClientHello")
+    client_hello = parsed::_ClientHelloMsg
     length(client_hello.key_shares) == 1 || _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: client did not send one key share in second ClientHello")
     key_share = client_hello.key_shares[1]::_TLSKeyShare
     key_share.group == selected_group || _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: client sent unexpected key share in second ClientHello")
@@ -444,7 +457,7 @@ function _check_for_resumption!(state::_TLS13ServerHandshakeState, config)::Noth
     config.session_tickets_disabled && return nothing
     in(_TLS_PSK_MODE_DHE, state.client_hello.psk_modes) || return nothing
     length(state.client_hello.psk_identities) == length(state.client_hello.psk_binders) ||
-        _tls_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid or missing PSK binders")
+        _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: invalid or missing PSK binders")
     isempty(state.client_hello.psk_identities) && return nothing
     max_identities = min(length(state.client_hello.psk_identities), _TLS13_MAX_CLIENT_PSK_IDENTITIES)
     keys = _tls_active_session_ticket_keys(config)
@@ -619,9 +632,10 @@ function _read_client_certificate!(state::_TLS13ServerHandshakeState, io, config
         return nothing
     end
     raw = _read_handshake_bytes!(io)
-    msg = _unmarshal_certificate_tls13(raw)
-    msg === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 server handshake expected client Certificate")
-    _transcript_update!(state.transcript, raw)
+    parsed = _unmarshal_handshake_message_or_fail(raw, state.transcript)
+    parsed isa _CertificateMsgTLS13 ||
+        _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 server handshake expected client Certificate")
+    msg = parsed::_CertificateMsgTLS13
     state.client_leaf_public_key = nothing
     state.peer_certificates = [copy(cert) for cert in msg.certificates]
     has_client_certificates = !isempty(msg.certificates)
@@ -638,10 +652,16 @@ function _read_client_certificate!(state::_TLS13ServerHandshakeState, io, config
         ca_file = verify_peer ? _effective_ca_file(config; is_server = true) : nothing,
     )
     raw = _read_handshake_bytes!(io)
-    certificate_verify = _unmarshal_certificate_verify(raw)
-    certificate_verify === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 server handshake expected client CertificateVerify")
+    parsed_verify = _unmarshal_handshake_message_or_fail(raw)
+    parsed_verify isa _CertificateVerifyMsg ||
+        _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 server handshake expected client CertificateVerify")
+    certificate_verify = parsed_verify::_CertificateVerifyMsg
     in(certificate_verify.signature_algorithm, state.client_certificate_request_algorithms) ||
-        _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: client certificate used with invalid signature algorithm")
+        _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: client certificate used with invalid signature algorithm")
+    _tls13_signature_scheme_matches_public_key(
+        certificate_verify.signature_algorithm,
+        state.client_leaf_public_key::_TLSPublicKey,
+    ) || _tls_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid signature by the client certificate")
     signed = _tls13_signed_message(_TLS13_CLIENT_SIGNATURE_CONTEXT, state.transcript)
     try
         _tls13_openssl_verify_signature(state.client_leaf_public_key::_TLSPublicKey, certificate_verify.signature_algorithm, signed, certificate_verify.signature) ||
@@ -655,8 +675,10 @@ end
 
 function _read_client_finished!(state::_TLS13ServerHandshakeState, io)::Nothing
     raw = _read_handshake_bytes!(io)
-    msg = _unmarshal_finished(raw)
-    msg === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 server handshake expected client Finished")
+    parsed = _unmarshal_handshake_message_or_fail(raw)
+    parsed isa _FinishedMsg ||
+        _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 server handshake expected client Finished")
+    msg = parsed::_FinishedMsg
     expected_verify_data = _tls13_finished_verify_data(state.cipher_spec.hash_kind, state.client_handshake_traffic_secret, state.transcript)
     try
         _constant_time_equals(msg.verify_data, expected_verify_data) || _tls_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid client finished hash")
@@ -724,6 +746,7 @@ function _send_new_session_ticket!(state::_TLS13ServerHandshakeState, io, config
 end
 
 function _server_handshake_tls13_after_client_hello!(state::_TLS13ServerHandshakeState, io, config)::Nothing
+    _tls_set_negotiated_record_version!(io, TLS1_3_VERSION)
     _prepare_server_negotiation!(state, io, config)
     _check_for_resumption!(state, config)
     _send_server_hello!(state, io)
@@ -750,6 +773,7 @@ end
 function _server_handshake_tls13!(state::_TLS13ServerHandshakeState, io, config)::Nothing
     state.complete && throw(ArgumentError("tls13 server handshake already complete"))
     _read_client_hello!(state, io)
+    _tls_check_inappropriate_fallback!(config, state.client_hello, TLS1_3_VERSION)
     return _server_handshake_tls13_after_client_hello!(state, io, config)
 end
 

@@ -103,6 +103,66 @@ function _tls12_run_public_roundtrip(server_config::TL12N.Config, client_config:
     end
 end
 
+function _tls12_connect_with_ems(
+    remote_addr::NC12N.SocketAddr,
+    config::TL12N.Config,
+    extended_master_secret::Bool,
+)
+    tcp = NC12N.connect(remote_addr)
+    conn = nothing
+    state = nothing
+    try
+        conn = TL12N.client(tcp, config)
+        cache_key = TL12N._tls13_client_session_cache_key(config, tcp)
+        client_hello = TL12N._tls12_client_hello(config)
+        client_hello.extended_master_secret = extended_master_secret
+        session = TL12N._tls12_try_load_client_session(config, cache_key, client_hello)
+        state = TL12N._TLS12ClientHandshakeState(client_hello, session)
+        io = TL12N._TLS12HandshakeRecordIO(tcp, TL12N._native_tls12_state(conn))
+        TL12N._client_handshake_tls12!(state, io, config)
+        negotiated_ems = state.server_hello.extended_master_secret
+        TL12N._finish_native_tls12_client_handshake!(conn, state)
+        return conn, negotiated_ems
+    catch
+        _tls12_native_close_quiet!(conn === nothing ? tcp : conn)
+        rethrow()
+    finally
+        state === nothing || TL12N._securezero_tls12_client_handshake_state!(state)
+    end
+end
+
+function _tls12_run_roundtrip_with_ems(
+    server_config::TL12N.Config,
+    client_config::TL12N.Config,
+    extended_master_secret::Bool,
+)
+    listener = nothing
+    client = nothing
+    task = nothing
+    try
+        listener, addr, task = _start_tls12_server(server_config; handler = conn -> begin
+            write(conn, UInt8[0x6f, 0x6b])
+            read(conn, 2) == UInt8[0x61, 0x63] || error("unexpected TLS 1.2 client ack")
+            return TL12N.connection_state(conn)
+        end)
+        client, negotiated_ems = _tls12_connect_with_ems(addr, client_config, extended_master_secret)
+        client_state = TL12N.connection_state(client)
+        read(client, 2) == UInt8[0x6f, 0x6b] || error("unexpected TLS 1.2 server bytes")
+        write(client, UInt8[0x61, 0x63]) == 2 || error("unexpected TLS 1.2 client ack write")
+        _tls12_native_wait_task(task, 5.0) != :timed_out || error("timed out waiting for TLS 1.2 server task")
+        return client_state, fetch(task)::TL12N.ConnectionState, negotiated_ems
+    finally
+        _tls12_native_close_quiet!(client)
+        if task !== nothing
+            try
+                wait(task)
+            catch
+            end
+        end
+        _tls12_native_close_quiet!(listener)
+    end
+end
+
 function _start_tls12_server(config::TL12N.Config; handler)
     listener = TL12N.listen(NC12N.loopback_addr(0), config; backlog = 8)
     addr = TL12N.addr(listener)::NC12N.SocketAddrV4
@@ -144,6 +204,88 @@ function _tls12_unexpected_message_error(f)
     return tls_err
 end
 
+# Build an encrypted native TLS 1.2 server session ticket with caller-chosen
+# created_at/use_by timestamps, using the config's active ticket key so the same
+# server can later decrypt it.
+function _tls12_encode_server_ticket(
+    config::TL12N.Config,
+    created_at_s::Integer,
+    use_by_s::Integer;
+    secret::Vector{UInt8} = rand(UInt8, 48),
+)
+    keys = TL12N._tls_active_session_ticket_keys(config)
+    session = TL12N._owned_tls12_server_session(
+        TL12N.TLS1_2_VERSION,
+        TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID,
+        UInt64(created_at_s),
+        UInt64(use_by_s),
+        UInt8[],
+        secret,
+        Vector{Vector{UInt8}}(),
+        "",
+        TL12N._TLS_GROUP_SECP256R1,
+        false,
+    )
+    return TL12N._tls_encrypt_server_session_ticket(keys[1], TL12N._serialize_tls12_server_session(session))
+end
+
+# A minimal ClientHello that both offers the cached ticket and can complete a
+# full RSA/P-256 handshake if resumption is refused.
+function _tls12_resumption_client_hello(ticket::Vector{UInt8})
+    hello = TL12N._ClientHelloMsg()
+    hello.vers = TL12N.TLS1_2_VERSION
+    hello.cipher_suites = UInt16[TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID]
+    hello.compression_methods = UInt8[TL12N._TLS_COMPRESSION_NONE]
+    hello.supported_curves = UInt16[TL12N._TLS_GROUP_SECP256R1]
+    hello.supported_points = UInt8[0x00]
+    hello.supported_signature_algorithms = UInt16[TL12N._TLS_SIGNATURE_RSA_PKCS1_SHA256]
+    hello.supported_versions = UInt16[TL12N.TLS1_2_VERSION]
+    hello.ticket_supported = true
+    hello.session_ticket = ticket
+    hello.extended_master_secret = false
+    return hello
+end
+
+# A server handshake state primed to emit a NewSessionTicket. When
+# resumption_session is non-nothing the state mimics a resumed handshake.
+function _tls12_ticket_emit_state(config::TL12N.Config; resumption_session = nothing)
+    state = TL12N._TLS12ServerHandshakeState(config)
+    state.cipher_suite = TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID
+    state.curve_id = TL12N._TLS_GROUP_SECP256R1
+    state.selected_alpn = ""
+    state.peer_certificates = Vector{Vector{UInt8}}()
+    server_hello = TL12N._ServerHelloMsg()
+    server_hello.ticket_supported = true
+    server_hello.extended_master_secret = false
+    state.server_hello = server_hello
+    state.resumption_session = resumption_session
+    state.using_resumption = resumption_session !== nothing
+    return state
+end
+
+# Run _tls12_send_new_session_ticket! over a loopback socket pair and parse the
+# NewSessionTicket the server writes.
+function _tls12_emit_and_parse_ticket(config::TL12N.Config, state, master_secret::Vector{UInt8})
+    listener = nothing
+    client_tcp = nothing
+    server_tcp = nothing
+    try
+        listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
+        io = TL12N._TLS12HandshakeRecordIO(client_tcp, TL12N._TLS12NativeState())
+        transcript = TL12N._TranscriptHash(TL12N._HASH_SHA256; buffer_handshake = false)
+        TL12N._tls12_send_new_session_ticket!(state, io, transcript, config, master_secret)
+        reader = TL12N._TLS12HandshakeRecordIO(server_tcp, TL12N._TLS12NativeState())
+        raw = TL12N._read_handshake_bytes!(reader)
+        msg = TL12N._unmarshal_new_session_ticket_tls12(raw)
+        msg === nothing && error("failed to parse re-issued TLS 1.2 NewSessionTicket")
+        return msg::TL12N._NewSessionTicketMsgTLS12
+    finally
+        _tls12_native_close_quiet!(server_tcp)
+        _tls12_native_close_quiet!(client_tcp)
+        _tls12_native_close_quiet!(listener)
+    end
+end
+
 @testset "TLS native TLS1.2 client" begin
     @test TL12N._native_tls12_only(_tls12_native_client_config())
     @test !TL12N._native_tls12_only(TL12N.Config(server_name = "localhost", verify_peer = false))
@@ -164,14 +306,285 @@ end
             listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
             client_state = TL12N._TLS12NativeState()
             server_state = TL12N._TLS12NativeState()
+            # Established connection: the reader accepts application data.
+            server_state.handshake_complete = true
             write_key = UInt8[UInt8(0x10 + i) for i in 0:15]
             write_iv = UInt8[0xa0, 0xa1, 0xa2, 0xa3]
             TL12N._tls12_set_write_cipher!(client_state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, write_key, write_iv)
             TL12N._tls12_set_read_cipher!(server_state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, write_key, write_iv)
-            TL12N._tls12_write_record!(client_tcp, client_state.write_cipher, TL12N._TLS_RECORD_TYPE_APPLICATION_DATA, UInt8[0x61, 0x62, 0x63])
+            TL12N._tls12_write_record!(client_tcp, client_state, TL12N._TLS_RECORD_TYPE_APPLICATION_DATA, UInt8[0x61, 0x62, 0x63])
             TL12N._tls12_read_record!(server_tcp, server_state)
             @test server_state.plaintext_buffer == UInt8[0x61, 0x62, 0x63]
         finally
+            _tls12_native_close_quiet!(server_tcp)
+            _tls12_native_close_quiet!(client_tcp)
+            _tls12_native_close_quiet!(listener)
+        end
+    end
+
+    @testset "initial and negotiated records use Go-compatible versions" begin
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        try
+            listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
+            state = TL12N._TLS12NativeState()
+            io = TL12N._TLS12HandshakeRecordIO(client_tcp, state)
+            raw = UInt8[TL12N._HANDSHAKE_TYPE_CLIENT_HELLO, 0x00, 0x00, 0x00]
+
+            TL12N._write_handshake_bytes!(io, raw)
+            initial_header = Vector{UInt8}(undef, 5)
+            read!(server_tcp, initial_header)
+            initial_payload = Vector{UInt8}(undef, 4)
+            read!(server_tcp, initial_payload)
+            @test (UInt16(initial_header[2]) << 8) | UInt16(initial_header[3]) == TL12N._TLS_LEGACY_RECORD_VERSION
+            @test initial_payload == raw
+
+            state.version = TL12N.TLS1_2_VERSION
+            TL12N._write_handshake_bytes!(io, raw)
+            negotiated_header = Vector{UInt8}(undef, 5)
+            read!(server_tcp, negotiated_header)
+            negotiated_payload = Vector{UInt8}(undef, 4)
+            read!(server_tcp, negotiated_payload)
+            @test (UInt16(negotiated_header[2]) << 8) | UInt16(negotiated_header[3]) == TL12N.TLS1_2_VERSION
+            @test negotiated_payload == raw
+        finally
+            _tls12_native_close_quiet!(server_tcp)
+            _tls12_native_close_quiet!(client_tcp)
+            _tls12_native_close_quiet!(listener)
+        end
+    end
+
+    @testset "fragmented handshake enforces TLS 1.2 CCS boundary" begin
+        partial = UInt8[TL12N._HANDSHAKE_TYPE_FINISHED, 0x00, 0x00]
+        tail = UInt8[0x01, 0xaa]
+
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        try
+            listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
+            state = TL12N._TLS12NativeState()
+            state.version = TL12N.TLS1_2_VERSION
+            TL12N._tls_write_tls_plaintext!(
+                client_tcp,
+                TL12N._TLS_RECORD_TYPE_HANDSHAKE,
+                partial,
+                TL12N.TLS1_2_VERSION,
+            )
+            TL12N._tls12_read_record!(server_tcp, state)
+            TL12N._tls_write_tls_plaintext!(
+                client_tcp,
+                TL12N._TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC,
+                UInt8[0x01],
+                TL12N.TLS1_2_VERSION,
+            )
+            err = _tls12_unexpected_message_error(() -> TL12N._tls12_read_record!(server_tcp, state))
+            @test occursin("interrupted", err.message)
+        finally
+            _tls12_native_close_quiet!(server_tcp)
+            _tls12_native_close_quiet!(client_tcp)
+            _tls12_native_close_quiet!(listener)
+        end
+
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        try
+            listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
+            state = TL12N._TLS12NativeState()
+            state.version = TL12N.TLS1_2_VERSION
+            TL12N._tls_write_tls_plaintext!(client_tcp, TL12N._TLS_RECORD_TYPE_HANDSHAKE, partial, TL12N.TLS1_2_VERSION)
+            TL12N._tls12_read_record!(server_tcp, state)
+            TL12N._tls_write_tls_plaintext!(
+                client_tcp,
+                TL12N._TLS_RECORD_TYPE_ALERT,
+                UInt8[TL12N._TLS_ALERT_LEVEL_FATAL, TL12N._TLS_ALERT_HANDSHAKE_FAILURE],
+                TL12N.TLS1_2_VERSION,
+            )
+            alert_err = try
+                TL12N._tls12_read_record!(server_tcp, state)
+                nothing
+            catch ex
+                ex
+            end
+            @test alert_err isa TL12N._TLSAlertError
+            if alert_err isa TL12N._TLSAlertError
+                @test alert_err.from_peer
+                @test alert_err.alert == TL12N._TLS_ALERT_HANDSHAKE_FAILURE
+            end
+        finally
+            _tls12_native_close_quiet!(server_tcp)
+            _tls12_native_close_quiet!(client_tcp)
+            _tls12_native_close_quiet!(listener)
+        end
+
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        try
+            listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
+            state = TL12N._TLS12NativeState()
+            state.version = TL12N.TLS1_2_VERSION
+            TL12N._tls_write_tls_plaintext!(client_tcp, TL12N._TLS_RECORD_TYPE_HANDSHAKE, partial, TL12N.TLS1_2_VERSION)
+            TL12N._tls_write_tls_plaintext!(client_tcp, TL12N._TLS_RECORD_TYPE_HANDSHAKE, tail, TL12N.TLS1_2_VERSION)
+            TL12N._tls12_read_record!(server_tcp, state)
+            TL12N._tls12_read_record!(server_tcp, state)
+            @test TL12N._tls12_try_take_handshake_message!(state) == vcat(partial, tail)
+
+            TL12N._tls_write_tls_plaintext!(client_tcp, TL12N._TLS_RECORD_TYPE_HANDSHAKE, UInt8[], TL12N.TLS1_2_VERSION)
+            _tls12_unexpected_message_error(() -> TL12N._tls12_read_record!(server_tcp, state))
+        finally
+            _tls12_native_close_quiet!(server_tcp)
+            _tls12_native_close_quiet!(client_tcp)
+            _tls12_native_close_quiet!(listener)
+        end
+    end
+
+    @testset "TLS 1.2 warning alerts are ignored with a bound" begin
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        try
+            listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
+            state = TL12N._TLS12NativeState()
+            state.version = TL12N.TLS1_2_VERSION
+            warning = UInt8[TL12N._TLS_ALERT_LEVEL_WARNING, TL12N._TLS_ALERT_HANDSHAKE_FAILURE]
+            handshake = UInt8[TL12N._HANDSHAKE_TYPE_FINISHED, 0x00, 0x00, 0x01, 0xaa]
+            TL12N._tls_write_tls_plaintext!(client_tcp, TL12N._TLS_RECORD_TYPE_ALERT, warning, TL12N.TLS1_2_VERSION)
+            TL12N._tls_write_tls_plaintext!(client_tcp, TL12N._TLS_RECORD_TYPE_HANDSHAKE, handshake, TL12N.TLS1_2_VERSION)
+            TL12N._tls12_read_record!(server_tcp, state)
+            @test state.useless_record_count == 1
+            TL12N._tls12_read_record!(server_tcp, state)
+            @test state.useless_record_count == 0
+            @test TL12N._tls12_try_take_handshake_message!(state) == handshake
+        finally
+            _tls12_native_close_quiet!(server_tcp)
+            _tls12_native_close_quiet!(client_tcp)
+            _tls12_native_close_quiet!(listener)
+        end
+
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        try
+            listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
+            state = TL12N._TLS12NativeState()
+            state.version = TL12N.TLS1_2_VERSION
+            warning = UInt8[TL12N._TLS_ALERT_LEVEL_WARNING, TL12N._TLS_ALERT_USER_CANCELED]
+            for _ in 1:(TL12N._TLS_MAX_USELESS_RECORDS + 1)
+                TL12N._tls_write_tls_plaintext!(client_tcp, TL12N._TLS_RECORD_TYPE_ALERT, warning, TL12N.TLS1_2_VERSION)
+            end
+            for _ in 1:TL12N._TLS_MAX_USELESS_RECORDS
+                TL12N._tls12_read_record!(server_tcp, state)
+            end
+            _tls12_unexpected_message_error(() -> TL12N._tls12_read_record!(server_tcp, state))
+        finally
+            _tls12_native_close_quiet!(server_tcp)
+            _tls12_native_close_quiet!(client_tcp)
+            _tls12_native_close_quiet!(listener)
+        end
+
+        for (label, alert, expected_from_peer) in (
+            (
+                "fatal",
+                UInt8[TL12N._TLS_ALERT_LEVEL_FATAL, TL12N._TLS_ALERT_HANDSHAKE_FAILURE],
+                true,
+            ),
+            (
+                "invalid level",
+                UInt8[0x03, TL12N._TLS_ALERT_HANDSHAKE_FAILURE],
+                false,
+            ),
+        )
+            @testset "$label alert" begin
+                listener = nothing
+                client_tcp = nothing
+                server_tcp = nothing
+                try
+                    listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
+                    state = TL12N._TLS12NativeState()
+                    state.version = TL12N.TLS1_2_VERSION
+                    TL12N._tls_write_tls_plaintext!(client_tcp, TL12N._TLS_RECORD_TYPE_ALERT, alert, TL12N.TLS1_2_VERSION)
+                    err = try
+                        TL12N._tls12_read_record!(server_tcp, state)
+                        nothing
+                    catch ex
+                        ex
+                    end
+                    @test err isa TL12N._TLSAlertError
+                    if err isa TL12N._TLSAlertError
+                        @test err.from_peer == expected_from_peer
+                        @test err.alert == (expected_from_peer ? TL12N._TLS_ALERT_HANDSHAKE_FAILURE : TL12N._TLS_ALERT_UNEXPECTED_MESSAGE)
+                    end
+                finally
+                    _tls12_native_close_quiet!(server_tcp)
+                    _tls12_native_close_quiet!(client_tcp)
+                    _tls12_native_close_quiet!(listener)
+                end
+            end
+        end
+    end
+
+    @testset "record layer rejects authenticated oversized plaintext" begin
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        client_state = nothing
+        server_state = nothing
+        try
+            listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
+            client_state = TL12N._TLS12NativeState()
+            server_state = TL12N._TLS12NativeState()
+            write_key = UInt8[UInt8(0x70 + i) for i in 0:15]
+            write_iv = UInt8[0xe0, 0xe1, 0xe2, 0xe3]
+            TL12N._tls12_set_write_cipher!(client_state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, write_key, write_iv)
+            TL12N._tls12_set_read_cipher!(server_state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, write_key, write_iv)
+            write_cipher = client_state.write_cipher::TL12N._TLS12RecordCipherState
+            plaintext_len = TL12N._TLS12_MAX_PLAINTEXT + 1
+            record_payload_len = 8 + plaintext_len + TL12N._TLS12_GCM_TAG_SIZE
+            outbuf = Vector{UInt8}(undef, 5 + record_payload_len)
+            outbuf[1] = TL12N._TLS_RECORD_TYPE_APPLICATION_DATA
+            outbuf[2] = UInt8(TL12N.TLS1_2_VERSION >> 8)
+            outbuf[3] = UInt8(TL12N.TLS1_2_VERSION & 0xff)
+            outbuf[4] = UInt8(record_payload_len >> 8)
+            outbuf[5] = UInt8(record_payload_len & 0xff)
+            explicit_nonce = @view(outbuf[6:13])
+            TL12N._tls12_fill_explicit_nonce!(explicit_nonce, write_cipher.seq)
+            copyto!(write_cipher.nonce_buf, 1, write_cipher.iv, 1, length(write_cipher.iv))
+            copyto!(write_cipher.nonce_buf, length(write_cipher.iv) + 1, explicit_nonce, 1, 8)
+            TL12N._tls12_fill_record_additional_data!(
+                write_cipher.additional_data_buf,
+                write_cipher.seq,
+                TL12N._TLS_RECORD_TYPE_APPLICATION_DATA,
+                plaintext_len,
+            )
+            fill!(@view(outbuf[14:13 + plaintext_len]), 0x43)
+            ciphertext_len = TL12N._tls12_encrypt_record_aead!(
+                write_cipher.aead,
+                outbuf,
+                14,
+                plaintext_len,
+                write_cipher.key,
+                write_cipher.nonce_buf,
+                pointer(write_cipher.additional_data_buf),
+                length(write_cipher.additional_data_buf),
+            )
+            @test ciphertext_len == plaintext_len + TL12N._TLS12_GCM_TAG_SIZE
+            write(client_tcp, outbuf)
+            err = try
+                TL12N._tls12_read_record!(server_tcp, server_state)
+                nothing
+            catch ex
+                ex
+            end
+            @test err isa TL12N._TLSAlertError
+            if err isa TL12N._TLSAlertError
+                @test err.alert == TL12N._TLS_ALERT_RECORD_OVERFLOW
+            end
+        finally
+            client_state isa TL12N._TLS12NativeState && TL12N._securezero_tls12_native_state!(client_state)
+            server_state isa TL12N._TLS12NativeState && TL12N._securezero_tls12_native_state!(server_state)
             _tls12_native_close_quiet!(server_tcp)
             _tls12_native_close_quiet!(client_tcp)
             _tls12_native_close_quiet!(listener)
@@ -185,6 +598,7 @@ end
         try
             listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
             state = TL12N._TLS12NativeState()
+            state.version = TL12N.TLS1_2_VERSION
             TL12N._tls_write_tls_plaintext!(client_tcp, TL12N._TLS_RECORD_TYPE_APPLICATION_DATA, UInt8[0x61], TL12N.TLS1_2_VERSION)
             tls_err = _tls12_unexpected_message_error(() -> TL12N._tls12_read_record!(server_tcp, state))
             @test !tls_err.from_peer
@@ -228,7 +642,7 @@ end
             TL12N._tls12_set_write_cipher!(client_state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, write_key, write_iv)
             TL12N._tls12_set_read_cipher!(server_state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, write_key, write_iv)
             hello_request = UInt8[0x00, 0x00, 0x00, 0x00]
-            TL12N._tls12_write_record!(client_tcp, client_state.write_cipher, TL12N._TLS_RECORD_TYPE_HANDSHAKE, hello_request)
+            TL12N._tls12_write_record!(client_tcp, client_state, TL12N._TLS_RECORD_TYPE_HANDSHAKE, hello_request)
             tls_err = _tls12_unexpected_message_error(() -> TL12N._tls12_read_record!(server_tcp, server_state))
             @test !tls_err.from_peer
         finally
@@ -248,16 +662,48 @@ end
             write_iv = UInt8[0xd0, 0xd1, 0xd2, 0xd3]
             client_state = TL12N._TLS12NativeState()
             server_state = TL12N._TLS12NativeState()
+            # Post-handshake connection: empty application records are legal but
+            # counted as useless so they stay bounded.
+            server_state.handshake_complete = true
             TL12N._tls12_set_write_cipher!(client_state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, write_key, write_iv)
             TL12N._tls12_set_read_cipher!(server_state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, write_key, write_iv)
             for _ in 1:(TL12N._TLS_MAX_USELESS_RECORDS + 1)
-                TL12N._tls12_write_record!(client_tcp, client_state.write_cipher, TL12N._TLS_RECORD_TYPE_APPLICATION_DATA, UInt8[])
+                TL12N._tls12_write_record!(client_tcp, client_state, TL12N._TLS_RECORD_TYPE_APPLICATION_DATA, UInt8[])
             end
             for _ in 1:TL12N._TLS_MAX_USELESS_RECORDS
                 TL12N._tls12_read_record!(server_tcp, server_state)
             end
             tls_err = _tls12_unexpected_message_error(() -> TL12N._tls12_read_record!(server_tcp, server_state))
             @test !tls_err.from_peer
+        finally
+            _tls12_native_close_quiet!(server_tcp)
+            _tls12_native_close_quiet!(client_tcp)
+            _tls12_native_close_quiet!(listener)
+        end
+    end
+
+    @testset "TLS 1.2 application data before handshake completion is rejected" begin
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        try
+            listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
+            write_key = UInt8[UInt8(0x30 + i) for i in 0:15]
+            write_iv = UInt8[0xb0, 0xb1, 0xb2, 0xb3]
+            client_state = TL12N._TLS12NativeState()
+            server_state = TL12N._TLS12NativeState()
+            # server_state.handshake_complete stays false: the peer holds
+            # handshake traffic keys but the handshake is not finished, so
+            # application data must be rejected rather than buffered.
+            @test !server_state.handshake_complete
+            TL12N._tls12_set_write_cipher!(client_state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, write_key, write_iv)
+            TL12N._tls12_set_read_cipher!(server_state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, write_key, write_iv)
+            TL12N._tls12_write_record!(client_tcp, client_state, TL12N._TLS_RECORD_TYPE_APPLICATION_DATA, UInt8[0x61, 0x62, 0x63])
+            tls_err = _tls12_unexpected_message_error(() -> TL12N._tls12_read_record!(server_tcp, server_state))
+            @test !tls_err.from_peer
+            @test tls_err.alert == TL12N._TLS_ALERT_UNEXPECTED_MESSAGE
+            @test occursin("application data before handshake", tls_err.message)
+            @test isempty(server_state.plaintext_buffer)
         finally
             _tls12_native_close_quiet!(server_tcp)
             _tls12_native_close_quiet!(client_tcp)
@@ -274,6 +720,7 @@ end
             listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
             state = TL12N._TLS12ServerHandshakeState(_tls12_server_config())
             hello = TL12N._tls12_client_hello(_tls12_native_client_config(alpn_protocols = ["h2"]))
+            hello.extended_master_secret = false
             state.client_hello = hello
             state.cipher_suite = TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID
             state.selected_alpn = "h2"
@@ -282,6 +729,7 @@ end
             TL12N._tls12_send_server_hello!(state, io, transcript, TL12N._marshal_handshake_message(hello), _tls12_server_config())
             @test !isempty(hello.session_id)
             @test isempty(state.server_hello.session_id)
+            @test !state.server_hello.extended_master_secret
         finally
             state === nothing || TL12N._securezero_tls12_server_handshake_state!(state)
             _tls12_native_close_quiet!(server_tcp)
@@ -368,6 +816,67 @@ end
                 catch
                 end
             end
+            _tls12_native_close_quiet!(listener)
+        end
+    end
+
+    @testset "TLS 1.2 server negotiates optional EMS and enforces resumption mode" begin
+        server_cfg = _tls12_server_config()
+        client_cfg = _tls12_native_client_config()
+
+        legacy_client1, legacy_server1, negotiated_ems1 =
+            _tls12_run_roundtrip_with_ems(server_cfg, client_cfg, false)
+        @test !negotiated_ems1
+        @test !legacy_client1.did_resume
+        @test !legacy_server1.did_resume
+
+        legacy_client2, legacy_server2, negotiated_ems2 =
+            _tls12_run_roundtrip_with_ems(server_cfg, client_cfg, false)
+        @test !negotiated_ems2
+        @test legacy_client2.did_resume
+        @test legacy_server2.did_resume
+
+        # RFC 7627 section 5.3: a legacy ticket presented by an EMS-capable
+        # client is not resumed. The server performs a fresh EMS handshake.
+        upgraded_client, upgraded_server = _tls12_run_public_roundtrip(server_cfg, client_cfg)
+        @test !upgraded_client.did_resume
+        @test !upgraded_server.did_resume
+
+        resumed_ems_client, resumed_ems_server = _tls12_run_public_roundtrip(server_cfg, client_cfg)
+        @test resumed_ems_client.did_resume
+        @test resumed_ems_server.did_resume
+
+        # The inverse transition is a fatal downgrade: an EMS session must not
+        # be resumed when the client no longer advertises EMS. Matching Go's
+        # checkForResumption, the server aborts without writing an alert, so
+        # the client only observes the connection closing mid-handshake.
+        listener = nothing
+        server_task = nothing
+        try
+            listener, addr, server_task = _start_tls12_server(server_cfg; handler = _ -> nothing)
+            client_err = try
+                _tls12_connect_with_ems(addr, client_cfg, false)
+                nothing
+            catch ex
+                ex
+            end
+            @test client_err isa EOFError
+            @test _tls12_native_wait_task(server_task, 5.0) != :timed_out
+            server_err = try
+                wait(server_task)
+                nothing
+            catch ex
+                ex
+            end
+            @test server_err isa TaskFailedException
+            if server_err isa TaskFailedException
+                cause = server_err.task.exception
+                @test cause isa TL12N.TLSError
+                if cause isa TL12N.TLSError
+                    @test occursin("session supported extended_master_secret but client does not", cause.message)
+                end
+            end
+        finally
             _tls12_native_close_quiet!(listener)
         end
     end
@@ -582,5 +1091,97 @@ end
             _tls12_native_close_quiet!(listener)
             IP12N.shutdown!()
         end
+    end
+
+    @testset "TLS 1.2 server refuses resumption once the original secret is too old" begin
+        config = _tls12_server_config()
+        now_s = UInt64(floor(time()))
+        max_lifetime = UInt64(TL12N._TLS12_MAX_SESSION_TICKET_LIFETIME)
+
+        # A session created two days ago is still within the lifetime and resumes.
+        recent_created = now_s - UInt64(2 * 24 * 60 * 60)
+        recent_ticket = _tls12_encode_server_ticket(config, recent_created, recent_created + max_lifetime)
+        recent_state = TL12N._TLS12ServerHandshakeState(config)
+        try
+            recent_state.client_hello = _tls12_resumption_client_hello(recent_ticket)
+            TL12N._tls12_select_server_parameters!(recent_state, config)
+            @test recent_state.using_resumption
+            @test recent_state.resumption_session !== nothing
+            @test recent_state.cipher_suite == TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID
+        finally
+            TL12N._securezero_tls12_server_handshake_state!(recent_state)
+        end
+
+        # An over-age secret is refused even though its per-ticket use_by is still
+        # in the future, isolating the created_at age check from the use_by check.
+        old_created = now_s - max_lifetime - UInt64(3600)
+        old_use_by = now_s + max_lifetime
+        old_ticket = _tls12_encode_server_ticket(config, old_created, old_use_by)
+        old_state = TL12N._TLS12ServerHandshakeState(config)
+        try
+            old_state.client_hello = _tls12_resumption_client_hello(old_ticket)
+            TL12N._tls12_select_server_parameters!(old_state, config)
+            @test !old_state.using_resumption
+            @test old_state.resumption_session === nothing
+        finally
+            TL12N._securezero_tls12_server_handshake_state!(old_state)
+        end
+    end
+
+    @testset "TLS 1.2 re-issued resumption ticket preserves the original created_at/use_by" begin
+        config = _tls12_server_config()
+        max_lifetime = UInt64(TL12N._TLS12_MAX_SESSION_TICKET_LIFETIME)
+        keys = TL12N._tls_active_session_ticket_keys(config)
+
+        # Emulate a resumed handshake whose cached session was created two days ago.
+        orig_created = UInt64(floor(time())) - UInt64(2 * 24 * 60 * 60)
+        orig_use_by = orig_created + max_lifetime
+        orig_session = TL12N._owned_tls12_server_session(
+            TL12N.TLS1_2_VERSION,
+            TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID,
+            orig_created,
+            orig_use_by,
+            UInt8[],
+            rand(UInt8, 48),
+            Vector{Vector{UInt8}}(),
+            "",
+            TL12N._TLS_GROUP_SECP256R1,
+            false,
+        )
+        resumed_state = _tls12_ticket_emit_state(config; resumption_session = orig_session)
+        reissued = try
+            reissued_msg = _tls12_emit_and_parse_ticket(config, resumed_state, rand(UInt8, 48))
+            now_after = UInt64(floor(time()))
+            # The lifetime hint advertises the REMAINING lifetime, never a fresh 7 days.
+            @test reissued_msg.lifetime_hint < TL12N._TLS12_MAX_SESSION_TICKET_LIFETIME
+            @test abs(Int(reissued_msg.lifetime_hint) - Int(orig_use_by - now_after)) <= 2
+            plaintext = TL12N._tls_decrypt_server_session_ticket(keys, reissued_msg.ticket)
+            @test plaintext !== nothing
+            TL12N._deserialize_tls12_server_session(plaintext, reissued_msg.ticket)
+        finally
+            TL12N._securezero_tls12_server_handshake_state!(resumed_state)
+        end
+        @test reissued !== nothing
+        # The re-issued ticket carries the ORIGINAL timestamps, not now / now+7d.
+        @test (reissued::TL12N._TLS12ServerSession).created_at_s == orig_created
+        @test (reissued::TL12N._TLS12ServerSession).use_by_s == orig_use_by
+
+        # A fresh (full) handshake starts the clock at now with a full-lifetime hint.
+        fresh_state = _tls12_ticket_emit_state(config; resumption_session = nothing)
+        before = UInt64(floor(time()))
+        fresh = try
+            fresh_msg = _tls12_emit_and_parse_ticket(config, fresh_state, rand(UInt8, 48))
+            @test fresh_msg.lifetime_hint == TL12N._TLS12_MAX_SESSION_TICKET_LIFETIME
+            fresh_plain = TL12N._tls_decrypt_server_session_ticket(keys, fresh_msg.ticket)
+            @test fresh_plain !== nothing
+            TL12N._deserialize_tls12_server_session(fresh_plain, fresh_msg.ticket)
+        finally
+            TL12N._securezero_tls12_server_handshake_state!(fresh_state)
+        end
+        after = UInt64(floor(time()))
+        @test fresh !== nothing
+        @test before <= (fresh::TL12N._TLS12ServerSession).created_at_s <= after
+        @test (fresh::TL12N._TLS12ServerSession).use_by_s ==
+            (fresh::TL12N._TLS12ServerSession).created_at_s + max_lifetime
     end
 end

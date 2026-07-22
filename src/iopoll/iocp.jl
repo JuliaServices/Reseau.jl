@@ -4,7 +4,6 @@ const _KERNEL32 = "Kernel32"
 const _MSWSOCK = "Mswsock"
 const _WS2_32 = "Ws2_32"
 const _INVALID_HANDLE_VALUE = Ptr{Cvoid}(typemax(UInt))
-const _INVALID_SOCKET = UInt(typemax(UInt))
 const _INFINITE = UInt32(0xffff_ffff)
 const _WAIT_TIMEOUT = UInt32(0x00000102)
 const _ERROR_IO_PENDING = Int32(997)
@@ -104,7 +103,7 @@ mutable struct IocpConnectRequest
 end
 
 mutable struct IocpAcceptRequest
-    acceptfd::Cint
+    acceptfd::SysFD
     addrbuf::Vector{UInt8}
 end
 
@@ -116,12 +115,18 @@ mutable struct IocpOp
     token::UInt64
     kind::IocpOpKind.T
     request::IocpRequest
-    owner::Any
+    # Strong reference to the caller's data buffer for the full lifetime of a
+    # READ/WRITE overlapped op, mirroring how CONNECT/ACCEPT root their address
+    # buffer via `request`. The kernel keeps writing through the submitted
+    # WSARecv/WSASend buffer until the completion packet is delivered, so the op
+    # must keep the backing object reachable even if it ever outlives the
+    # caller's `GC.@preserve` scope. Cleared on terminal (non-EAGAIN) finish.
+    buffer::Any
     @atomic active::Bool
 end
 
 mutable struct IocpRegistration
-    fd::Cint
+    fd::SysFD
     token::UInt64
     read_op::IocpOp
     write_op::IocpOp
@@ -132,17 +137,17 @@ end
 mutable struct IocpBackendState <: BackendState
     port::Ptr{Cvoid}
     entries::Vector{OverlappedEntry}
-    by_fd::Dict{Cint, IocpRegistration}
-    by_ptr::Dict{Ptr{Cvoid}, IocpOp}
+    by_fd::Dict{SysFD, IocpRegistration}
+    by_ptr::Dict{Ptr{Cvoid}, IocpRegistration}
     zombies::Vector{IocpRegistration}
     @atomic wake_sig::UInt32
 end
 
-@inline function _socket_value(fd::Cint)::UInt
-    return UInt(reinterpret(UInt32, fd))
+@inline function _socket_value(fd::SysFD)::UInt
+    return fd
 end
 
-@inline function _socket_handle(fd::Cint)::Ptr{Cvoid}
+@inline function _socket_handle(fd::SysFD)::Ptr{Cvoid}
     return Ptr{Cvoid}(_socket_value(fd))
 end
 
@@ -181,13 +186,10 @@ end
     return _map_win_errno(UInt32(err))
 end
 
-function _new_iocp_registration(fd::Cint, token::UInt64)::IocpRegistration
+function _new_iocp_registration(fd::SysFD, token::UInt64)::IocpRegistration
     read_op = IocpOp(Ref(_ZERO_OVERLAPPED), PollMode.READ, token, IocpOpKind.PROBE_READ, nothing, nothing, false)
     write_op = IocpOp(Ref(_ZERO_OVERLAPPED), PollMode.WRITE, token, IocpOpKind.PROBE_WRITE, nothing, nothing, false)
-    reg = IocpRegistration(fd, token, read_op, write_op, true, false)
-    read_op.owner = reg
-    write_op.owner = reg
-    return reg
+    return IocpRegistration(fd, token, read_op, write_op, true, false)
 end
 
 @inline function _reset_overlapped!(op::IocpOp)
@@ -198,10 +200,11 @@ end
 @inline function _set_probe_kind!(op::IocpOp)
     op.kind = op.mode == PollMode.READ ? IocpOpKind.PROBE_READ : IocpOpKind.PROBE_WRITE
     op.request = nothing
+    op.buffer = nothing
     return nothing
 end
 
-function _load_connectex_ptr(fd::Cint)::Ptr{Cvoid}
+function _load_connectex_ptr(fd::SysFD)::Ptr{Cvoid}
     ptr = _CONNECTEX_PTR[]
     ptr != C_NULL && return ptr
     lock(_CONNECTEX_LOCK)
@@ -232,7 +235,7 @@ function _load_connectex_ptr(fd::Cint)::Ptr{Cvoid}
     end
 end
 
-@inline function _wsagetoverlappedresult_bytes(fd::Cint, op::IocpOp)::Tuple{UInt32, Int32}
+@inline function _wsagetoverlappedresult_bytes(fd::SysFD, op::IocpOp)::Tuple{UInt32, Int32}
     bytes_ref = Ref{UInt32}(UInt32(0))
     flags_ref = Ref{UInt32}(UInt32(0))
     ok = GC.@preserve op bytes_ref flags_ref begin
@@ -249,7 +252,7 @@ end
     return UInt32(0), _map_overlapped_errno(raw)
 end
 
-@inline function _wsagetoverlappedresult(fd::Cint, op::IocpOp)::Int32
+@inline function _wsagetoverlappedresult(fd::SysFD, op::IocpOp)::Int32
     _, errno = _wsagetoverlappedresult_bytes(fd, op)
     return errno
 end
@@ -261,7 +264,7 @@ end
     return nothing
 end
 
-function _socket_can_skip_completion_port_on_success(fd::Cint)::Bool
+function _socket_can_skip_completion_port_on_success(fd::SysFD)::Bool
     info_ref = Ref{WSAProtocolInfo}()
     size_ref = Ref{Cint}(Cint(sizeof(WSAProtocolInfo)))
     rc = GC.@preserve info_ref size_ref begin
@@ -280,7 +283,7 @@ function _socket_can_skip_completion_port_on_success(fd::Cint)::Bool
     return (info_ref[].service_flags1 & _XP1_IFS_HANDLES) != 0
 end
 
-function _maybe_set_completion_modes!(fd::Cint)::Bool
+function _maybe_set_completion_modes!(fd::SysFD)::Bool
     modes = UInt8(_FILE_SKIP_SET_EVENT_ON_HANDLE)
     if _socket_can_skip_completion_port_on_success(fd)
         modes |= _FILE_SKIP_COMPLETION_PORT_ON_SUCCESS
@@ -299,6 +302,9 @@ end
     return (@atomic :acquire reg.read_op.active) || (@atomic :acquire reg.write_op.active)
 end
 
+# Caller must hold `state.lock`: `by_ptr` and `zombies` are mutated by
+# `_backend_open_fd!`/`_backend_close_fd!` under that lock, and a Dict delete
+# or Vector resize racing those mutations is memory-unsafe.
 function _cleanup_registration_if_done!(backend::IocpBackendState, reg::IocpRegistration)
     if !(@atomic :acquire reg.closing)
         return nothing
@@ -311,7 +317,7 @@ function _cleanup_registration_if_done!(backend::IocpBackendState, reg::IocpRegi
     return nothing
 end
 
-function _cancel_iocp_op!(reg::IocpRegistration, op::IocpOp)::Bool
+function _cancel_iocp_op!(reg::IocpRegistration, op::IocpOp; strict::Bool = false)::Bool
     (@atomic :acquire op.active) || return false
     ok = @gcsafe_ccall _KERNEL32.CancelIoEx(
         _socket_handle(reg.fd)::Ptr{Cvoid},
@@ -323,6 +329,13 @@ function _cancel_iocp_op!(reg::IocpRegistration, op::IocpOp)::Bool
             @atomic :release op.active = false
             return false
         end
+        # Ordinary deadline/close cancellation keeps waiting for terminal
+        # completion even if cancellation itself failed. During global backend
+        # teardown, however, there may be no future event capable of completing
+        # the operation. Surface that failure before closing the port or
+        # dropping any roots; shutdown! deliberately leaves waiters parked in
+        # this case, preserving raw-pointer callers' GC.@preserve scopes.
+        strict && throw(SystemError("CancelIoEx", Int(_map_win_errno(err))))
     end
     return true
 end
@@ -335,12 +348,16 @@ function _submit_iocp_op!(
         nbytes::UInt32=UInt32(0),
         kind::Union{Nothing, IocpOpKind.T}=nothing,
         request::IocpRequest=nothing,
+        buffer=nothing,
     )::Int32
     _, ok = @atomicreplace(op.active, false => true)
     ok || return Int32(Base.Libc.EALREADY)
     if kind !== nothing
         op.kind = kind::IocpOpKind.T
         op.request = request
+        # Root the READ/WRITE data buffer (`nothing` for probes/connect/accept,
+        # which either carry no buffer or root it through `request`).
+        op.buffer = buffer
     end
     _reset_overlapped!(op)
     rc = Cint(-1)
@@ -570,7 +587,7 @@ function _iocp_cancel_mode!(registration::Registration, mode::PollMode.T)::Bool
     return canceled
 end
 
-function _iocp_submit_read!(registration::Registration, ptr::Ptr{UInt8}, nbytes::UInt32)::Int32
+function _iocp_submit_read!(registration::Registration, ptr::Ptr{UInt8}, nbytes::UInt32, root=nothing)::Int32
     isassigned(POLLER) || return Int32(Base.Libc.ENOSYS)
     state = POLLER[]
     (@atomic :acquire state.running) || return Int32(Base.Libc.EBADF)
@@ -580,7 +597,7 @@ function _iocp_submit_read!(registration::Registration, ptr::Ptr{UInt8}, nbytes:
         reg = _lookup_iocp_registration(registration)
         reg === nothing && return Int32(Base.Libc.EBADF)
         op = reg.read_op
-        errno = _submit_iocp_op!(registration, reg, op; ptr, nbytes, kind=IocpOpKind.READ)
+        errno = _submit_iocp_op!(registration, reg, op; ptr, nbytes, kind=IocpOpKind.READ, buffer=root)
         if errno != Int32(0) && errno != Int32(Base.Libc.EALREADY)
             _clear_iocp_op!(op)
         end
@@ -594,7 +611,7 @@ function _iocp_finish_read!(registration::Registration)::Tuple{UInt32, Int32}
     return _finish_iocp_mode_with_bytes!(registration, PollMode.READ)
 end
 
-function _iocp_submit_write!(registration::Registration, ptr::Ptr{UInt8}, nbytes::UInt32)::Int32
+function _iocp_submit_write!(registration::Registration, ptr::Ptr{UInt8}, nbytes::UInt32, root=nothing)::Int32
     isassigned(POLLER) || return Int32(Base.Libc.ENOSYS)
     state = POLLER[]
     (@atomic :acquire state.running) || return Int32(Base.Libc.EBADF)
@@ -604,7 +621,7 @@ function _iocp_submit_write!(registration::Registration, ptr::Ptr{UInt8}, nbytes
         reg = _lookup_iocp_registration(registration)
         reg === nothing && return Int32(Base.Libc.EBADF)
         op = reg.write_op
-        errno = _submit_iocp_op!(registration, reg, op; ptr, nbytes, kind=IocpOpKind.WRITE)
+        errno = _submit_iocp_op!(registration, reg, op; ptr, nbytes, kind=IocpOpKind.WRITE, buffer=root)
         if errno != Int32(0) && errno != Int32(Base.Libc.EALREADY)
             _clear_iocp_op!(op)
         end
@@ -643,7 +660,7 @@ function _iocp_finish_connect!(registration::Registration)::Int32
     return _finish_iocp_mode!(registration, PollMode.WRITE)
 end
 
-function _iocp_submit_accept!(registration::Registration, acceptfd::Cint, addrbuf::Vector{UInt8})::Int32
+function _iocp_submit_accept!(registration::Registration, acceptfd::SysFD, addrbuf::Vector{UInt8})::Int32
     isassigned(POLLER) || return Int32(Base.Libc.ENOSYS)
     state = POLLER[]
     (@atomic :acquire state.running) || return Int32(Base.Libc.EBADF)
@@ -664,18 +681,18 @@ function _iocp_submit_accept!(registration::Registration, acceptfd::Cint, addrbu
     return errno
 end
 
-function _iocp_finish_accept!(registration::Registration)::Tuple{Cint, Vector{UInt8}, Int32}
+function _iocp_finish_accept!(registration::Registration)::Tuple{SysFD, Vector{UInt8}, Int32}
     state = POLLER[]
     request = nothing
     lock(state.lock)
     try
         reg = _lookup_iocp_registration(registration)
-        reg === nothing && return Cint(-1), UInt8[], Int32(Base.Libc.EBADF)
+        reg === nothing && return INVALID_FD, UInt8[], Int32(Base.Libc.EBADF)
         request = reg.read_op.request
     finally
         unlock(state.lock)
     end
-    request isa IocpAcceptRequest || return Cint(-1), UInt8[], Int32(Base.Libc.EINVAL)
+    request isa IocpAcceptRequest || return INVALID_FD, UInt8[], Int32(Base.Libc.EINVAL)
     errno = _finish_iocp_mode!(registration, PollMode.READ)
     return request.acceptfd, request.addrbuf, errno
 end
@@ -691,18 +708,104 @@ function _backend_init!(state::Poller)::Int32
     state.backend_state = IocpBackendState(
         port,
         Vector{OverlappedEntry}(undef, _MAX_IOCP_EVENTS),
-        Dict{Cint, IocpRegistration}(),
-        Dict{Ptr{Cvoid}, IocpOp}(),
+        Dict{SysFD, IocpRegistration}(),
+        Dict{Ptr{Cvoid}, IocpRegistration}(),
         IocpRegistration[],
         UInt32(0),
     )
     return Int32(0)
 end
 
+function _iocp_any_op_active(backend::IocpBackendState)::Bool
+    for reg in values(backend.by_fd)
+        _registration_has_active(reg) && return true
+    end
+    for reg in backend.zombies
+        _registration_has_active(reg) && return true
+    end
+    return false
+end
+
+"""
+Cancel and drain every in-flight overlapped op before the completion port is
+torn down.
+
+Closing the completion port does NOT cancel outstanding
+WSARecv/WSASend/AcceptEx/ConnectEx operations: the kernel keeps ownership of
+each submitted OVERLAPPED (and the associated data buffer) until its completion
+packet is delivered. Those OVERLAPPED structures are rooted only by `by_fd` /
+`by_ptr` / `zombies`, so if `_backend_close!` released them and closed the port
+while the kernel could still post a late completion, the GC could reclaim the
+storage and the kernel write would land in freed memory. Mirroring Go's
+`fd_windows.go` teardown, this issues `CancelIoEx` for every op and then pumps
+completions until the kernel no longer owns any OVERLAPPED.
+
+Completions are pumped synchronously with `GetQueuedCompletionStatus` rather
+than through the poller thread: `_backend_close!` only runs once the poller has
+stopped (shutdown! reaches it strictly after `wait(state.shutdown_event)`, and
+the init! failure path never started the thread), so nothing else dequeues from
+the port and no `state.lock` is required — every Julia-task entry point gates on
+`state.running`, which shutdown! publishes false under `state.lock` before the
+wait, leaving this drain with exclusive access to the port and op state.
+"""
+function _drain_pending_ops_on_close!(backend::IocpBackendState)
+    backend.port == C_NULL && return nothing
+    for reg in values(backend.by_fd)
+        _cancel_iocp_op!(reg, reg.read_op; strict = true)
+        _cancel_iocp_op!(reg, reg.write_op; strict = true)
+    end
+    for reg in backend.zombies
+        _cancel_iocp_op!(reg, reg.read_op; strict = true)
+        _cancel_iocp_op!(reg, reg.write_op; strict = true)
+    end
+    bytes_ref = Ref{UInt32}(UInt32(0))
+    key_ref = Ref{UInt}(UInt(0))
+    ov_ref = Ref{Ptr{Cvoid}}(C_NULL)
+    while _iocp_any_op_active(backend)
+        ov_ref[] = C_NULL
+        ok = GC.@preserve bytes_ref key_ref ov_ref begin
+            @gcsafe_ccall _KERNEL32.GetQueuedCompletionStatus(
+                backend.port::Ptr{Cvoid},
+                bytes_ref::Ref{UInt32},
+                key_ref::Ref{UInt},
+                ov_ref::Ref{Ptr{Cvoid}},
+                _INFINITE::UInt32,
+            )::Int32
+        end
+        ov = ov_ref[]
+        if ov == C_NULL
+            # A successful null-overlapped result is the residual wake packet.
+            # With an infinite wait, a failed null result is a real API failure:
+            # retain the backend and every operation root rather than freeing
+            # memory that the kernel may still own.
+            ok != 0 && continue
+            throw(SystemError(
+                "GetQueuedCompletionStatus",
+                Int(_map_win_errno(_win_get_last_error())),
+            ))
+        end
+        reg = get(backend.by_ptr, ov, nothing)
+        if reg === nothing
+            # Stale/foreign packets do not prove anything about the operations
+            # still marked active; keep draining until each one is terminal.
+            continue
+        end
+        if ov == _op_ptr(reg.read_op)
+            @atomic :release reg.read_op.active = false
+        elseif ov == _op_ptr(reg.write_op)
+            @atomic :release reg.write_op.active = false
+        end
+    end
+    return nothing
+end
+
 function _backend_close!(state::Poller)
     backend = _iocp_backend(state)
     if backend !== nothing
         if backend.port != C_NULL
+            # Retire kernel ownership of every OVERLAPPED before closing the port
+            # and dropping the registration objects the GC would otherwise free.
+            _drain_pending_ops_on_close!(backend)
             _ = @gcsafe_ccall _KERNEL32.CloseHandle(
                 backend.port::Ptr{Cvoid},
             )::Int32
@@ -714,7 +817,7 @@ end
 
 function _backend_open_fd!(
         state::Poller,
-        fd::Cint,
+        fd::SysFD,
         mode::PollMode.T,
         token::UInt64,
     )::Int32
@@ -731,8 +834,8 @@ function _backend_open_fd!(
     reg = _new_iocp_registration(fd, token)
     reg.wait_on_success = _maybe_set_completion_modes!(fd)
     backend.by_fd[fd] = reg
-    backend.by_ptr[_op_ptr(reg.read_op)] = reg.read_op
-    backend.by_ptr[_op_ptr(reg.write_op)] = reg.write_op
+    backend.by_ptr[_op_ptr(reg.read_op)] = reg
+    backend.by_ptr[_op_ptr(reg.write_op)] = reg
     return Int32(0)
 end
 
@@ -751,7 +854,7 @@ function _backend_arm_waiter!(state::Poller, registration::Registration, mode::P
     return Int32(0)
 end
 
-function _backend_close_fd!(state::Poller, fd::Cint)::Int32
+function _backend_close_fd!(state::Poller, fd::SysFD)::Int32
     backend = _iocp_backend(state)
     backend === nothing && return Int32(Base.Libc.ENOSYS)
     reg = pop!(backend.by_fd, fd, nothing)
@@ -838,17 +941,48 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
             continue
         end
         entry.overlapped == C_NULL && continue
-        op = get(backend.by_ptr, entry.overlapped, nothing)
-        op === nothing && continue
-        @atomic :release op.active = false
-        is_probe = op.kind == IocpOpKind.PROBE_READ || op.kind == IocpOpKind.PROBE_WRITE
-        reg = op.owner
-        if reg isa IocpRegistration
-            _cleanup_registration_if_done!(backend, reg)
-            (@atomic :acquire reg.closing) && continue
+        # `by_ptr` and `zombies` are mutated by `_backend_open_fd!` /
+        # `_backend_close_fd!` on Julia threads under `state.lock`; reading the
+        # Dict here unlocked would race a rehash. Taking `state.lock` on the
+        # poller thread cannot deadlock: every path that holds it (submit,
+        # finish, cancel, register/deregister, heap updates) only performs
+        # bounded non-blocking work and never waits for poller progress while
+        # holding the lock. The critical section below is brief and
+        # allocation-free.
+        token = UInt64(0)
+        mode = PollMode.READ
+        is_probe = false
+        dispatch = false
+        lock(state.lock)
+        try
+            reg = get(backend.by_ptr, entry.overlapped, nothing)
+            if reg !== nothing
+                op = if entry.overlapped == _op_ptr(reg.read_op)
+                    reg.read_op
+                elseif entry.overlapped == _op_ptr(reg.write_op)
+                    reg.write_op
+                else
+                    nothing
+                end
+                if op !== nothing
+                    # Capture identity fields before publishing `active = false`:
+                    # clearing `active` licenses a resubmitting task to overwrite
+                    # `op.kind`/`op.mode`/`op.token`/`op.request`, and the
+                    # dispatch below runs after this lock is released.
+                    token = op.token
+                    mode = op.mode
+                    is_probe = op.kind == IocpOpKind.PROBE_READ || op.kind == IocpOpKind.PROBE_WRITE
+                    @atomic :release op.active = false
+                    _cleanup_registration_if_done!(backend, reg)
+                    dispatch = !(@atomic :acquire reg.closing)
+                end
+            end
+        finally
+            unlock(state.lock)
         end
+        dispatch || continue
         status = UInt32(entry.internal & UInt(typemax(UInt32)))
-        _dispatch_ready_event!(state, PollEvent(Cint(-1), op.token, op.mode, is_probe && status != UInt32(0)))
+        _dispatch_ready_event!(state, PollEvent(INVALID_FD, token, mode, is_probe && status != UInt32(0)))
     end
     return Int32(0)
 end
@@ -865,7 +999,7 @@ function _backend_close!(state::Poller)
     return nothing
 end
 
-function _backend_open_fd!(state::Poller, fd::Cint, mode::PollMode.T, token::UInt64)::Int32
+function _backend_open_fd!(state::Poller, fd::SysFD, mode::PollMode.T, token::UInt64)::Int32
     _ = state
     _ = fd
     _ = mode
@@ -880,7 +1014,7 @@ function _backend_arm_waiter!(state::Poller, registration::Registration, mode::P
     return Int32(Base.Libc.ENOSYS)
 end
 
-function _backend_close_fd!(state::Poller, fd::Cint)::Int32
+function _backend_close_fd!(state::Poller, fd::SysFD)::Int32
     _ = state
     _ = fd
     return Int32(Base.Libc.ENOSYS)
@@ -897,10 +1031,11 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
     return Int32(Base.Libc.ENOSYS)
 end
 
-function _iocp_submit_read!(registration::Registration, ptr::Ptr{UInt8}, nbytes::UInt32)::Int32
+function _iocp_submit_read!(registration::Registration, ptr::Ptr{UInt8}, nbytes::UInt32, root=nothing)::Int32
     _ = registration
     _ = ptr
     _ = nbytes
+    _ = root
     return Int32(Base.Libc.ENOSYS)
 end
 
@@ -909,10 +1044,11 @@ function _iocp_finish_read!(registration::Registration)::Tuple{UInt32, Int32}
     return UInt32(0), Int32(Base.Libc.ENOSYS)
 end
 
-function _iocp_submit_write!(registration::Registration, ptr::Ptr{UInt8}, nbytes::UInt32)::Int32
+function _iocp_submit_write!(registration::Registration, ptr::Ptr{UInt8}, nbytes::UInt32, root=nothing)::Int32
     _ = registration
     _ = ptr
     _ = nbytes
+    _ = root
     return Int32(Base.Libc.ENOSYS)
 end
 
@@ -939,16 +1075,16 @@ function _iocp_finish_connect!(registration::Registration)::Int32
     return Int32(Base.Libc.ENOSYS)
 end
 
-function _iocp_submit_accept!(registration::Registration, acceptfd::Cint, addrbuf::Vector{UInt8})::Int32
+function _iocp_submit_accept!(registration::Registration, acceptfd::SysFD, addrbuf::Vector{UInt8})::Int32
     _ = registration
     _ = acceptfd
     _ = addrbuf
     return Int32(Base.Libc.ENOSYS)
 end
 
-function _iocp_finish_accept!(registration::Registration)::Tuple{Cint, Vector{UInt8}, Int32}
+function _iocp_finish_accept!(registration::Registration)::Tuple{SysFD, Vector{UInt8}, Int32}
     _ = registration
-    return Cint(-1), UInt8[], Int32(Base.Libc.ENOSYS)
+    return INVALID_FD, UInt8[], Int32(Base.Libc.ENOSYS)
 end
 
 function _iocp_cancel_mode!(registration::Registration, mode::PollMode.T)::Bool

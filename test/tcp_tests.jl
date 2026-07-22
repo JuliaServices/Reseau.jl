@@ -23,6 +23,13 @@ function _close_quiet!(x)
     return nothing
 end
 
+function _fake_dial_conn(; self_connect::Bool)::NC.Conn
+    fd = NC._new_netfd(SO.INVALID_SOCKET)
+    fd.laddr = NC.loopback_addr(self_connect ? 5000 : 5001)
+    fd.raddr = NC.loopback_addr(5000)
+    return NC.Conn(fd)
+end
+
 function _readavailable_until_quiet(conn::NC.Conn; timeout_s::Float64 = 2.0, quiet_timeout_s::Float64 = 0.1)::Vector{UInt8}
     out = UInt8[]
     deadline_ns = Int64(time_ns()) + round(Int64, timeout_s * 1.0e9)
@@ -49,6 +56,15 @@ end
 @testset "TCP phase 4" begin
         @test NC.Conn <: IO
         @test NC.DeadlineExceededError === IP.DeadlineExceededError
+        @testset "wildcard dial destinations follow Go local-address mapping" begin
+            v4 = NC.any_addr(8080)
+            v6 = NC.any_addr6(8080; scope_id = 7)
+            concrete = NC.loopback_addr(8080)
+            @test NC._wildcard_remote_to_local(v4, :tcp) == NC.loopback_addr(8080)
+            @test NC._wildcard_remote_to_local(v6, :tcp) == NC.loopback_addr(8080)
+            @test NC._wildcard_remote_to_local(v6, :tcp6) == NC.loopback_addr6(8080; scope_id = 7)
+            @test NC._wildcard_remote_to_local(concrete, :tcp) === concrete
+        end
         @testset "connect/listen/accept and address snapshots" begin
             IP.shutdown!()
             listener = nothing
@@ -116,6 +132,71 @@ end
                 _close_quiet!(listener)
                 IP.shutdown!()
             end
+        end
+        @testset "dial owns Go self-connect and EADDRNOTAVAIL retries" begin
+            remote_addr = NC.loopback_addr(5000)
+
+            no_local_calls = Ref(0)
+            no_local = NC._dial_socketaddr_with(
+                remote_addr,
+                nothing,
+                Int64(0),
+                nothing,
+                :tcp,
+            ) do _remote, _local, _deadline, _cancel, network
+                no_local_calls[] += 1
+                @test network === :tcp
+                return _fake_dial_conn(; self_connect = no_local_calls[] < 3)
+            end
+            @test no_local_calls[] == 3
+            @test !NC._is_self_connect(no_local)
+            close(no_local)
+
+            port_zero_calls = Ref(0)
+            port_zero = NC._dial_socketaddr_with(
+                remote_addr,
+                NC.loopback_addr(0),
+                Int64(0),
+                nothing,
+                :tcp4,
+            ) do _remote, _local, _deadline, _cancel, network
+                port_zero_calls[] += 1
+                @test network === :tcp4
+                return _fake_dial_conn(; self_connect = port_zero_calls[] == 1)
+            end
+            @test port_zero_calls[] == 2
+            @test !NC._is_self_connect(port_zero)
+            close(port_zero)
+
+            fixed_port_calls = Ref(0)
+            fixed_port = NC._dial_socketaddr_with(
+                remote_addr,
+                NC.loopback_addr(4000),
+                Int64(0),
+                nothing,
+                :tcp,
+            ) do _remote, _local, _deadline, _cancel, _network
+                fixed_port_calls[] += 1
+                return _fake_dial_conn(; self_connect = true)
+            end
+            @test fixed_port_calls[] == 1
+            @test NC._is_self_connect(fixed_port)
+            close(fixed_port)
+
+            not_available_calls = Ref(0)
+            recovered = NC._dial_socketaddr_with(
+                remote_addr,
+                nothing,
+                Int64(0),
+                nothing,
+                :tcp,
+            ) do _remote, _local, _deadline, _cancel, _network
+                not_available_calls[] += 1
+                not_available_calls[] < 3 && throw(SystemError("connect", Int(Base.Libc.EADDRNOTAVAIL)))
+                return _fake_dial_conn(; self_connect = false)
+            end
+            @test not_available_calls[] == 3
+            close(recovered)
         end
         @testset "connect honors explicit local address binding" begin
             IP.shutdown!()
@@ -564,6 +645,9 @@ end
                 NC.set_deadline!(listener, Int64(time_ns()) - Int64(1))
                 @test_throws NC.DeadlineExceededError NC.accept(listener)
 
+                NC.set_deadline!(listener, Int64(-1))
+                @test_throws NC.DeadlineExceededError NC.accept(listener)
+
                 NC.set_deadline!(listener, Int64(0))
                 accept_task = errormonitor(@async begin
                     try
@@ -631,17 +715,165 @@ end
                 IP.shutdown!()
             end
         end
+        @testset "EOF and empty reads participate in FD read ownership" begin
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            eof_task = nothing
+            close_task = nothing
+            read_lock_held = false
+            try
+                listener = NC.listen(NC.loopback_addr(0); backlog = 8)
+                laddr = NC.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(@async NC.accept(listener))
+                client = NC.connect(NC.loopback_addr(Int(laddr.port)))
+                @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
+                server = fetch(accept_task)
+
+                empty = UInt8[]
+                @test read!(server, empty) === empty
+                @test readbytes!(server, empty, 0) == 0
+
+                IP._fd_read_lock!(server.fd.pfd)
+                read_lock_held = true
+                eof_task = errormonitor(Threads.@spawn begin
+                    try
+                        return eof(server)
+                    catch err
+                        return err
+                    end
+                end)
+                @test _nc_wait_task_done(eof_task, 0.05) == :timed_out
+                @test write(client, UInt8[0x5a]) == 1
+                IP._fd_read_unlock!(server.fd.pfd)
+                read_lock_held = false
+                @test _nc_wait_task_done(eof_task, 2.0) != :timed_out
+                @test fetch(eof_task) === false
+
+                # A close that lands while eof is queued on the read lock must
+                # report EOF, not throw NetClosingError.
+                IP._fd_read_lock!(server.fd.pfd)
+                read_lock_held = true
+                eof_task = errormonitor(Threads.@spawn begin
+                    try
+                        return eof(server)
+                    catch err
+                        return err
+                    end
+                end)
+                @test _nc_wait_task_done(eof_task, 0.05) == :timed_out
+                close_task = errormonitor(Threads.@spawn close(server))
+                @test _nc_wait_task_done(eof_task, 2.0) != :timed_out
+                @test fetch(eof_task) === true
+                IP._fd_read_unlock!(server.fd.pfd)
+                read_lock_held = false
+                @test _nc_wait_task_done(close_task, 2.0) != :timed_out
+
+                @test eof(server)
+                @test_throws IP.NetClosingError read!(server, UInt8[])
+                @test_throws IP.NetClosingError readbytes!(server, UInt8[], 0)
+            finally
+                read_lock_held && IP._fd_read_unlock!(server.fd.pfd)
+                eof_task isa Task && !istaskdone(eof_task) && wait(eof_task)
+                close_task isa Task && !istaskdone(close_task) && wait(close_task)
+                _close_quiet!(server)
+                _close_quiet!(client)
+                _close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
+        @testset "close state publishes before descriptor destruction" begin
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            close_task = nothing
+            read_lock_held = false
+            try
+                listener = NC.listen(NC.loopback_addr(0); backlog = 8)
+                laddr = NC.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(@async NC.accept(listener))
+                client = NC.connect(NC.loopback_addr(Int(laddr.port)))
+                @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
+                server = fetch(accept_task)
+
+                IP._fd_read_lock!(server.fd.pfd)
+                read_lock_held = true
+                close_task = errormonitor(Threads.@spawn close(server))
+                @test IP.timedwait(
+                    () -> IP._fdlock_closing(server.fd.pfd.fdlock),
+                    2.0;
+                    pollint = 0.001,
+                ) != :timed_out
+                @test !isopen(server)
+                @test IP._is_valid_fd(server.fd.pfd.sysfd)
+                @test _nc_wait_task_done(close_task, 0.05) == :timed_out
+
+                IP._fd_read_unlock!(server.fd.pfd)
+                read_lock_held = false
+                @test _nc_wait_task_done(close_task, 2.0) != :timed_out
+                @test fetch(close_task) === nothing
+                @test server.fd.pfd.sysfd == IP.INVALID_FD
+            finally
+                read_lock_held && IP._fd_read_unlock!(server.fd.pfd)
+                close_task isa Task && !istaskdone(close_task) && wait(close_task)
+                _close_quiet!(server)
+                _close_quiet!(client)
+                _close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
+        @testset "concurrent EOF and read operations serialize" begin
+            iterations = Threads.nthreads() > 1 ? 64 : 8
+            for _ in 1:iterations
+                IP.shutdown!()
+                listener = nothing
+                client = nothing
+                server = nothing
+                eof_task = nothing
+                read_task = nothing
+                try
+                    listener = NC.listen(NC.loopback_addr(0); backlog = 8)
+                    laddr = NC.addr(listener)::NC.SocketAddrV4
+                    accept_task = errormonitor(@async NC.accept(listener))
+                    client = NC.connect(NC.loopback_addr(Int(laddr.port)))
+                    @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
+                    server = fetch(accept_task)
+
+                    eof_task = errormonitor(Threads.@spawn eof(server))
+                    read_task = errormonitor(Threads.@spawn begin
+                        byte = Vector{UInt8}(undef, 1)
+                        read!(server, byte)
+                        return byte[1]
+                    end)
+                    @test write(client, UInt8[0xa5]) == 1
+                    closewrite(client)
+                    @test _nc_wait_task_done(eof_task, 2.0) != :timed_out
+                    @test _nc_wait_task_done(read_task, 2.0) != :timed_out
+                    @test fetch(eof_task) isa Bool
+                    @test fetch(read_task) == 0xa5
+                finally
+                    eof_task isa Task && !istaskdone(eof_task) && wait(eof_task)
+                    read_task isa Task && !istaskdone(read_task) && wait(read_task)
+                    _close_quiet!(server)
+                    _close_quiet!(client)
+                    _close_quiet!(listener)
+                    IP.shutdown!()
+                end
+            end
+        end
         @testset "FD lifecycle uses explicit close" begin
             IP.shutdown!()
             fd = nothing
             try
                 fd = NC.open_tcp_fd!()
-                @test fd.pfd.sysfd >= 0
+                @test IP._is_valid_fd(fd.pfd.sysfd)
                 sysfd_before = fd.pfd.sysfd
                 finalize(fd)
                 @test fd.pfd.sysfd == sysfd_before
                 close(fd)
-                @test fd.pfd.sysfd == Cint(-1)
+                @test fd.pfd.sysfd == IP.INVALID_FD
             finally
                 _close_quiet!(fd)
                 IP.shutdown!()
@@ -672,11 +904,84 @@ end
                 NC.set_read_deadline!(server, time_ns() + 1_000_000_000)
                 @test eof(server)
                 @test_throws EOFError read!(server, Vector{UInt8}(undef, 1))
+
+                close(client)
+                @test_throws IP.NetClosingError NC.set_nodelay!(client, true)
+                @test_throws IP.NetClosingError NC.set_keepalive!(client, true)
+                @test_throws IP.NetClosingError NC.closeread(client)
+                @test_throws IP.NetClosingError closewrite(client)
             finally
                 _close_quiet!(server)
                 _close_quiet!(client)
                 _close_quiet!(listener)
                 IP.shutdown!()
+            end
+        end
+        @testset "TCP controls race close without raw-descriptor errors" begin
+            for _ in 1:16
+                IP.shutdown!()
+                listener = nothing
+                client = nothing
+                server = nothing
+                control_tasks = Task[]
+                close_task = nothing
+                try
+                    listener = NC.listen(NC.loopback_addr(0); backlog = 8)
+                    laddr = NC.addr(listener)::NC.SocketAddrV4
+                    accept_task = errormonitor(@async NC.accept(listener))
+                    client = NC.connect(NC.loopback_addr(Int(laddr.port)))
+                    @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
+                    server = fetch(accept_task)
+
+                    controls = (
+                        () -> NC.set_nodelay!(client, false),
+                        () -> NC.set_keepalive!(client, false),
+                        () -> NC.closeread(client),
+                        () -> closewrite(client),
+                    )
+                    for control in controls
+                        push!(control_tasks, errormonitor(Threads.@spawn begin
+                            try
+                                control()
+                                return nothing
+                            catch err
+                                return err::Exception
+                            end
+                        end))
+                    end
+                    close_task = errormonitor(Threads.@spawn close(client))
+
+                    for task in control_tasks
+                        @test _nc_wait_task_done(task, 2.0) != :timed_out
+                        result = fetch(task)
+                        # Go's internal/poll Shutdown and SetsockoptInt take
+                        # shared lifetime references, but do not serialize
+                        # control syscalls with each other. The kernel may
+                        # therefore reject a control racing a half-close (for
+                        # example, Darwin returns EINVAL for SO_KEEPALIVE), and
+                        # Go propagates that syscall error. The lifetime
+                        # contract here is specifically that close cannot
+                        # invalidate and recycle the descriptor underneath the
+                        # control operation.
+                        if result isa SystemError
+                            @test result.errnum != Int(Base.Libc.EBADF)
+                        else
+                            @test result === nothing || result isa IP.NetClosingError
+                        end
+                    end
+                    @test _nc_wait_task_done(close_task, 2.0) != :timed_out
+                    @test fetch(close_task) === nothing
+                    @test client.fd.pfd.sysfd == IP.INVALID_FD
+                finally
+                    for task in control_tasks
+                        istaskdone(task) || wait(task)
+                    end
+                    close_task isa Task && !istaskdone(close_task) && wait(close_task)
+                    _close_quiet!(server)
+                    _close_quiet!(client)
+                    _close_quiet!(listener)
+                    IP.shutdown!()
+                end
             end
         end
         @testset "IPv6 show output uses compressed form" begin

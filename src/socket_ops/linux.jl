@@ -6,9 +6,9 @@
 # - connect/accept can surface raw errno so the poll layer can finish the state
 #   machine after readiness notifications
 #
-# Linux and FreeBSD give us the best-case primitives (`SOCK_NONBLOCK`, `SOCK_CLOEXEC`,
-# `accept4`) so this backend mostly tries to take the atomic fast path first and
-# only falls back to older-kernel behavior when required.
+# Linux and FreeBSD give us the best-case primitives (`SOCK_NONBLOCK`,
+# `SOCK_CLOEXEC`, `accept4`), so socket creation and accept set both descriptor
+# flags atomically.
 const _F_GETFD = Cint(1)
 const _F_SETFD = Cint(2)
 const _F_GETFL = Cint(3)
@@ -18,9 +18,6 @@ const _O_NONBLOCK = Sys.isfreebsd() ? Cint(0x0004) : Cint(0x0800)
 const _SOCK_CLOEXEC = Sys.isfreebsd() ? Cint(0x10000000) : Cint(0x80000)
 const _SOCK_NONBLOCK = Sys.isfreebsd() ? Cint(0x20000000) : Cint(0x0800)
 const _ACCEPT_ADDRBUF_LEN = 128
-const _ACCEPT4_UNSET = Int32(0)
-const _ACCEPT4_ENABLED = Int32(1)
-const _ACCEPT4_DISABLED = Int32(2)
 
 if Sys.islinux()
     struct _SockAddrHeader
@@ -32,8 +29,6 @@ else
         sa_family::UInt8
     end
 end
-
-const _accept4_state = Ref{Int32}(_ACCEPT4_UNSET)
 
 @inline function _errno_i32()::Int32
     return Int32(Base.Libc.errno())
@@ -135,34 +130,14 @@ end
 """
     open_socket(family, sotype, proto=0)
 
-Create a socket and configure it as close-on-exec and non-blocking.
-
-On modern Linux kernels this is done atomically with `socket(..., SOCK_NONBLOCK |
-SOCK_CLOEXEC, ...)`, which avoids the small post-open race that exists when those
-flags must be applied with `fcntl`.
+Create a socket atomically configured as close-on-exec and non-blocking.
 
 Returns the new file descriptor or throws `SystemError` on failure.
 """
 function open_socket(family::Integer, sotype::Integer, proto::Integer = 0)::Cint
-    raw_type = Cint(sotype)
-    flagged_type = Cint(raw_type | _SOCK_NONBLOCK | _SOCK_CLOEXEC)
+    flagged_type = Cint(Cint(sotype) | _SOCK_NONBLOCK | _SOCK_CLOEXEC)
     fd = @gcsafe_ccall socket(Cint(family)::Cint, flagged_type::Cint, Cint(proto)::Cint)::Cint
-    if fd == -1
-        errno = _errno_i32()
-        if errno != Int32(Base.Libc.EINVAL)
-            _throw_errno("socket", errno)
-        end
-        # Older kernels may not support atomic SOCK_NONBLOCK/SOCK_CLOEXEC.
-        fd = @gcsafe_ccall socket(Cint(family)::Cint, raw_type::Cint, Cint(proto)::Cint)::Cint
-        fd == -1 && _throw_errno("socket", _errno_i32())
-        try
-            set_close_on_exec!(fd)
-            set_nonblocking!(fd, true)
-        catch
-            close_socket_nothrow(fd)
-            rethrow()
-        end
-    end
+    fd == -1 && _throw_errno("socket", _errno_i32())
     return fd
 end
 
@@ -282,61 +257,18 @@ function _try_accept_socket_accept4(fd::Cint)::Tuple{Cint, AcceptPeer, Int32}
     return newfd, peer, Int32(0)
 end
 
-function _try_accept_socket_fallback(fd::Cint)::Tuple{Cint, AcceptPeer, Int32}
-    addrbuf = Ref{NTuple{_ACCEPT_ADDRBUF_LEN, UInt8}}()
-    addrlen = Ref{SockLen}(SockLen(_ACCEPT_ADDRBUF_LEN))
-    newfd = GC.@preserve addrbuf begin
-        @gcsafe_ccall accept(
-            fd::Cint,
-            Base.unsafe_convert(Ptr{Cvoid}, addrbuf)::Ptr{Cvoid},
-            addrlen::Ref{SockLen},
-        )::Cint
-    end
-    newfd == -1 && return Cint(-1), nothing, _errno_i32()
-    try
-        set_close_on_exec!(newfd)
-        set_nonblocking!(newfd, true)
-    catch err
-        close_socket_nothrow(newfd)
-        if err isa SystemError
-            return Cint(-1), nothing, Int32(err.errnum)
-        end
-        rethrow(err)
-    end
-    peer = GC.@preserve addrbuf begin
-        addrptr = Ptr{UInt8}(Base.unsafe_convert(Ptr{NTuple{_ACCEPT_ADDRBUF_LEN, UInt8}}, addrbuf))
-        _decode_accept_peer(addrptr, addrlen[])
-    end
-    return newfd, peer, Int32(0)
-end
-
 """
     try_accept_socket(fd)
 
 Perform one non-blocking `accept` attempt and return `(newfd, peer, errno)`.
 
-This prefers `accept4` so the accepted descriptor inherits non-blocking and
-close-on-exec atomically. If the running kernel reports `ENOSYS` or `EINVAL`,
-the backend permanently falls back to plain `accept` plus post-accept flag
-fixups. That mirrors the strategy Go uses on older kernels.
+This uses `accept4` so the accepted descriptor inherits non-blocking and
+close-on-exec atomically, matching Go's Linux/FreeBSD poll backend.
 
 `newfd == -1` indicates failure and `errno` contains the mapped Linux errno.
 """
 function try_accept_socket(fd::Cint)::Tuple{Cint, AcceptPeer, Int32}
-    state = _accept4_state[]
-    if state != _ACCEPT4_DISABLED
-        newfd, peer, errno = _try_accept_socket_accept4(fd)
-        if newfd != Cint(-1)
-            _accept4_state[] = _ACCEPT4_ENABLED
-            return newfd, peer, Int32(0)
-        end
-        if errno != Int32(Base.Libc.ENOSYS) && errno != Int32(Base.Libc.EINVAL)
-            _accept4_state[] = _ACCEPT4_ENABLED
-            return Cint(-1), nothing, errno
-        end
-        _accept4_state[] = _ACCEPT4_DISABLED
-    end
-    return _try_accept_socket_fallback(fd)
+    return _try_accept_socket_accept4(fd)
 end
 
 """

@@ -18,8 +18,8 @@ const _TLS12_CERT_TYPE_ECDSA_SIGN = UInt8(0x40)
 # Native TLS 1.2 client handshake state machine.
 #
 # This file mirrors Go's `crypto/tls/handshake_client.go` for the subset of TLS
-# 1.2 we support natively: ECDHE + AES-GCM, optional client certificates, EMS,
-# and session-ticket resumption.
+# 1.2 we support natively: ECDHE + AES-GCM, optional client certificates,
+# optional EMS, and session-ticket resumption.
 
 const _TLS12TranscriptState = Union{
     _TranscriptHash{SHA.SHA2_256_CTX},
@@ -304,8 +304,6 @@ function _tls12_select_cipher_spec!(state::_TLS12ClientHandshakeState)::Nothing
         _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: server selected an unsupported native TLS 1.2 cipher suite")
     server_hello.ticket_supported && !state.client_hello.ticket_supported &&
         _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server announced an unrequested TLS 1.2 session ticket")
-    server_hello.extended_master_secret ||
-        _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: native TLS 1.2 client requires extended master secret")
     if !isempty(server_hello.alpn_protocol)
         in(server_hello.alpn_protocol, state.client_hello.alpn_protocols) ||
             _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server selected an unexpected ALPN protocol")
@@ -313,6 +311,27 @@ function _tls12_select_cipher_spec!(state::_TLS12ClientHandshakeState)::Nothing
     end
     state.cipher_suite = server_hello.cipher_suite
     return nothing
+end
+
+function _tls12_client_master_secret(
+    state::_TLS12ClientHandshakeState,
+    hash_kind::_TLSHashKind,
+    pre_master_secret::AbstractVector{UInt8},
+    transcript::_TLS12TranscriptState,
+)::Vector{UInt8}
+    if state.server_hello.extended_master_secret
+        return _tls12_extended_master_from_pre_master_secret(
+            hash_kind,
+            pre_master_secret,
+            _transcript_digest(transcript),
+        )
+    end
+    return _tls12_master_from_pre_master_secret(
+        hash_kind,
+        pre_master_secret,
+        state.client_hello.random,
+        state.server_hello.random,
+    )
 end
 
 function _tls12_parse_server_key_exchange(msg::_ServerKeyExchangeMsgTLS12)::_TLS12ParsedServerKeyExchange
@@ -630,7 +649,7 @@ function _tls12_resumed_handshake!(
         _tls_write_tls_plaintext!(io.tcp, _TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC, _TLS12_CHANGE_CIPHER_SPEC_PAYLOAD, TLS1_2_VERSION)
         client_verify_data = _tls12_client_finished_verify_data(hash_kind, master_secret, transcript)
         raw_client_finished = _write_handshake_message(_FinishedMsg(client_verify_data), transcript)
-        _tls12_write_record!(io.tcp, io.state.write_cipher, _TLS_RECORD_TYPE_HANDSHAKE, raw_client_finished)
+        _tls12_write_record!(io.tcp, io.state, _TLS_RECORD_TYPE_HANDSHAKE, raw_client_finished)
         state.did_resume = true
         _tls12_save_client_session!(state, config, cache_key, master_secret)
     finally
@@ -702,10 +721,11 @@ function _client_handshake_tls12_for_suite!(
             _securezero!(key_exchange_result.message.ciphertext)
         end
 
-        master_secret = _tls12_extended_master_from_pre_master_secret(
+        master_secret = _tls12_client_master_secret(
+            state,
             hash_kind,
             shared_secret,
-            _transcript_digest(transcript),
+            transcript,
         )
         _tls12_write_client_certificate_verify!(state, io, transcript)
         _discard_transcript_buffer!(transcript)
@@ -717,7 +737,7 @@ function _client_handshake_tls12_for_suite!(
         client_verify_data = _tls12_client_finished_verify_data(hash_kind, master_secret, transcript)
         client_finished = _FinishedMsg(client_verify_data)
         raw_client_finished = _write_handshake_message(client_finished, transcript)
-        _tls12_write_record!(io.tcp, io.state.write_cipher, _TLS_RECORD_TYPE_HANDSHAKE, raw_client_finished)
+        _tls12_write_record!(io.tcp, io.state, _TLS_RECORD_TYPE_HANDSHAKE, raw_client_finished)
         state.server_hello.ticket_supported && _tls12_read_new_session_ticket!(state, io, transcript)
 
         io.state.allow_encrypted_handshake = true
@@ -759,6 +779,7 @@ function _client_handshake_tls12_after_server_hello!(
     raw_server_hello::Vector{UInt8},
     cache_key::AbstractString,
 )::Nothing
+    _tls_set_negotiated_record_version!(io, TLS1_2_VERSION)
     resumed = state.resumption_session !== nothing && state.server_hello.session_id == state.client_hello.session_id
     if state.cipher_suite == _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID ||
        state.cipher_suite == _TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256_ID

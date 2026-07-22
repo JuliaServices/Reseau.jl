@@ -56,7 +56,7 @@ end
     if cert.has_key_usage && (cert.key_usage & _tls_verify_purpose_key_usage_mask(purpose)) == 0x00
         return false
     end
-    cert.extended_key_usage == 0x00 && return true
+    cert.has_extended_key_usage || return true
     (cert.extended_key_usage & _TLS_EXT_KEY_USAGE_ANY) != 0x00 && return true
     return (cert.extended_key_usage & _tls_verify_purpose_usage_mask(purpose)) != 0x00
 end
@@ -334,7 +334,7 @@ end
 @inline function _tls_chain_extended_key_usage_permitted(chain::Vector{_TLSCertificateInfo}, purpose::AbstractString)::Bool
     required_usage = _tls_verify_purpose_usage_mask(purpose)
     for cert in chain
-        cert.extended_key_usage == 0x00 && continue
+        cert.has_extended_key_usage || continue
         (cert.extended_key_usage & _TLS_EXT_KEY_USAGE_ANY) != 0x00 && continue
         (cert.extended_key_usage & required_usage) != 0x00 || return false
     end

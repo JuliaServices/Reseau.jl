@@ -12,7 +12,7 @@ Fields:
 """
 mutable struct FD
     fdlock::FDLock
-    sysfd::Cint
+    sysfd::SysFD
     pd::PollState
     csema::Base.Semaphore
     @atomic is_blocking::Bool
@@ -20,14 +20,14 @@ mutable struct FD
     zero_read_is_eof::Bool
     is_file::Bool
     function FD(
-            sysfd::Integer;
+            sysfd::SysFD;
             is_stream::Bool = true,
             zero_read_is_eof::Bool = true,
             is_file::Bool = false,
         )
         return new(
             FDLock(),
-            Cint(sysfd),
+            sysfd,
             PollState(),
             _new_binary_semaphore0(),
             false,
@@ -36,6 +36,18 @@ mutable struct FD
             is_file,
         )
     end
+end
+
+# Darwin and several other socket implementations reject very large individual
+# read/write buffers. Go uses one GiB rather than the largest signed syscall size
+# so successive chunks remain naturally aligned.
+const _MAX_RW = 1 << 30
+
+@inline _max_rw_chunk(nbytes::Int)::Int = min(nbytes, _MAX_RW)
+
+@inline function _checked_write_advance(total::Int, wrote::Int, requested::Int)::Int
+    wrote > requested && throw(ErrorException("invalid return from write: got $wrote from a write of $requested"))
+    return total + wrote
 end
 
 """
@@ -172,6 +184,10 @@ Set read/write deadline state on an `FD`.
 `deadline_ns == 0` disables deadlines for the selected mode.
 `deadline_ns <= time_ns()` triggers immediate timeout.
 
+Callers that derive an absolute deadline from a relative duration must
+saturate that addition before calling this function. A negative value is an
+already-expired absolute deadline, not an overflow sentinel.
+
 Returns `nothing`.
 
 Throws:
@@ -283,7 +299,7 @@ function Base.close(pd::PollState)
     finally
         unlock(pd.lock)
     end
-    was_pollable && pd.sysfd >= 0 && deregister!(pd)
+    was_pollable && _is_valid_fd(pd.sysfd) && deregister!(pd)
     return nothing
 end
 
@@ -439,6 +455,42 @@ function _wait_iocp_completion!(registration::Registration, pd::PollState, mode:
 end
 
 """
+Drain a deadline/close-interrupted Windows overlapped operation until the
+kernel no longer owns it.
+
+After `CancelIoEx` the kernel may keep writing through the submitted
+WSARecv/WSASend buffer until the operation's completion packet is delivered;
+the zombie machinery pins the OVERLAPPED but not the caller's data buffer, so
+returning (and leaving the caller's `GC.@preserve`) before that completion
+arrives could let the kernel scribble on reclaimed memory. Mirroring Go's
+`fd_windows.go` `execIO`, this waits for the completion unconditionally,
+looping until a finish call reports the operation is no longer in flight
+(anything other than `EAGAIN`, the mapping of `ERROR_IO_INCOMPLETE`).
+
+Wake reasons are ignored on purpose: a concurrent close's `evict!` fires
+CANCELED wakes at every waiter before the completion is delivered, and the
+drain must keep waiting through those. That is safe because the caller holds
+the fd read/write lock, so `_destroy!` (and therefore `deregister!`) cannot
+tear down the registration until the drain returns, and the running poller
+thread always dispatches a wake when it processes the completion packet. If
+the poller has shut down instead, the finish call fails its registration
+lookup (`EBADF`) and the loop exits rather than parking forever.
+"""
+function _drain_canceled_iocp_op!(registration::Registration, mode::PollMode.T)
+    canceled = _iocp_cancel_mode!(registration, mode)
+    waiter = mode == PollMode.WRITE ? registration.write_waiter : registration.read_waiter
+    while true
+        canceled && pollwait!(waiter)
+        _, errno = mode == PollMode.WRITE ? _iocp_finish_write!(registration) : _iocp_finish_read!(registration)
+        errno == Int32(Base.Libc.EAGAIN) || return nothing
+        # Still ERROR_IO_INCOMPLETE: the operation remains in flight, so keep
+        # waiting for its completion wake (tolerating eviction CANCELED wakes
+        # consumed along the way).
+        canceled = true
+    end
+end
+
+"""
 Set both read and write deadlines for `fd`.
 
 `deadline_ns` is interpreted as an absolute `time_ns()`-style monotonic
@@ -465,7 +517,7 @@ function set_write_deadline!(fd::FD, deadline_ns::Integer)
     return nothing
 end
 
-function _set_nonblocking!(fd::Cint)
+function _set_nonblocking!(fd::SysFD)
     SocketOps.set_nonblocking!(fd, true)
     return nothing
 end
@@ -478,6 +530,54 @@ end
 function _fd_decref!(fd::FD)
     _fdlock_decref!(fd.fdlock) || return nothing
     _destroy!(fd)
+    return nothing
+end
+
+"""
+    _with_fd_ref(f, fd)
+
+Run a non-I/O descriptor control operation while holding a shared lifetime
+reference. The callback receives the raw descriptor only after the reference is
+acquired, so concurrent close cannot destroy and recycle that descriptor until
+the callback returns.
+"""
+function _with_fd_ref(f::F, fd::FD) where {F}
+    _fd_incref!(fd)
+    try
+        return f(fd.sysfd)
+    finally
+        _fd_decref!(fd)
+    end
+end
+
+"""
+    shutdown_socket!(fd, how)
+
+Shut down directions on a socket while preventing concurrent descriptor
+destruction and reuse.
+"""
+function shutdown_socket!(fd::FD, how::Integer)
+    _with_fd_ref(fd) do sysfd
+        SocketOps.shutdown_socket(sysfd, how)
+    end
+    return nothing
+end
+
+"""
+    set_sockopt_int!(fd, level, optname, value)
+
+Set an integer socket option while preventing concurrent descriptor destruction
+and reuse.
+"""
+function set_sockopt_int!(
+        fd::FD,
+        level::Cint,
+        optname::Cint,
+        value::Integer,
+    )
+    _with_fd_ref(fd) do sysfd
+        SocketOps.set_sockopt_int(sysfd, level, optname, value)
+    end
     return nothing
 end
 
@@ -505,9 +605,9 @@ end
 
 function _destroy!(fd::FD)
     close(fd.pd)
-    if fd.sysfd >= 0
+    if _is_valid_fd(fd.sysfd)
         SocketOps.close_socket_nothrow(fd.sysfd)
-        fd.sysfd = Cint(-1)
+        fd.sysfd = INVALID_FD
     end
     Base.release(fd.csema)
     return nothing
@@ -570,10 +670,7 @@ function connect!(fd::FD, addrbuf::Vector{UInt8}, addrlen::Int32)
             _wait_iocp_completion!(registration, fd.pd, PollMode.WRITE, fd.is_file)
         catch err
             ex = err::Exception
-            if _iocp_cancel_mode!(registration, PollMode.WRITE)
-                pollwait!(registration.write_waiter)
-            end
-            _ = _iocp_finish_connect!(registration)
+            _drain_canceled_iocp_op!(registration, PollMode.WRITE)
             rethrow(ex)
         end
         errno = _iocp_finish_connect!(registration)
@@ -591,7 +688,7 @@ Accept one non-blocking child fd from `fd`.
 This mirrors Go `internal/poll` accept semantics: read-lock + prepare + retry
 on `EINTR`/`ECONNABORTED`, wait on `EAGAIN`.
 """
-function accept!(fd::FD, family::Cint, sotype::Cint)::Tuple{Cint, SocketOps.AcceptPeer}
+function accept!(fd::FD, family::Cint, sotype::Cint)::Tuple{SysFD, SocketOps.AcceptPeer}
     _fd_read_lock!(fd)
     try
         prepareread(fd.pd, fd.is_file)
@@ -613,10 +710,7 @@ function accept!(fd::FD, family::Cint, sotype::Cint)::Tuple{Cint, SocketOps.Acce
                     _wait_iocp_completion!(registration, fd.pd, PollMode.READ, fd.is_file)
                 catch err
                     ex = err::Exception
-                    if _iocp_cancel_mode!(registration, PollMode.READ)
-                        pollwait!(registration.read_waiter)
-                    end
-                    _, _, _ = _iocp_finish_accept!(registration)
+                    _drain_canceled_iocp_op!(registration, PollMode.READ)
                     SocketOps.close_socket_nothrow(child_sysfd)
                     rethrow(ex)
                 end
@@ -632,7 +726,7 @@ function accept!(fd::FD, family::Cint, sotype::Cint)::Tuple{Cint, SocketOps.Acce
                 throw(SystemError("acceptex", Int(errno)))
             end
             child_sysfd, peer_addr, errno = SocketOps.try_accept_socket(fd.sysfd)
-            if child_sysfd != Cint(-1)
+            if _is_valid_fd(child_sysfd)
                 return child_sysfd, peer_addr
             end
             if errno == Int32(Base.Libc.EAGAIN) && pollable(fd.pd)
@@ -657,6 +751,7 @@ Important behavior notes:
   sockets and does not imply EOF
 - once at least one byte has been read, the call returns immediately instead of
   waiting to fill the rest of `p`
+- stream reads submit at most one GiB to an individual OS operation
 - if no bytes are currently available and the descriptor is pollable, the call
   waits for read readiness and then retries
 - a zero-length `p` returns `0` immediately without touching the descriptor
@@ -670,20 +765,24 @@ by `pointer`, such as `@view bytes[2:5]`.
 """
 function read!(fd::FD, p::MutableByteBuffer)::Int
     GC.@preserve p begin
-        return _read_ptr_some!(fd, pointer(p), length(p))
+        return _read_ptr_some!(fd, pointer(p), length(p), p)
     end
 end
 
-function _read_ptr_some!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
+# `root` (when given) is the object backing `p`; on Windows it is rooted in the
+# overlapped op so the kernel-owned WSARecv buffer stays reachable for the op's
+# full lifetime. Raw-pointer callers (e.g. tcp `unsafe` reads) pass nothing and
+# rely on their own `GC.@preserve` plus the cancel/drain path.
+function _read_ptr_some!(fd::FD, p::Ptr{UInt8}, nbytes::Int, root=nothing)::Int
     _fd_read_lock!(fd)
     try
         nbytes == 0 && return 0
         @static if Sys.iswindows()
             prepareread(fd.pd, fd.is_file)
             registration = _poll_registration(fd.pd)
-            n = UInt32(min(nbytes, Int(typemax(UInt32))))
+            n = UInt32(_max_rw_chunk(nbytes))
             while true
-                errno = _iocp_submit_read!(registration, p, n)
+                errno = _iocp_submit_read!(registration, p, n, root)
                 errno == Int32(0) && break
                 if errno == Int32(Base.Libc.EALREADY)
                     waitread(fd.pd, fd.is_file)
@@ -694,10 +793,7 @@ function _read_ptr_some!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
             try
                 _wait_iocp_completion!(registration, fd.pd, PollMode.READ, fd.is_file)
             catch err
-                if _iocp_cancel_mode!(registration, PollMode.READ)
-                    pollwait!(registration.read_waiter)
-                end
-                _, _ = _iocp_finish_read!(registration)
+                _drain_canceled_iocp_op!(registration, PollMode.READ)
                 rethrow(err)
             end
             bytes, result = _iocp_finish_read!(registration)
@@ -711,8 +807,9 @@ function _read_ptr_some!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
         # If the read would block, `waitread` refreshes backend event state
         # before parking.
         prepareread(fd.pd, fd.is_file, false)
+        read_size = fd.is_stream ? _max_rw_chunk(nbytes) : nbytes
         while true
-            n = SocketOps.read_once!(fd.sysfd, p, Csize_t(nbytes))
+            n = SocketOps.read_once!(fd.sysfd, p, Csize_t(read_size))
             if n >= 0
                 if n == 0 && fd.zero_read_is_eof
                     throw(EOFError())
@@ -737,7 +834,8 @@ Write all bytes from `p` and return the number of bytes written.
 
 Unlike `read!`, a successful return means the full buffer was written. In
 non-blocking mode this loops on `EAGAIN` by waiting for write readiness and
-then resuming from the first unwritten byte.
+then resuming from the first unwritten byte. Each stream syscall is capped at
+one GiB; larger buffers are written in successive chunks.
 """
 function write!(fd::FD, p::AbstractVector{UInt8})::Int
     data = if p isa StridedVector{UInt8} && stride(p, 1) == 1
@@ -746,7 +844,7 @@ function write!(fd::FD, p::AbstractVector{UInt8})::Int
         Vector{UInt8}(p)
     end
     GC.@preserve data begin
-        return _write_ptr!(fd, pointer(data), length(data))
+        return _write_ptr!(fd, pointer(data), length(data), data)
     end
 end
 
@@ -761,11 +859,13 @@ function write!(fd::FD, p::ByteMemory, nbytes::Integer)::Int
     n < 0 && throw(ArgumentError("nbytes must be >= 0"))
     n <= length(p) || throw(ArgumentError("nbytes exceeds buffer length"))
     GC.@preserve p begin
-        return _write_ptr!(fd, pointer(p), n)
+        return _write_ptr!(fd, pointer(p), n, p)
     end
 end
 
-function _write_ptr!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
+# See `_read_ptr_some!`: `root`, when supplied, keeps the WSASend source buffer
+# reachable for the overlapped op's full lifetime on Windows.
+function _write_ptr!(fd::FD, p::Ptr{UInt8}, nbytes::Int, root=nothing)::Int
     _fd_write_lock!(fd)
     nn = 0
     try
@@ -773,9 +873,9 @@ function _write_ptr!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
             while nn < nbytes
                 preparewrite(fd.pd, fd.is_file)
                 registration = _poll_registration(fd.pd)
-                chunk = UInt32(min(nbytes - nn, Int(typemax(UInt32))))
+                chunk = UInt32(_max_rw_chunk(nbytes - nn))
                 while true
-                    errno = _iocp_submit_write!(registration, p + nn, chunk)
+                    errno = _iocp_submit_write!(registration, p + nn, chunk, root)
                     errno == Int32(0) && break
                     if errno == Int32(Base.Libc.EALREADY)
                         waitwrite(fd.pd, fd.is_file)
@@ -786,25 +886,24 @@ function _write_ptr!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
                 try
                     _wait_iocp_completion!(registration, fd.pd, PollMode.WRITE, fd.is_file)
                 catch err
-                    if _iocp_cancel_mode!(registration, PollMode.WRITE)
-                        pollwait!(registration.write_waiter)
-                    end
-                    _, _ = _iocp_finish_write!(registration)
+                    _drain_canceled_iocp_op!(registration, PollMode.WRITE)
                     rethrow(err)
                 end
                 bytes, result = _iocp_finish_write!(registration)
                 result == Int32(0) || throw(SystemError("write", Int(result)))
                 bytes == UInt32(0) && throw(EOFError())
-                nn += Int(bytes)
+                nn = _checked_write_advance(nn, Int(bytes), Int(chunk))
             end
             return nn
         end
         preparewrite(fd.pd, fd.is_file)
         while true
             nn == nbytes && return nn
-            n = SocketOps.write_once!(fd.sysfd, p + nn, Csize_t(nbytes - nn))
+            remaining = nbytes - nn
+            chunk = fd.is_stream ? _max_rw_chunk(remaining) : remaining
+            n = SocketOps.write_once!(fd.sysfd, p + nn, Csize_t(chunk))
             if n > 0
-                nn += Int(n)
+                nn = _checked_write_advance(nn, Int(n), chunk)
                 continue
             end
             n == 0 && throw(EOFError())

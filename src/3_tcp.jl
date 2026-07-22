@@ -336,7 +336,7 @@ end
 end
 
 function _new_netfd(
-        sysfd::Cint;
+        sysfd::SocketOps.SocketFD;
         family::Cint = SocketOps.AF_INET,
         sotype::Cint = SocketOps.SOCK_STREAM,
         net::Symbol = :tcp,
@@ -502,9 +502,35 @@ issue readiness-driven operations should call `IOPoll.register!` before use.
 Returns an internal `FD` object and throws `SystemError` on socket creation
 failure.
 """
-function open_tcp_fd!(; family::Cint = SocketOps.AF_INET)::FD
+function open_tcp_fd!(;
+        family::Cint = SocketOps.AF_INET,
+        net::Symbol = :tcp,
+    )::FD
     sysfd = SocketOps.open_socket(family, SocketOps.SOCK_STREAM)
-    return _new_netfd(sysfd; family = family, sotype = SocketOps.SOCK_STREAM, net = :tcp, is_connected = false)
+    return _new_netfd(sysfd; family = family, sotype = SocketOps.SOCK_STREAM, net = net, is_connected = false)
+end
+
+@inline function _set_ipv6_only!(fd::FD, enabled::Bool)
+    @static if Sys.isopenbsd() || Sys.isdragonfly()
+        # These kernels enforce IPv6-only sockets and reject attempts to change
+        # IPV6_V6ONLY. This is the same capability exception Go applies.
+        return nothing
+    else
+        try
+            SocketOps.set_sockopt_int(
+                fd.pfd.sysfd,
+                SocketOps.IPPROTO_IPV6,
+                SocketOps.IPV6_V6ONLY,
+                enabled ? 1 : 0,
+            )
+        catch err
+            ex = err::Exception
+            # Go parity: some operating systems never admit this option, so a
+            # setsockopt failure is deliberately ignored.
+            ex isa SystemError || rethrow(ex)
+        end
+        return nothing
+    end
 end
 
 @inline function _connect_socketaddr_family(
@@ -516,6 +542,35 @@ end
         throw(ArgumentError("local and remote address families must match"))
     end
     return family
+end
+
+@inline _is_wildcard_addr(addr::SocketAddrV4)::Bool = addr.ip == (0x00, 0x00, 0x00, 0x00)
+@inline _is_wildcard_addr(addr::SocketAddrV6)::Bool = all(iszero, addr.ip)
+
+@inline function _wildcard_remote_to_local(
+        remote_addr::SocketAddr,
+        network::Symbol,
+    )::SocketAddr
+    _is_wildcard_addr(remote_addr) || return remote_addr
+    if network === :tcp6
+        scope_id = remote_addr isa SocketAddrV6 ? remote_addr.scope_id : UInt32(0)
+        return loopback_addr6(remote_addr.port; scope_id = scope_id)
+    end
+    return loopback_addr(remote_addr.port)
+end
+
+@inline function _prepare_dial_remote_addr(
+        remote_addr::SocketAddr,
+        network::Symbol,
+    )::SocketAddr
+    # Go's internetSocket rewrites wildcard dial destinations on kernels that
+    # do not consistently interpret them as the local host. In particular,
+    # ConnectEx rejects 0.0.0.0/:: as a remote address on Windows.
+    @static if Sys.iswindows() || Sys.isfreebsd() || Sys.isopenbsd()
+        return _wildcard_remote_to_local(remote_addr, network)
+    else
+        return remote_addr
+    end
 end
 
 @inline function _clear_connect_write_deadline!(fd::FD, connect_deadline_ns::Int64)
@@ -535,10 +590,12 @@ end
             local_addr::Union{Nothing, SocketAddr},
             connect_deadline_ns::Int64,
             cancel_state,
+            network::Symbol,
         )::Conn
         family = _connect_socketaddr_family(remote_addr, local_addr)
-        fd = open_tcp_fd!(; family = family)
+        fd = open_tcp_fd!(; family = family, net = network)
         try
+            family == SocketOps.AF_INET6 && _set_ipv6_only!(fd, network === :tcp6)
             if local_addr !== nothing
                 SocketOps.bind_socket(fd.pfd.sysfd, _to_sockaddr(local_addr))
             else
@@ -574,10 +631,12 @@ else
             local_addr::Union{Nothing, SocketAddr},
             connect_deadline_ns::Int64,
             cancel_state,
+            network::Symbol,
         )::Conn
         family = _connect_socketaddr_family(remote_addr, local_addr)
-        fd = open_tcp_fd!(; family = family)
+        fd = open_tcp_fd!(; family = family, net = network)
         try
+            family == SocketOps.AF_INET6 && _set_ipv6_only!(fd, network === :tcp6)
             if local_addr !== nothing
                 SocketOps.bind_socket(fd.pfd.sysfd, _to_sockaddr(local_addr))
             end
@@ -613,6 +672,94 @@ else
     end
 end
 
+@inline _uses_ephemeral_local_port(::Nothing)::Bool = true
+@inline _uses_ephemeral_local_port(addr::SocketAddrV4)::Bool = addr.port == 0
+@inline _uses_ephemeral_local_port(addr::SocketAddrV6)::Bool = addr.port == 0
+
+function _is_self_connect(conn::Conn)::Bool
+    laddr = conn.fd.laddr
+    raddr = conn.fd.raddr
+    (laddr === nothing || raddr === nothing) && return true
+    if laddr isa SocketAddrV4 && raddr isa SocketAddrV4
+        local_v4 = laddr::SocketAddrV4
+        remote_v4 = raddr::SocketAddrV4
+        return local_v4.port == remote_v4.port && local_v4.ip == remote_v4.ip
+    end
+    if laddr isa SocketAddrV6 && raddr isa SocketAddrV6
+        local_v6 = laddr::SocketAddrV6
+        remote_v6 = raddr::SocketAddrV6
+        return local_v6.port == remote_v6.port &&
+               local_v6.ip == remote_v6.ip &&
+               local_v6.scope_id == remote_v6.scope_id
+    end
+    return false
+end
+
+function _dial_socketaddr_with(
+        remote_addr::SocketAddr,
+        local_addr::Union{Nothing, SocketAddr},
+        connect_deadline_ns::Int64,
+        cancel_state,
+        network::Symbol,
+        dial_once::F,
+    )::Conn where {F}
+    max_attempts = _uses_ephemeral_local_port(local_addr) ? 3 : 1
+    for attempt in 1:max_attempts
+        conn = try
+            dial_once(remote_addr, local_addr, connect_deadline_ns, cancel_state, network)
+        catch err
+            if err isa SystemError &&
+               (err::SystemError).errnum == Int(Base.Libc.EADDRNOTAVAIL) &&
+               attempt < max_attempts
+                continue
+            end
+            rethrow(err)
+        end
+        if attempt < max_attempts && _is_self_connect(conn)
+            close(conn)
+            continue
+        end
+        return conn
+    end
+    error("unreachable TCP dial retry state")
+end
+
+function _dial_socketaddr_with(
+        dial_once::F,
+        remote_addr::SocketAddr,
+        local_addr::Union{Nothing, SocketAddr},
+        connect_deadline_ns::Int64,
+        cancel_state,
+        network::Symbol,
+    )::Conn where {F}
+    return _dial_socketaddr_with(
+        remote_addr,
+        local_addr,
+        connect_deadline_ns,
+        cancel_state,
+        network,
+        dial_once,
+    )
+end
+
+function _dial_socketaddr_impl(
+        remote_addr::SocketAddr,
+        local_addr::Union{Nothing, SocketAddr},
+        connect_deadline_ns::Int64,
+        cancel_state,
+        network::Symbol,
+    )::Conn
+    remote_addr = _prepare_dial_remote_addr(remote_addr, network)
+    return _dial_socketaddr_with(
+        remote_addr,
+        local_addr,
+        connect_deadline_ns,
+        cancel_state,
+        network,
+        _connect_socketaddr_impl,
+    )
+end
+
 """
     connect(remote_addr)
     connect(remote_addr, local_addr)
@@ -625,11 +772,11 @@ For host/port strings, name resolution, and timeout-aware connect policy, use
 the `connect(network, address...)` overloads on the same `TCP.connect` generic.
 """
 function connect(remote_addr::SocketAddr)::Conn
-    return _connect_socketaddr_impl(remote_addr, nothing, Int64(0), nothing)
+    return _dial_socketaddr_impl(remote_addr, nothing, Int64(0), nothing, :tcp)
 end
 
 function connect(remote_addr::SocketAddr, local_addr::Union{Nothing, SocketAddr})::Conn
-    return _connect_socketaddr_impl(remote_addr, local_addr, Int64(0), nothing)
+    return _dial_socketaddr_impl(remote_addr, local_addr, Int64(0), nothing, :tcp)
 end
 
 """
@@ -640,10 +787,16 @@ Create a TCP listener from a bound local address.
 This is the direct-address equivalent of the `listen(network, address; ...)`
 overloads on the same `TCP.listen` generic.
 """
-function listen(local_addr::SocketAddr; backlog::Integer = 128, reuseaddr::Bool = true)::Listener
+function _listen_socketaddr_impl(
+        local_addr::SocketAddr,
+        network::Symbol;
+        backlog::Integer,
+        reuseaddr::Bool,
+    )::Listener
     family = _addr_family(local_addr)
-    fd = open_tcp_fd!(; family = family)
+    fd = open_tcp_fd!(; family = family, net = network)
     try
+        family == SocketOps.AF_INET6 && _set_ipv6_only!(fd, network === :tcp6)
         reuseaddr && SocketOps.set_sockopt_int(fd.pfd.sysfd, SocketOps.SOL_SOCKET, SocketOps.SO_REUSEADDR, 1)
         SocketOps.bind_socket(fd.pfd.sysfd, _to_sockaddr(local_addr))
         SocketOps.listen_socket(fd.pfd.sysfd, backlog)
@@ -654,6 +807,15 @@ function listen(local_addr::SocketAddr; backlog::Integer = 128, reuseaddr::Bool 
         close(fd)
         rethrow()
     end
+end
+
+function listen(local_addr::SocketAddr; backlog::Integer = 128, reuseaddr::Bool = true)::Listener
+    return _listen_socketaddr_impl(
+        local_addr,
+        :tcp;
+        backlog = backlog,
+        reuseaddr = reuseaddr,
+    )
 end
 
 """
@@ -708,24 +870,37 @@ end
 function _peek_eof(conn::Conn)::Bool
     pfd = conn.fd.pfd
     pref = Ref{UInt8}(0x00)
-    while true
-        IOPoll.prepareread(pfd.pd, pfd.is_file)
-        n = GC.@preserve pref SocketOps.recv_from!(
-            pfd.sysfd,
-            Base.unsafe_convert(Ptr{UInt8}, pref),
-            Csize_t(1),
-            SocketOps.MSG_PEEK,
-        )
-        if n > 0
-            return false
+    try
+        IOPoll._fd_read_lock!(pfd)
+    catch err
+        ex = err::Exception
+        ex isa IOPoll.NetClosingError || rethrow(ex)
+        # A close that lands between the caller's isopen check and taking the
+        # read lock reports EOF instead of surfacing the closing error.
+        return true
+    end
+    try
+        while true
+            IOPoll.prepareread(pfd.pd, pfd.is_file)
+            n = GC.@preserve pref SocketOps.recv_from!(
+                pfd.sysfd,
+                Base.unsafe_convert(Ptr{UInt8}, pref),
+                Csize_t(1),
+                SocketOps.MSG_PEEK,
+            )
+            if n > 0
+                return false
+            end
+            n == 0 && return true
+            errno = SocketOps.last_error()
+            if errno == Int32(Base.Libc.EAGAIN) && IOPoll.pollable(pfd.pd)
+                IOPoll.waitread(pfd.pd, pfd.is_file)
+                continue
+            end
+            throw(SystemError("recv(MSG_PEEK)", Int(errno)))
         end
-        n == 0 && return true
-        errno = SocketOps.last_error()
-        if errno == Int32(Base.Libc.EAGAIN) && IOPoll.pollable(pfd.pd)
-            IOPoll.waitread(pfd.pd, pfd.is_file)
-            continue
-        end
-        throw(SystemError("recv(MSG_PEEK)", Int(errno)))
+    finally
+        IOPoll._fd_read_unlock!(pfd)
     end
 end
 
@@ -739,6 +914,10 @@ This is the primitive that powers Julia's standard `read!` behavior once
 """
 function Base.unsafe_read(conn::Conn, ptr::Ptr{UInt8}, nbytes::UInt)
     remaining = Int(nbytes)
+    if remaining == 0
+        _read_some!(conn, ptr, 0)
+        return nothing
+    end
     offset = 0
     while remaining > 0
         n = _read_some!(conn, ptr + offset, remaining)
@@ -850,7 +1029,10 @@ function Base.readbytes!(conn::Conn, buf::MutableByteBuffer, nb::Integer = lengt
     Base.require_one_based_indexing(buf)
     requested = Int(nb)
     requested < 0 && throw(ArgumentError("nb must be >= 0"))
-    requested == 0 && return 0
+    if requested == 0
+        _read_some!(conn, Ptr{UInt8}(C_NULL), 0)
+        return 0
+    end
     return all ? _readbytes_all!(conn, buf, requested) : _readbytes_some!(conn, buf, requested)
 end
 
@@ -911,7 +1093,7 @@ end
 Return `true` while `conn` still owns an open socket.
 """
 function Base.isopen(conn::Conn)::Bool
-    return conn.fd.pfd.sysfd >= 0
+    return !IOPoll._fdlock_closing(conn.fd.pfd.fdlock)
 end
 
 function Base.flush(::Conn)
@@ -1022,7 +1204,7 @@ end
 Shut down the read side of the TCP connection.
 """
 function closeread(conn::Conn)
-    SocketOps.shutdown_socket(conn.fd.pfd.sysfd, SocketOps.SHUT_RD)
+    IOPoll.shutdown_socket!(conn.fd.pfd, SocketOps.SHUT_RD)
     return nothing
 end
 
@@ -1032,7 +1214,7 @@ end
 Shut down the write side of the TCP connection.
 """
 function Base.closewrite(conn::Conn)
-    SocketOps.shutdown_socket(conn.fd.pfd.sysfd, SocketOps.SHUT_WR)
+    IOPoll.shutdown_socket!(conn.fd.pfd, SocketOps.SHUT_WR)
     return nothing
 end
 
@@ -1057,7 +1239,7 @@ end
 Return `true` while `listener` still owns an open listening socket.
 """
 function Base.isopen(listener::Listener)::Bool
-    return listener.fd.pfd.sysfd >= 0
+    return !IOPoll._fdlock_closing(listener.fd.pfd.fdlock)
 end
 
 """
@@ -1134,8 +1316,8 @@ end
 Enable or disable `TCP_NODELAY` on `conn`.
 """
 function set_nodelay!(conn::Conn, enabled::Bool = true)
-    SocketOps.set_sockopt_int(
-        conn.fd.pfd.sysfd,
+    IOPoll.set_sockopt_int!(
+        conn.fd.pfd,
         SocketOps.IPPROTO_TCP,
         SocketOps.TCP_NODELAY,
         enabled ? 1 : 0,
@@ -1149,8 +1331,8 @@ end
 Enable or disable `SO_KEEPALIVE` on `conn`.
 """
 function set_keepalive!(conn::Conn, enabled::Bool = true)
-    SocketOps.set_sockopt_int(
-        conn.fd.pfd.sysfd,
+    IOPoll.set_sockopt_int!(
+        conn.fd.pfd,
         SocketOps.SOL_SOCKET,
         SocketOps.SO_KEEPALIVE,
         enabled ? 1 : 0,
@@ -1205,8 +1387,8 @@ end
     return nothing
 end
 
-@inline _show_state(conn::Conn) = conn.fd.pfd.sysfd >= 0 ? "open" : "closed"
-@inline _show_state(listener::Listener) = listener.fd.pfd.sysfd >= 0 ? "active" : "closed"
+@inline _show_state(conn::Conn) = IOPoll._fdlock_closing(conn.fd.pfd.fdlock) ? "closed" : "open"
+@inline _show_state(listener::Listener) = IOPoll._fdlock_closing(listener.fd.pfd.fdlock) ? "closed" : "active"
 
 function Base.show(io::IO, conn::Conn)
     print(io, "TCP.Conn(")

@@ -7,9 +7,9 @@ const SO = Reseau.SocketOps
 const _EL_EWOULDBLOCK = @static isdefined(Base.Libc, :EWOULDBLOCK) ? Int32(getfield(Base.Libc, :EWOULDBLOCK)) : Int32(Base.Libc.EAGAIN)
 
 function _el_socketpair_stream()
-    listener = Cint(-1)
-    client = Cint(-1)
-    accepted = Cint(-1)
+    listener = SO.INVALID_SOCKET
+    client = SO.INVALID_SOCKET
+    accepted = SO.INVALID_SOCKET
     try
         _el_log_test_progress("_el_socketpair_stream: listener")
         listener = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
@@ -31,27 +31,27 @@ function _el_socketpair_stream()
         accepted, _ = _el_accept_with_retry(listener)
         stream_client = client
         stream_server = accepted
-        client = Cint(-1)
-        accepted = Cint(-1)
+        client = SO.INVALID_SOCKET
+        accepted = SO.INVALID_SOCKET
         return stream_client, stream_server
     finally
-        accepted >= 0 && SO.close_socket_nothrow(accepted)
-        client >= 0 && SO.close_socket_nothrow(client)
-        listener >= 0 && SO.close_socket_nothrow(listener)
+        SO.is_valid_socket(accepted) && SO.close_socket_nothrow(accepted)
+        SO.is_valid_socket(client) && SO.close_socket_nothrow(client)
+        SO.is_valid_socket(listener) && SO.close_socket_nothrow(listener)
     end
 end
 
-function _el_open_stream_fd()::Cint
+function _el_open_stream_fd()::SO.SocketFD
     return SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
 end
 
-function _el_close_fd(fd::Cint)
-    fd < 0 && return nothing
+function _el_close_fd(fd::SO.SocketFD)
+    SO.is_valid_socket(fd) || return nothing
     SO.close_socket_nothrow(fd)
     return nothing
 end
 
-function _el_write_byte(fd::Cint, b::UInt8)
+function _el_write_byte(fd::SO.SocketFD, b::UInt8)
     buf = Ref{UInt8}(b)
     for _ in 1:5000
         n = GC.@preserve buf SO.write_once!(fd, Base.unsafe_convert(Ptr{UInt8}, buf), Csize_t(1))
@@ -65,7 +65,7 @@ function _el_write_byte(fd::Cint, b::UInt8)
     throw(ArgumentError("timed out writing byte"))
 end
 
-function _el_read_byte(fd::Cint)
+function _el_read_byte(fd::SO.SocketFD)
     buf = Ref{UInt8}(0x00)
     for _ in 1:5000
         n = GC.@preserve buf SO.read_once!(fd, Base.unsafe_convert(Ptr{UInt8}, buf), Csize_t(1))
@@ -101,10 +101,10 @@ end
 # them would starve the companion task that is supposed to drive the wakeup.
 _el_can_block_julia_worker() = Threads.nthreads() > 1
 
-function _el_accept_with_retry(listener::Cint)::Tuple{Cint, SO.AcceptPeer}
+function _el_accept_with_retry(listener::SO.SocketFD)::Tuple{SO.SocketFD, SO.AcceptPeer}
     for _ in 1:5000
         accepted, peer, errno = SO.try_accept_socket(listener)
-        accepted != -1 && return accepted, peer
+        SO.is_valid_socket(accepted) && return accepted, peer
         errno == Int32(Base.Libc.EAGAIN) && (yield(); continue)
         errno == _EL_EWOULDBLOCK && (yield(); continue)
         errno == Int32(Base.Libc.EINTR) && continue
@@ -113,7 +113,7 @@ function _el_accept_with_retry(listener::Cint)::Tuple{Cint, SO.AcceptPeer}
     throw(ArgumentError("timed out waiting for accepted socket"))
 end
 
-function _el_wait_connect_ready!(fd::Cint)
+function _el_wait_connect_ready!(fd::SO.SocketFD)
     registration = IP.register!(fd; mode = IP.PollMode.WRITE)
     try
         # Unix backends observe writability directly from the registration, but
@@ -130,6 +130,9 @@ end
         NP.shutdown!()
         _el_log_test_progress("START: poller-backed sleep/timedwait")
         @testset "poller-backed sleep/timedwait" begin
+            @test IP._saturating_add_ns(Int64(20), Int64(22)) == Int64(42)
+            @test IP._saturating_add_ns(typemax(Int64) - Int64(2), Int64(3)) == typemax(Int64)
+            @test IP._saturating_add_ns(typemin(Int64) + Int64(2), Int64(-3)) == typemin(Int64)
             _el_log_test_progress("poller-backed sleep/timedwait: sleep")
             t0 = time_ns()
             IP.sleep(0.03)
@@ -155,13 +158,107 @@ end
         @testset "pollwait wake reason precedence" begin
             waiter = NP.PollWaiter()
             @test !NP.pollnotify!(waiter, NP.PollWakeReason.CANCELED)
+            @test (@atomic :acquire waiter.state) === NP._POLLWAKE_CANCELED
             @test !NP.pollnotify!(waiter, NP.PollWakeReason.READY)
+            @test (@atomic :acquire waiter.state) === NP._POLLWAKE_READY
             @test NP.pollwait!(waiter) == NP.PollWakeReason.READY
+            @test (@atomic :acquire waiter.state) === nothing
 
             waiter = NP.PollWaiter()
             @test !NP.pollnotify!(waiter, NP.PollWakeReason.READY)
             @test !NP.pollnotify!(waiter, NP.PollWakeReason.CANCELED)
+            @test (@atomic :acquire waiter.state) === NP._POLLWAKE_READY
             @test NP.pollwait!(waiter) == NP.PollWakeReason.READY
+
+            waiter = NP.PollWaiter()
+            @test !NP.pollnotify!(waiter, NP.PollWakeReason.CANCELED)
+            @test NP.pollwait!(waiter) == NP.PollWakeReason.CANCELED
+            @test (@atomic :acquire waiter.state) === nothing
+
+            waiter = NP.PollWaiter()
+            owner_task = Threads.@spawn NP.pollwait!(waiter)
+            while !((@atomic :acquire waiter.state) isa Task) && !istaskdone(owner_task)
+                yield()
+            end
+            published_owner = @atomic :acquire waiter.state
+            @test published_owner === owner_task
+            concurrent_err = try
+                NP.pollwait!(waiter)
+                nothing
+            catch err
+                err
+            end
+            @test concurrent_err isa ArgumentError
+            @test (@atomic :acquire waiter.state) === published_owner
+            @test NP.pollnotify!(waiter, NP.PollWakeReason.READY)
+            @test fetch(owner_task) == NP.PollWakeReason.READY
+            @test (@atomic :acquire waiter.state) === nothing
+
+            interrupted_waiter = NP.PollWaiter()
+            interrupted_task = Threads.@spawn NP.pollwait!(interrupted_waiter)
+            while !((@atomic :acquire interrupted_waiter.state) isa Task) && !istaskdone(interrupted_task)
+                yield()
+            end
+            schedule(interrupted_task, InterruptException(); error = true)
+            @test_throws TaskFailedException fetch(interrupted_task)
+            @test (@atomic :acquire interrupted_waiter.state) === nothing
+            @test !NP.pollnotify!(interrupted_waiter, NP.PollWakeReason.READY)
+            @test NP.pollwait!(interrupted_waiter) == NP.PollWakeReason.READY
+
+            for reason in (NP.PollWakeReason.READY, NP.PollWakeReason.CANCELED)
+                for _ in 1:128
+                    waiter = NP.PollWaiter()
+                    @test !NP.pollnotify!(waiter, reason)
+                    @test NP.pollwait!(waiter) == reason
+                    @test (@atomic :acquire waiter.state) === nothing
+                end
+            end
+
+            for i in 1:128
+                waiter = NP.PollWaiter()
+                expected = isodd(i) ? NP.PollWakeReason.READY : NP.PollWakeReason.CANCELED
+                waiter_task = errormonitor(Threads.@spawn NP.pollwait!(waiter))
+                deadline = time_ns() + 2_000_000_000
+                while !((@atomic :acquire waiter.state) isa Task) && !istaskdone(waiter_task)
+                    time_ns() < deadline || error("timed out waiting for PollWaiter to park")
+                    yield()
+                end
+                @test NP.pollnotify!(waiter, expected)
+                @test fetch(waiter_task) == expected
+                @test (@atomic :acquire waiter.state) === nothing
+            end
+
+            # Regression for the two-word protocol's lost-wakeup deadlock: a
+            # parked waiter woken CANCELED while a concurrent READY upgrade
+            # lands mid-consume must return a reason — never re-park with its
+            # wake token already spent.
+            deadlocked = false
+            for _ in 1:256
+                waiter = NP.PollWaiter()
+                waiter_task = Threads.@spawn NP.pollwait!(waiter)
+                while !((@atomic :acquire waiter.state) isa Task) && !istaskdone(waiter_task)
+                    yield()
+                end
+                cancel_task = Threads.@spawn NP.pollnotify!(waiter, NP.PollWakeReason.CANCELED)
+                ready_task = Threads.@spawn NP.pollnotify!(waiter, NP.PollWakeReason.READY)
+                status = timedwait(() -> istaskdone(waiter_task), 20.0)
+                if status !== :ok
+                    deadlocked = true
+                    # Unstick the parked task so the testset can finish.
+                    schedule(waiter_task, InterruptException(); error = true)
+                    break
+                end
+                @test fetch(waiter_task) isa NP.PollWakeReason.T
+                wait(cancel_task)
+                wait(ready_task)
+                # A notify that landed after the consume latches a fresh token;
+                # drain it so the waiter ends the iteration clean.
+                if (@atomic :acquire waiter.state) isa NP._PollWakeToken
+                    NP.pollwait!(waiter)
+                end
+                @test (@atomic :acquire waiter.state) === nothing
+            end
+            @test !deadlocked
         end
         _el_log_test_progress("DONE: pollwait wake reason precedence")
         _el_log_test_progress("START: backend delay semantics")
@@ -218,15 +315,15 @@ end
             old_poller = NP.POLLER[]
             state = NP.Poller()
             poll_task = nothing
-            fd0 = Cint(-1)
-            fd1 = Cint(-1)
+            fd0 = SO.INVALID_SOCKET
+            fd1 = SO.INVALID_SOCKET
             try
                 errno = NP._backend_init!(state)
                 @test errno == Int32(0)
                 @atomic :release state.running = true
                 NP.POLLER[] = state
                 fd0 = _el_open_stream_fd()
-                fd1 = Cint(-1)
+                fd1 = SO.INVALID_SOCKET
                 token = UInt64(41)
                 registration = NP.Registration(fd0, token, NP.PollMode.READWRITE, NP.PollWaiter(), NP.PollWaiter(), false)
                 state.registrations[fd0] = registration
@@ -321,8 +418,8 @@ end
                 NP.deregister!(fd0)
                 _el_close_fd(fd0)
                 _el_close_fd(fd1)
-                fd0 = Cint(-1)
-                fd1 = Cint(-1)
+                fd0 = SO.INVALID_SOCKET
+                fd1 = SO.INVALID_SOCKET
                 fd0, fd1 = _el_socketpair_stream()
                 registration2 = NP.register!(fd0; mode = NP.PollMode.READ)
                 token2 = registration2.token
@@ -337,7 +434,7 @@ end
                     return nothing
                 end)
                 @test _el_wait_channel_ready(wait_started, 2.0) != :timed_out
-                stale = NP.PollEvent(Cint(-1), token1, NP.PollMode.READ, false)
+                stale = NP.PollEvent(NP.INVALID_FD, token1, NP.PollMode.READ, false)
                 NP._dispatch_ready_event!(state, stale)
                 stale_status = timedwait(() -> isready(wait_ch), 0.05; pollint = 0.001)
                 @test stale_status == :timed_out
@@ -508,17 +605,18 @@ end
             @test isempty(state.time_heap)
             @test (@atomic :acquire t1.deadline_ns) == Int64(0)
             @test (@atomic :acquire t2.deadline_ns) == Int64(0)
-            # Fired-but-unparked waiters latch NOTIFIED; check the latch
+            # Fired-but-unparked waiters latch a READY wake; check the latch
             # directly so a drain regression fails instead of parking forever.
-            @test (@atomic :acquire t1.waiter.state) == NP.PollWaiterState.NOTIFIED
-            @test (@atomic :acquire t2.waiter.state) == NP.PollWaiterState.NOTIFIED
+            @test (@atomic :acquire t1.waiter.state) === NP._POLLWAKE_READY
+            @test (@atomic :acquire t2.waiter.state) === NP._POLLWAKE_READY
             # The drain runs on the detached poller thread every cycle, and
             # allocating there has crashed under gVisor's sandbox. Coverage
             # instrumentation adds allocations, so only assert without it.
             drained = NP._drain_expired_time_entries!(state, Int64(time_ns()))
             @test drained === nothing
             if Base.JLOptions().code_coverage == 0
-                allocs = @allocated NP._drain_expired_time_entries!(state, Int64(time_ns()))
+                allocation_check_now = Int64(time_ns())
+                allocs = @allocated NP._drain_expired_time_entries!(state, allocation_check_now)
                 @test allocs == 0
             end
         end

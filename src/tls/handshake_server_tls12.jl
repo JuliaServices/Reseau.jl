@@ -2,7 +2,7 @@
 #
 # This file mirrors the server side of Go's `crypto/tls/handshake_server.go`
 # for the subset of TLS 1.2 we support natively: ECDHE + AES-GCM, optional
-# client certificates, EMS, and session-ticket resumption.
+# client certificates, optional EMS, and session-ticket resumption.
 
 """
     _TLS12ServerSession
@@ -305,8 +305,10 @@ function _tls12_select_server_curve(client_hello::_ClientHelloMsg, config)::UInt
 end
 
 function _tls12_set_client_hello!(state::_TLS12ServerHandshakeState, raw::Vector{UInt8})::Nothing
-    client_hello = _unmarshal_client_hello(raw)
-    client_hello === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls12 server handshake expected ClientHello")
+    parsed = _unmarshal_handshake_message_or_fail(raw, nothing, TLS1_2_VERSION)
+    parsed isa _ClientHelloMsg ||
+        _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls12 server handshake expected ClientHello")
+    client_hello = parsed::_ClientHelloMsg
     versions = client_hello.supported_versions
     if isempty(versions)
         client_hello.vers == TLS1_2_VERSION ||
@@ -318,8 +320,6 @@ function _tls12_set_client_hello!(state::_TLS12ServerHandshakeState, raw::Vector
         _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: client does not support uncompressed TLS 1.2 connections")
     isempty(client_hello.secure_renegotiation) ||
         _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: initial TLS 1.2 handshake had non-empty renegotiation extension")
-    client_hello.extended_master_secret ||
-        _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: native TLS 1.2 server requires extended master secret")
     has_supported_curve = false
     for group in client_hello.supported_curves
         if _native_curve_supported(group)
@@ -356,26 +356,54 @@ function _tls12_select_server_parameters!(state::_TLS12ServerHandshakeState, con
                     keep_session = false
                     try
                         now_s = UInt64(floor(time()))
-                        if session.version == TLS1_2_VERSION &&
-                           now_s <= session.use_by_s &&
-                           in(session.cipher_suite, state.client_hello.cipher_suites) &&
-                           session.alpn_protocol == state.selected_alpn &&
-                           session.ext_master_secret &&
-                           _tls12_cipher_spec(session.cipher_suite) !== nothing &&
-                           _tls_server_session_client_auth_ok(session.client_certificates, config) do client_certificates
-                               _tls13_verify_client_certificate_chain(
-                                   client_certificates;
-                                   verify_peer = true,
-                                   ca_file = _effective_ca_file(config; is_server = true),
-                               )
-                           end
-                            state.resumption_session = session
-                            state.using_resumption = true
-                            state.cipher_suite = session.cipher_suite
-                            state.curve_id = session.curve_id
-                            state.peer_certificates = [copy(cert) for cert in session.client_certificates]
-                            keep_session = true
-                            return nothing
+                        # Match Go's checkForResumption: refuse to resume once the
+                        # ORIGINAL master secret is older than the max lifetime, so a
+                        # client cannot renew the same secret indefinitely by resuming
+                        # every week. A created_at in the future (clock skew) is treated
+                        # as fresh, mirroring Go's signed time.Sub.
+                        secret_age_ok = now_s < session.created_at_s ||
+                            now_s - session.created_at_s < UInt64(_TLS12_MAX_SESSION_TICKET_LIFETIME)
+                        session_compatible = session.version == TLS1_2_VERSION &&
+                            now_s <= session.use_by_s &&
+                            secret_age_ok &&
+                            in(session.cipher_suite, state.client_hello.cipher_suites) &&
+                            session.alpn_protocol == state.selected_alpn &&
+                            _tls12_cipher_spec(session.cipher_suite) !== nothing &&
+                            _tls_server_session_client_auth_ok(session.client_certificates, config) do client_certificates
+                                _tls13_verify_client_certificate_chain(
+                                    client_certificates;
+                                    verify_peer = true,
+                                    ca_file = _effective_ca_file(config; is_server = true),
+                                )
+                            end
+                        if session_compatible
+                            # RFC 7627 section 5.3 deliberately treats the two
+                            # cross-mode cases differently. An old non-EMS
+                            # session offered by an EMS-capable client falls
+                            # back to a full handshake, while resuming an EMS
+                            # session without EMS is a fatal downgrade.
+                            if !session.ext_master_secret && state.client_hello.extended_master_secret
+                                # Continue below with a fresh EMS handshake.
+                            elseif session.ext_master_secret && !state.client_hello.extended_master_secret
+                                # Go's checkForResumption returns a bare error
+                                # for this downgrade, so no alert is written;
+                                # the client only observes the connection
+                                # closing.
+                                throw(TLSError(
+                                    "handshake",
+                                    Int32(0),
+                                    "tls: session supported extended_master_secret but client does not",
+                                    nothing,
+                                ))
+                            else
+                                state.resumption_session = session
+                                state.using_resumption = true
+                                state.cipher_suite = session.cipher_suite
+                                state.curve_id = session.curve_id
+                                state.peer_certificates = [copy(cert) for cert in session.client_certificates]
+                                keep_session = true
+                                return nothing
+                            end
                         end
                     finally
                         keep_session || _securezero_tls12_server_session!(session::_TLS12ServerSession)
@@ -417,7 +445,7 @@ function _tls12_send_server_hello!(
     server_hello.session_id = state.using_resumption ? copy(state.client_hello.session_id) : UInt8[]
     server_hello.cipher_suite = state.cipher_suite
     server_hello.compression_method = _TLS_COMPRESSION_NONE
-    server_hello.extended_master_secret = true
+    server_hello.extended_master_secret = state.client_hello.extended_master_secret
     server_hello.ticket_supported = state.client_hello.ticket_supported && !config.session_tickets_disabled
     server_hello.secure_renegotiation_supported = state.client_hello.secure_renegotiation_supported
     server_hello.server_name_ack = !isempty(state.client_hello.server_name)
@@ -647,7 +675,7 @@ function _tls12_send_server_finished!(
     try
         _tls_write_tls_plaintext!(io.tcp, _TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC, _TLS12_CHANGE_CIPHER_SPEC_PAYLOAD, TLS1_2_VERSION)
         raw = _write_handshake_message(_FinishedMsg(verify_data), transcript)
-        _tls12_write_record!(io.tcp, io.state.write_cipher, _TLS_RECORD_TYPE_HANDSHAKE, raw)
+        _tls12_write_record!(io.tcp, io.state, _TLS_RECORD_TYPE_HANDSHAKE, raw)
     finally
         _securezero!(verify_data)
     end
@@ -664,11 +692,29 @@ function _tls12_send_new_session_ticket!(
     state.server_hello.ticket_supported || return nothing
     label = UInt8[]
     plaintext = UInt8[]
+    now_s = UInt64(floor(time()))
+    # Go's sendSessionTicket re-wraps a resumed session under the ORIGINAL creation
+    # time so the master secret's absolute expiry never advances; only a fresh (full)
+    # handshake starts the clock at now. Carrying both created_at and use_by keeps the
+    # anchored expiry from being reset, closing the unbounded-renewal window.
+    resumption = state.resumption_session
+    if resumption === nothing
+        created_at_s = now_s
+        use_by_s = now_s + UInt64(_TLS12_MAX_SESSION_TICKET_LIFETIME)
+    else
+        created_at_s = (resumption::_TLS12ServerSession).created_at_s
+        use_by_s = (resumption::_TLS12ServerSession).use_by_s
+    end
+    # The lifetime hint advertises the REMAINING absolute lifetime, not a fresh 7 days,
+    # so a resumed ticket cannot re-introduce unbounded extension through the hint.
+    lifetime_hint = use_by_s > now_s ?
+        UInt32(min(use_by_s - now_s, UInt64(typemax(UInt32)))) :
+        UInt32(0)
     session = _owned_tls12_server_session(
         TLS1_2_VERSION,
         state.cipher_suite,
-        UInt64(floor(time())),
-        UInt64(floor(time())) + UInt64(_TLS12_MAX_SESSION_TICKET_LIFETIME),
+        created_at_s,
+        use_by_s,
         UInt8[],
         master_secret,
         state.peer_certificates,
@@ -680,7 +726,7 @@ function _tls12_send_new_session_ticket!(
     try
         plaintext = _serialize_tls12_server_session(session)
         label = _tls_encrypt_server_session_ticket(keys[1], plaintext)
-        raw = _write_handshake_message(_NewSessionTicketMsgTLS12(_TLS12_MAX_SESSION_TICKET_LIFETIME, label), transcript)
+        raw = _write_handshake_message(_NewSessionTicketMsgTLS12(lifetime_hint, label), transcript)
         _write_handshake_bytes!(io, raw)
     finally
         _securezero_tls12_server_session!(session)
@@ -761,11 +807,20 @@ function _server_handshake_tls12_for_suite!(
         _tls12_read_client_certificate!(state, io, transcript, config)
         client_key_exchange = _tls12_read_client_key_exchange!(state, io, transcript)
         shared_secret = _tls12_server_shared_secret(state, client_key_exchange)
-        master_secret = _tls12_extended_master_from_pre_master_secret(
-            hash_kind,
-            shared_secret,
-            _transcript_digest(transcript),
-        )
+        master_secret = if state.server_hello.extended_master_secret
+            _tls12_extended_master_from_pre_master_secret(
+                hash_kind,
+                shared_secret,
+                _transcript_digest(transcript),
+            )
+        else
+            _tls12_master_from_pre_master_secret(
+                hash_kind,
+                shared_secret,
+                state.client_hello.random,
+                state.server_hello.random,
+            )
+        end
         _tls12_read_client_certificate_verify!(state, io, transcript)
         _discard_transcript_buffer!(transcript)
         key_block = _tls12_keys_from_master_secret(
@@ -802,6 +857,7 @@ function _server_handshake_tls12_after_client_hello!(
     config,
     raw_client_hello::Vector{UInt8},
 )::Nothing
+    _tls_set_negotiated_record_version!(io, TLS1_2_VERSION)
     _tls12_select_server_parameters!(state, config)
     if state.cipher_suite == _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID ||
        state.cipher_suite == _TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256_ID

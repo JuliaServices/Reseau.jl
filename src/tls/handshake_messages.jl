@@ -42,6 +42,7 @@ const _HANDSHAKE_EXTENSION_RENEGOTIATION_INFO = UInt16(0xff01)
 const _HANDSHAKE_EXTENSION_ENCRYPTED_CLIENT_HELLO = UInt16(0xfe0d)
 
 const _TLS_SCSV_RENEGOTIATION = UInt16(0x00ff)
+const _TLS_FALLBACK_SCSV = UInt16(0x5600)
 const _TLS_PSK_MODE_PLAIN = UInt8(0)
 const _TLS_PSK_MODE_DHE = UInt8(1)
 const _TLS_STATUS_TYPE_OCSP = UInt8(1)
@@ -1753,6 +1754,42 @@ function _unmarshal_handshake_message(
     msg === nothing && return nothing
     transcript === nothing || _transcript_update!(transcript, raw)
     return msg
+end
+
+@inline function _tls_has_handshake_unmarshaller(handshake_type::UInt8)::Bool
+    return handshake_type == _HANDSHAKE_TYPE_CLIENT_HELLO ||
+        handshake_type == _HANDSHAKE_TYPE_SERVER_HELLO ||
+        handshake_type == _HANDSHAKE_TYPE_SERVER_KEY_EXCHANGE ||
+        handshake_type == _HANDSHAKE_TYPE_NEW_SESSION_TICKET ||
+        handshake_type == _HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS ||
+        handshake_type == _HANDSHAKE_TYPE_CERTIFICATE ||
+        handshake_type == _HANDSHAKE_TYPE_CERTIFICATE_REQUEST ||
+        handshake_type == _HANDSHAKE_TYPE_SERVER_HELLO_DONE ||
+        handshake_type == _HANDSHAKE_TYPE_CERTIFICATE_VERIFY ||
+        handshake_type == _HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE ||
+        handshake_type == _HANDSHAKE_TYPE_FINISHED
+end
+
+# Go's readHandshake parses by the message's wire type before the state machine
+# checks whether that type was expected. Preserve that boundary here: malformed
+# contents of a recognized message are decode_error, while an unknown type is
+# unexpected_message. A valid but out-of-sequence recognized message is returned
+# so its caller can also classify it as unexpected_message.
+function _unmarshal_handshake_message_or_fail(
+    data::AbstractVector{UInt8},
+    transcript::Union{Nothing, _TranscriptHash} = nothing,
+    tls_version::UInt16 = TLS1_3_VERSION,
+)::_HandshakeMessage
+    raw = _copy_valid_handshake_frame(data)
+    raw === nothing && _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed handshake message")
+    handshake_type = raw[1]
+    msg = _unmarshal_handshake_message(raw, transcript, tls_version)
+    if msg === nothing
+        _tls_has_handshake_unmarshaller(handshake_type) &&
+            _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed handshake message")
+        _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received an unexpected handshake message")
+    end
+    return msg::_HandshakeMessage
 end
 
 function _marshal_handshake_message(msg::_HandshakeMessage)::Vector{UInt8}

@@ -3,6 +3,15 @@ using Reseau
 
 isdefined(@__MODULE__, :_RESEAU_TLS_TEST_UTILS_LOADED) || include("tls_test_utils.jl")
 
+function _tls_public_read_record(conn::NC.Conn)::Tuple{Vector{UInt8}, Vector{UInt8}}
+    header = Vector{UInt8}(undef, 5)
+    read!(conn, header)
+    payload_len = (Int(header[4]) << 8) | Int(header[5])
+    payload = Vector{UInt8}(undef, payload_len)
+    payload_len == 0 || read!(conn, payload)
+    return header, payload
+end
+
 @testset "TLS public API" begin
         @testset "direct socket-address connect/listen passthroughs" begin
             if Sys.iswindows() && VERSION < v"1.11.0"
@@ -406,6 +415,517 @@ isdefined(@__MODULE__, :_RESEAU_TLS_TEST_UTILS_LOADED) || include("tls_test_util
                 IP.shutdown!()
             end
         end
+        @testset "zero-length I/O drives the handshake without application data" begin
+            IP.shutdown!()
+            listener = nothing
+            client_tcp = nothing
+            server_tcp = nothing
+            client_tls = nothing
+            server_tls = nothing
+            server_task = nothing
+            try
+                listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+                laddr = NC.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
+                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                server_tcp = fetch(accept_task)
+                client_tls = TL.client(client_tcp, TL.Config(
+                    verify_peer = false,
+                    server_name = "localhost",
+                    handshake_timeout_ns = 2_000_000_000,
+                ))
+                server_tls = TL.server(server_tcp, _tls_server_config(handshake_timeout_ns = 2_000_000_000))
+
+                server_task = errormonitor(Threads.@spawn read(server_tls, 0))
+                @test write(client_tls, UInt8[]) == 0
+                @test _tls_wait_task_done(server_task, 2.0) != :timed_out
+                @test fetch(server_task) == UInt8[]
+                @test TL.connection_state(client_tls).handshake_complete
+                @test TL.connection_state(server_tls).handshake_complete
+                @test TL._pending_plaintext(client_tls) == 0
+                @test TL._pending_plaintext(server_tls) == 0
+
+                empty_buf = UInt8[]
+                @test read!(client_tls, empty_buf) === empty_buf
+                @test readbytes!(client_tls, empty_buf, 0) == 0
+                @test Base.unsafe_read(client_tls, Ptr{UInt8}(C_NULL), UInt(0)) === nothing
+            finally
+                _tls_close_quiet!(server_tls)
+                _tls_close_quiet!(client_tls)
+                _tls_close_quiet!(server_tcp)
+                _tls_close_quiet!(client_tcp)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
+
+            empty_operations = (
+                ("read", conn -> read(conn, 0)),
+                ("read!", conn -> read!(conn, UInt8[])),
+                ("readbytes!", conn -> readbytes!(conn, UInt8[], 0)),
+                ("unsafe_read", conn -> Base.unsafe_read(conn, Ptr{UInt8}(C_NULL), UInt(0))),
+                ("write", conn -> write(conn, UInt8[])),
+            )
+            for (label, operation) in empty_operations
+                @testset "$label surfaces handshake failure" begin
+                    IP.shutdown!()
+                    listener = nothing
+                    client_tcp = nothing
+                    peer_tcp = nothing
+                    client_tls = nothing
+                    try
+                        listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 1)
+                        laddr = NC.addr(listener)::NC.SocketAddrV4
+                        accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                        client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
+                        @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                        peer_tcp = fetch(accept_task)
+                        close(peer_tcp)
+                        peer_tcp = nothing
+                        client_tls = TL.client(client_tcp, TL.Config(
+                            verify_peer = false,
+                            server_name = "localhost",
+                            handshake_timeout_ns = 1_000_000_000,
+                        ))
+                        err = try
+                            operation(client_tls)
+                            nothing
+                        catch ex
+                            ex
+                        end
+                        @test err isa TL.TLSError || err isa EOFError
+                        if err isa TL.TLSError
+                            # A clean peer close must surface as EOFError, so a
+                            # TLSError here must never be the catch-all wrapping
+                            # a swallowed EOFError. Transport errors are still
+                            # legitimate: Linux/Windows reset the connection in
+                            # this race where macOS delivers a clean FIN.
+                            @test !(err.cause isa EOFError)
+                        end
+                        @test !TL.connection_state(client_tls).handshake_complete
+                    finally
+                        _tls_close_quiet!(client_tls)
+                        _tls_close_quiet!(peer_tcp)
+                        _tls_close_quiet!(client_tcp)
+                        _tls_close_quiet!(listener)
+                        IP.shutdown!()
+                    end
+                end
+            end
+        end
+        @testset "truncated TLS records surface unexpected EOF" begin
+            @testset "during handshake" begin
+                IP.shutdown!()
+                listener = nothing
+                client_tcp = nothing
+                server_tcp = nothing
+                server_tls = nothing
+                try
+                    listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 1)
+                    laddr = NC.addr(listener)::NC.SocketAddrV4
+                    accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                    client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
+                    @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                    server_tcp = fetch(accept_task)
+                    server_tls = TL.server(server_tcp, _tls_server_config(handshake_timeout_ns = 2_000_000_000))
+                    write(client_tcp, UInt8[TL._TLS_RECORD_TYPE_HANDSHAKE, 0x03])
+                    close(client_tcp)
+                    client_tcp = nothing
+                    err = try
+                        TL.handshake!(server_tls)
+                        nothing
+                    catch ex
+                        ex
+                    end
+                    @test err isa TL.TLSError
+                    if err isa TL.TLSError
+                        @test err.op == "handshake"
+                        @test err.message == "unexpected EOF"
+                        @test err.cause isa TL._TLSUnexpectedEOFError
+                    end
+                finally
+                    _tls_close_quiet!(server_tls)
+                    _tls_close_quiet!(server_tcp)
+                    _tls_close_quiet!(client_tcp)
+                    _tls_close_quiet!(listener)
+                    IP.shutdown!()
+                end
+            end
+
+            @testset "after handshake" begin
+                IP.shutdown!()
+                listener = nothing
+                client_tcp = nothing
+                server_tcp = nothing
+                client_tls = nothing
+                server_tls = nothing
+                server_task = nothing
+                try
+                    listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 1)
+                    laddr = NC.addr(listener)::NC.SocketAddrV4
+                    accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                    client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
+                    @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                    server_tcp = fetch(accept_task)
+                    client_tls = TL.client(client_tcp, TL.Config(
+                        verify_peer = false,
+                        server_name = "localhost",
+                        handshake_timeout_ns = 2_000_000_000,
+                        min_version = TL.TLS1_2_VERSION,
+                        max_version = TL.TLS1_2_VERSION,
+                    ))
+                    server_tls = TL.server(server_tcp, _tls_server_config(
+                        handshake_timeout_ns = 2_000_000_000,
+                        min_version = TL.TLS1_2_VERSION,
+                        max_version = TL.TLS1_2_VERSION,
+                    ))
+                    server_task = errormonitor(Threads.@spawn TL.handshake!(server_tls))
+                    TL.handshake!(client_tls)
+                    @test _tls_wait_task_done(server_task, 2.0) != :timed_out
+                    fetch(server_task)
+
+                    write(client_tls.tcp, UInt8[TL._TLS_RECORD_TYPE_APPLICATION_DATA, 0x03])
+                    close(client_tls.tcp)
+                    err = try
+                        read(server_tls, 1)
+                        nothing
+                    catch ex
+                        ex
+                    end
+                    @test err isa TL.TLSError
+                    if err isa TL.TLSError
+                        @test err.op == "read"
+                        @test err.message == "unexpected EOF"
+                        @test err.cause isa TL._TLSUnexpectedEOFError
+                    end
+                finally
+                    _tls_close_quiet!(server_tls)
+                    _tls_close_quiet!(client_tls)
+                    _tls_close_quiet!(server_tcp)
+                    _tls_close_quiet!(client_tcp)
+                    _tls_close_quiet!(listener)
+                    IP.shutdown!()
+                end
+            end
+        end
+        @testset "non-TLS first record surfaces a header error without an alert" begin
+            IP.shutdown!()
+            listener = nothing
+            client_tcp = nothing
+            server_tcp = nothing
+            server_tls = nothing
+            try
+                listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 1)
+                laddr = NC.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
+                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                server_tcp = fetch(accept_task)
+                server_tls = TL.server(server_tcp, _tls_server_config(handshake_timeout_ns = 2_000_000_000))
+                write(client_tcp, UInt8[TL._TLS_RECORD_TYPE_APPLICATION_DATA, 0x03, 0x03, 0x00, 0x00])
+                err = try
+                    TL.handshake!(server_tls)
+                    nothing
+                catch ex
+                    ex
+                end
+                @test err isa TL.TLSError
+                if err isa TL.TLSError
+                    @test err.op == "handshake"
+                    @test err.message == "tls: first record does not look like a TLS handshake"
+                    @test err.cause isa TL._TLSRecordHeaderError
+                end
+
+                NC.set_read_deadline!(client_tcp, time_ns() + 100_000_000)
+                @test_throws NC.DeadlineExceededError read!(client_tcp, Vector{UInt8}(undef, 1))
+            finally
+                _tls_close_quiet!(server_tls)
+                _tls_close_quiet!(server_tcp)
+                _tls_close_quiet!(client_tcp)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
+        @testset "mixed-version failures retain the selected TLS 1.2 record state" begin
+            @testset "server rejects inappropriate TLS fallback signaling" begin
+                IP.shutdown!()
+                listener = nothing
+                client_tcp = nothing
+                server_task = nothing
+                try
+                    listener = NC.listen(NC.loopback_addr(0); backlog = 1)
+                    addr = NC.addr(listener)::NC.SocketAddrV4
+                    server_task = errormonitor(Threads.@spawn begin
+                        server_tcp = NC.accept(listener)
+                        server_tls = TL.server(server_tcp, _tls_server_config(
+                            handshake_timeout_ns = 2_000_000_000,
+                        ))
+                        try
+                            TL.handshake!(server_tls)
+                            return nothing
+                        catch ex
+                            return ex
+                        finally
+                            _tls_close_quiet!(server_tls)
+                        end
+                    end)
+
+                    client_tcp = NC.connect(addr)
+                    hello = TL._tls_auto_client_hello(TL.Config(
+                        verify_peer = false,
+                        server_name = "localhost",
+                    ))
+                    hello.supported_versions = UInt16[TL.TLS1_2_VERSION]
+                    push!(hello.cipher_suites, TL._TLS_FALLBACK_SCSV)
+                    TL._tls_write_tls_plaintext!(
+                        client_tcp,
+                        TL._TLS_RECORD_TYPE_HANDSHAKE,
+                        TL._marshal_client_hello(hello),
+                        TL._TLS_LEGACY_RECORD_VERSION,
+                    )
+                    header, payload = _tls_public_read_record(client_tcp)
+
+                    @test _tls_wait_task_done(server_task, 2.0) != :timed_out
+                    err = fetch(server_task)
+                    @test err isa TL.TLSError
+                    if err isa TL.TLSError
+                        @test err.cause isa TL._TLSAlertError
+                        if err.cause isa TL._TLSAlertError
+                            @test (err.cause::TL._TLSAlertError).alert == TL._TLS_ALERT_INAPPROPRIATE_FALLBACK
+                        end
+                    end
+                    @test header[1] == TL._TLS_RECORD_TYPE_ALERT
+                    @test payload == UInt8[
+                        TL._TLS_ALERT_LEVEL_FATAL,
+                        TL._TLS_ALERT_INAPPROPRIATE_FALLBACK,
+                    ]
+
+                    tls12_only = _tls_server_config(
+                        min_version = TL.TLS1_2_VERSION,
+                        max_version = TL.TLS1_2_VERSION,
+                    )
+                    @test TL._tls_check_inappropriate_fallback!(
+                        tls12_only,
+                        hello,
+                        TL.TLS1_2_VERSION,
+                    ) === nothing
+                finally
+                    _tls_close_quiet!(client_tcp)
+                    _tls_close_quiet!(listener)
+                    server_task isa Task && !istaskdone(server_task) && wait(server_task)
+                    IP.shutdown!()
+                end
+            end
+
+            @testset "client pre-CCS failure sends a plaintext alert from TLS 1.2 state" begin
+                IP.shutdown!()
+                listener = nothing
+                client_tls = nothing
+                server_task = nothing
+                try
+                    listener = NC.listen(NC.loopback_addr(0); backlog = 1)
+                    addr = NC.addr(listener)::NC.SocketAddrV4
+                    server_task = errormonitor(Threads.@spawn begin
+                        server_tcp = NC.accept(listener)
+                        try
+                            record = UInt8[]
+                            TL._tls_read_wire_record!(
+                                server_tcp,
+                                record,
+                                TL._TLS12_MAX_CIPHERTEXT,
+                                UInt16(0),
+                            )
+                            client_hello = TL._unmarshal_client_hello(copy(@view record[6:end]))
+                            client_hello === nothing && error("failed to parse mixed ClientHello")
+                            server_hello = TL._ServerHelloMsg()
+                            server_hello.vers = TL.TLS1_2_VERSION
+                            server_hello.random = fill(UInt8(0x44), 32)
+                            server_hello.session_id = copy(client_hello.session_id)
+                            server_hello.cipher_suite = UInt16(0xffff)
+                            raw_server_hello = TL._marshal_server_hello(server_hello)
+                            TL._tls_write_tls_plaintext!(
+                                server_tcp,
+                                TL._TLS_RECORD_TYPE_HANDSHAKE,
+                                raw_server_hello,
+                                TL.TLS1_2_VERSION,
+                            )
+                            return _tls_public_read_record(server_tcp)
+                        finally
+                            _tls_close_quiet!(server_tcp)
+                        end
+                    end)
+
+                    client_tcp = NC.connect(addr)
+                    client_tls = TL.client(client_tcp, TL.Config(
+                        verify_peer = false,
+                        server_name = "localhost",
+                        handshake_timeout_ns = 2_000_000_000,
+                    ))
+                    displaced_state = TL._native_tls13_state(client_tls)
+                    err = try
+                        TL.handshake!(client_tls)
+                        nothing
+                    catch ex
+                        ex
+                    end
+                    @test err isa TL.TLSError
+                    if err isa TL.TLSError
+                        @test err.cause isa TL._TLSAlertError
+                        if err.cause isa TL._TLSAlertError
+                            @test (err.cause::TL._TLSAlertError).alert == TL._TLS_ALERT_HANDSHAKE_FAILURE
+                        end
+                    end
+                    @test client_tls.native_state isa TL._TLS12NativeState
+                    @test displaced_state.version == UInt16(0)
+                    @test isempty(displaced_state.record_buffer)
+
+                    @test _tls_wait_task_done(server_task, 2.0) != :timed_out
+                    header, payload = fetch(server_task)
+                    @test header[1] == TL._TLS_RECORD_TYPE_ALERT
+                    @test header[2:3] == UInt8[0x03, 0x03]
+                    @test payload == UInt8[TL._TLS_ALERT_LEVEL_FATAL, TL._TLS_ALERT_HANDSHAKE_FAILURE]
+                finally
+                    _tls_close_quiet!(client_tls)
+                    _tls_close_quiet!(listener)
+                    server_task isa Task && !istaskdone(server_task) && wait(server_task)
+                    IP.shutdown!()
+                end
+            end
+
+            @testset "server pre-CCS failure sends a plaintext alert from TLS 1.2 state" begin
+                IP.shutdown!()
+                listener = nothing
+                client_tcp = nothing
+                server_tls_ref = Ref{Union{Nothing, TL.Conn}}(nothing)
+                displaced_ref = Ref{Union{Nothing, TL._TLS13NativeClientState}}(nothing)
+                server_task = nothing
+                try
+                    listener = NC.listen(NC.loopback_addr(0); backlog = 1)
+                    addr = NC.addr(listener)::NC.SocketAddrV4
+                    server_task = errormonitor(Threads.@spawn begin
+                        server_tcp = NC.accept(listener)
+                        server_tls = TL.server(server_tcp, _tls_server_config(
+                            handshake_timeout_ns = 2_000_000_000,
+                        ))
+                        server_tls_ref[] = server_tls
+                        displaced_ref[] = TL._native_tls13_state(server_tls)
+                        try
+                            TL.handshake!(server_tls)
+                            return nothing
+                        catch ex
+                            return ex
+                        end
+                    end)
+
+                    client_tcp = NC.connect(addr)
+                    hello = TL._tls_auto_client_hello(TL.Config(
+                        verify_peer = false,
+                        server_name = "localhost",
+                    ))
+                    hello.supported_versions = UInt16[TL.TLS1_2_VERSION]
+                    hello.compression_methods = UInt8[0x01]
+                    TL._tls_write_tls_plaintext!(
+                        client_tcp,
+                        TL._TLS_RECORD_TYPE_HANDSHAKE,
+                        TL._marshal_client_hello(hello),
+                        TL._TLS_LEGACY_RECORD_VERSION,
+                    )
+                    header, payload = _tls_public_read_record(client_tcp)
+
+                    @test _tls_wait_task_done(server_task, 2.0) != :timed_out
+                    err = fetch(server_task)
+                    @test err isa TL.TLSError
+                    if err isa TL.TLSError
+                        @test err.cause isa TL._TLSAlertError
+                        if err.cause isa TL._TLSAlertError
+                            @test (err.cause::TL._TLSAlertError).alert == TL._TLS_ALERT_ILLEGAL_PARAMETER
+                        end
+                    end
+                    server_tls = server_tls_ref[]
+                    @test server_tls isa TL.Conn
+                    if server_tls isa TL.Conn
+                        @test server_tls.native_state isa TL._TLS12NativeState
+                    end
+                    displaced_state = displaced_ref[]
+                    @test displaced_state isa TL._TLS13NativeClientState
+                    if displaced_state isa TL._TLS13NativeClientState
+                        @test displaced_state.version == UInt16(0)
+                        @test isempty(displaced_state.record_buffer)
+                    end
+                    @test header[1] == TL._TLS_RECORD_TYPE_ALERT
+                    @test header[2:3] == UInt8[0x03, 0x03]
+                    @test payload == UInt8[TL._TLS_ALERT_LEVEL_FATAL, TL._TLS_ALERT_ILLEGAL_PARAMETER]
+                finally
+                    _tls_close_quiet!(server_tls_ref[])
+                    _tls_close_quiet!(client_tcp)
+                    _tls_close_quiet!(listener)
+                    server_task isa Task && !istaskdone(server_task) && wait(server_task)
+                    IP.shutdown!()
+                end
+            end
+
+            @testset "post-CCS fatal alert uses the installed TLS 1.2 write cipher" begin
+                IP.shutdown!()
+                listener = nothing
+                client_tls = nothing
+                server_tcp = nothing
+                peer_state = TL._TLS12NativeState()
+                try
+                    listener = NC.listen(NC.loopback_addr(0); backlog = 1)
+                    addr = NC.addr(listener)::NC.SocketAddrV4
+                    accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                    client_tcp = NC.connect(addr)
+                    @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                    server_tcp = fetch(accept_task)
+                    client_tls = TL.client(client_tcp, TL.Config(
+                        verify_peer = false,
+                        server_name = "localhost",
+                    ))
+                    displaced_state = TL._native_tls13_state(client_tls)
+                    displaced_state.version = TL.TLS1_2_VERSION
+                    append!(displaced_state.record_buffer, UInt8[0x71, 0x72])
+                    state12 = TL._activate_native_tls12_state!(client_tls, displaced_state)
+                    @test client_tls.native_state === state12
+                    @test state12.record_buffer == UInt8[0x71, 0x72]
+                    @test isempty(displaced_state.record_buffer)
+
+                    key = UInt8[UInt8(0x20 + i) for i in 0:15]
+                    iv = UInt8[0xa0, 0xa1, 0xa2, 0xa3]
+                    TL._tls12_set_write_cipher!(
+                        state12,
+                        TL._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+                        key,
+                        iv,
+                    )
+                    TL._tls12_set_read_cipher!(
+                        peer_state,
+                        TL._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+                        key,
+                        iv,
+                    )
+                    TL._native_auto_try_write_fatal_alert!(client_tls, TL._TLS_ALERT_BAD_RECORD_MAC)
+                    err = try
+                        TL._tls12_read_record!(server_tcp, peer_state)
+                        nothing
+                    catch ex
+                        ex
+                    end
+                    @test err isa TL._TLSAlertError
+                    if err isa TL._TLSAlertError
+                        @test err.from_peer
+                        @test err.alert == TL._TLS_ALERT_BAD_RECORD_MAC
+                    end
+                    @test (state12.write_cipher::TL._TLS12RecordCipherState).seq == UInt64(1)
+                finally
+                    TL._securezero_tls12_native_state!(peer_state)
+                    _tls_close_quiet!(client_tls)
+                    _tls_close_quiet!(server_tcp)
+                    _tls_close_quiet!(listener)
+                    IP.shutdown!()
+                end
+            end
+        end
+
         @testset "mixed-version native client negotiates TLS 1.2 with an exact TLS 1.2 server" begin
             IP.shutdown!()
             listener = nothing
@@ -909,6 +1429,7 @@ isdefined(@__MODULE__, :_RESEAU_TLS_TEST_UTILS_LOADED) || include("tls_test_util
                 if write_err isa TL.TLSError
                     @test write_err.message == "tls: protocol is shutdown"
                 end
+                @test_throws TL.TLSError write(client, UInt8[])
                 TL.set_read_deadline!(server, time_ns() + 1_000_000_000)
                 @test eof(server)
                 @test_throws EOFError read!(server, Vector{UInt8}(undef, 1))
@@ -1154,6 +1675,7 @@ isdefined(@__MODULE__, :_RESEAU_TLS_TEST_UTILS_LOADED) || include("tls_test_util
             end
         end
         @testset "handshake timeout surfaces TLSHandshakeTimeoutError" begin
+            @test TL._deadline_after_ns(typemax(Int64)) == typemax(Int64)
             IP.shutdown!()
             listener = nothing
             client_tcp = nothing
@@ -1197,6 +1719,67 @@ isdefined(@__MODULE__, :_RESEAU_TLS_TEST_UTILS_LOADED) || include("tls_test_util
                 stalled_peer = fetch(accept_task)
             finally
                 isready(release_peer) || put!(release_peer, nothing)
+                _tls_close_quiet!(stalled_peer)
+                _tls_close_quiet!(client_tcp)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
+        @testset "earlier transport deadline retains i/o timeout identity" begin
+            IP.shutdown!()
+            listener = nothing
+            client_tcp = nothing
+            stalled_peer = nothing
+            client_tls = nothing
+            accepted = Channel{Nothing}(1)
+            release_peer = Channel{Nothing}(1)
+            try
+                listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+                laddr = NC.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn begin
+                    conn = NC.accept(listener)
+                    put!(accepted, nothing)
+                    take!(release_peer)
+                    return conn
+                end)
+                client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
+                accepted_status = IP.timedwait(() -> isready(accepted), 2.0; pollint = 0.001)
+                @test accepted_status != :timed_out
+                accepted_status == :timed_out || take!(accepted)
+                client_tls = TL.client(client_tcp, TL.Config(
+                    verify_peer = false,
+                    server_name = "localhost",
+                    handshake_timeout_ns = 2_000_000_000,
+                ))
+                TL.set_read_deadline!(client_tls, time_ns() + 100_000_000)
+                TL.set_write_deadline!(client_tls, time_ns() + 2_500_000_000)
+                pfd = client_tls.tcp.fd.pfd
+                pre_read_ns = @atomic :acquire pfd.pd.rd_ns
+                pre_write_ns = @atomic :acquire pfd.pd.wd_ns
+                err = try
+                    TL.handshake!(client_tls)
+                    nothing
+                catch ex
+                    ex
+                end
+                @test err isa TL.TLSError
+                @test !(err isa TL.TLSHandshakeTimeoutError)
+                if err isa TL.TLSError
+                    @test err.message == "i/o timeout"
+                    @test err.cause isa TL.DeadlineExceededError
+                end
+                @test pre_read_ns > 0
+                @test (@atomic :acquire pfd.pd.rd_ns) < 0
+                @test (@atomic :acquire pfd.pd.wd_ns) == pre_write_ns
+                _tls_close_quiet!(client_tls)
+                client_tls = nothing
+                client_tcp = nothing
+                isready(release_peer) || put!(release_peer, nothing)
+                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                stalled_peer = fetch(accept_task)
+            finally
+                isready(release_peer) || put!(release_peer, nothing)
+                _tls_close_quiet!(client_tls)
                 _tls_close_quiet!(stalled_peer)
                 _tls_close_quiet!(client_tcp)
                 _tls_close_quiet!(listener)
@@ -1276,7 +1859,7 @@ isdefined(@__MODULE__, :_RESEAU_TLS_TEST_UTILS_LOADED) || include("tls_test_util
                 cfg = TL.Config(
                     verify_peer = false,
                     server_name = "localhost",
-                    handshake_timeout_ns = 0,
+                    handshake_timeout_ns = 10_000_000_000,
                 )
                 connect_task = errormonitor(Threads.@spawn begin
                     try
@@ -1309,8 +1892,10 @@ isdefined(@__MODULE__, :_RESEAU_TLS_TEST_UTILS_LOADED) || include("tls_test_util
                     fetch(accept_task)
                 end
                 @test err isa TL.TLSError
+                @test !(err isa TL.TLSHandshakeTimeoutError)
                 if err isa TL.TLSError
                     @test err.message == "i/o timeout"
+                    @test err.cause isa TL.DeadlineExceededError
                 end
             finally
                 isready(release_peer) || put!(release_peer, nothing)
@@ -1342,6 +1927,10 @@ isdefined(@__MODULE__, :_RESEAU_TLS_TEST_UTILS_LOADED) || include("tls_test_util
                 @test_throws TL.TLSError TL.handshake!(client)
                 @test_throws TL.TLSError read!(client, Vector{UInt8}(undef, 1))
                 @test_throws TL.TLSError write(client, UInt8[0x41])
+                @test_throws TL.TLSError read(client, 0)
+                @test_throws TL.TLSError read!(client, UInt8[])
+                @test_throws TL.TLSError readbytes!(client, UInt8[], 0)
+                @test_throws TL.TLSError write(client, UInt8[])
             finally
                 _tls_close_quiet!(server)
                 _tls_close_quiet!(client)

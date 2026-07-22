@@ -544,7 +544,7 @@ mutable struct Conn <: IO
     @atomic handshake_complete::Bool
     @atomic closed::Bool
     @atomic active_version::UInt16
-    handshake_error::Union{Nothing, TLSError, TLSHandshakeTimeoutError}
+    handshake_error::Union{Nothing, TLSError, TLSHandshakeTimeoutError, EOFError}
     write_permanent_error::Union{Nothing, TLSError}
     negotiated_version::String
     negotiated_alpn::Union{Nothing, String}
@@ -832,6 +832,19 @@ function _tls_mutual_supported_version(config::Config, peer_versions::AbstractVe
         in(version, peer_versions) && return version
     end
     _tls_fail(_TLS_ALERT_PROTOCOL_VERSION, "tls: peer offered only unsupported native TLS versions")
+end
+
+function _tls_check_inappropriate_fallback!(
+    config::Config,
+    client_hello::_ClientHelloMsg,
+    negotiated_version::UInt16,
+)::Nothing
+    in(_TLS_FALLBACK_SCSV, client_hello.cipher_suites) || return nothing
+    supported_versions = _native_supported_versions(config)
+    isempty(supported_versions) && return nothing
+    negotiated_version < first(supported_versions) &&
+        _tls_fail(_TLS_ALERT_INAPPROPRIATE_FALLBACK, "tls: client using inappropriate protocol fallback")
+    return nothing
 end
 
 function _tls_pick_client_version(config::Config, server_hello::_ServerHelloMsg)::UInt16
@@ -1230,6 +1243,7 @@ end
 # the exact TLS 1.2 record/handshake code can continue from the same stream.
 function _tls12_copy_initial_state(state13::_TLS13NativeClientState)::_TLS12NativeState
     state12 = _TLS12NativeState()
+    state12.version = state13.version
     state12.record_buffer = copy(state13.record_buffer)
     state12.handshake_buffer = copy(state13.handshake_buffer)
     state12.handshake_buffer_pos = state13.handshake_buffer_pos
@@ -1237,6 +1251,20 @@ function _tls12_copy_initial_state(state13::_TLS13NativeClientState)::_TLS12Nati
     state12.plaintext_buffer_pos = state13.plaintext_buffer_pos
     state12.peer_close_notify = state13.peer_close_notify
     state12.sent_close_notify = state13.sent_close_notify
+    return state12
+end
+
+function _activate_native_tls12_state!(
+        conn::Conn,
+        state13::_TLS13NativeClientState,
+    )::_TLS12NativeState
+    conn.native_state === state13 || throw(ArgumentError("tls: stale mixed-version native state transition"))
+    state12 = _tls12_copy_initial_state(state13)
+    # Commit the selected-version state before any TLS 1.2 continuation can
+    # install keys or fail. The connection now owns state12 on both success and
+    # failure, allowing the outer alert path to use the live write cipher.
+    conn.native_state = state12
+    _securezero_tls13_native_client_state!(state13)
     return state12
 end
 
@@ -1290,6 +1318,9 @@ end
 
 function _finish_native_tls13_client_handshake!(conn::Conn, state::_TLS13ClientHandshakeState, cache_key::String)::Nothing
     native_state = _native_tls13_state(conn)
+    # Publish before the conn-level release below so a reader that clears
+    # `_ensure_handshake!` also observes the record layer as post-handshake.
+    native_state.handshake_complete = true
     if state.using_psk
         _tls_session_cache_put!(conn.config._client_session_cache, cache_key, nothing, _securezero_tls13_client_session!)
     end
@@ -1329,6 +1360,7 @@ end
 
 function _finish_native_tls12_client_handshake!(conn::Conn, state::_TLS12ClientHandshakeState)::Nothing
     native_state = _native_tls12_state(conn)
+    native_state.handshake_complete = true
     native_state.did_resume = state.did_resume
     native_state.curve_id = state.curve_id
     native_state.cipher_suite = state.cipher_suite
@@ -1345,6 +1377,7 @@ end
 
 function _finish_native_tls13_server_handshake!(conn::Conn, state::_TLS13ServerHandshakeState)::Nothing
     native_state = _native_tls13_state(conn)
+    native_state.handshake_complete = true
     native_state.session_cipher_suite = state.cipher_suite
     native_state.session_alpn = state.selected_alpn
     native_state.did_resume = state.using_psk
@@ -1363,6 +1396,7 @@ end
 
 function _finish_native_tls12_server_handshake!(conn::Conn, state::_TLS12ServerHandshakeState)::Nothing
     native_state = _native_tls12_state(conn)
+    native_state.handshake_complete = true
     native_state.did_resume = state.using_resumption
     native_state.curve_id = state.curve_id
     native_state.cipher_suite = state.cipher_suite
@@ -1396,12 +1430,15 @@ function _native_tls_auto_client_handshake!(conn::Conn)::Nothing
     try
         _write_client_hello!(state13, io13)
         raw_server_hello = _read_handshake_bytes!(io13)
-        server_hello = _unmarshal_server_hello(raw_server_hello)
-        server_hello === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: native mixed-version client expected ServerHello")
+        parsed_server_hello = _unmarshal_handshake_message_or_fail(raw_server_hello)
+        parsed_server_hello isa _ServerHelloMsg ||
+            _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: native mixed-version client expected ServerHello")
+        server_hello = parsed_server_hello::_ServerHelloMsg
         state13.server_hello_raw = raw_server_hello
         state13.server_hello = server_hello
         state13.have_server_hello = true
         negotiated_version = _tls_pick_client_version(conn.config, state13.server_hello)
+        native_state13.version = negotiated_version
         if negotiated_version == TLS1_3_VERSION
             _check_server_hello_or_hrr!(state13)
             _client_handshake_tls13_after_server_hello!(state13, io13)
@@ -1416,18 +1453,13 @@ function _native_tls_auto_client_handshake!(conn::Conn)::Nothing
         client_hello12 = _unmarshal_client_hello(raw_client_hello)
         client_hello12 === nothing && throw(ArgumentError("tls: malformed native mixed-version ClientHello"))
         state12 = _TLS12ClientHandshakeState(client_hello12, session12)
-        state12_native = _tls12_copy_initial_state(native_state13)
+        state12_native = _activate_native_tls12_state!(conn, native_state13)
         io12 = _TLS12HandshakeRecordIO(conn.tcp, state12_native)
-        installed_state12 = false
         try
             _tls12_set_server_hello!(state12, raw_server_hello)
             _client_handshake_tls12_after_server_hello!(state12, io12, conn.config, raw_client_hello, raw_server_hello, cache_key)
-            conn.native_state = state12_native
-            installed_state12 = true
-            _securezero_tls13_native_client_state!(native_state13)
             _finish_native_tls12_client_handshake!(conn, state12)
         finally
-            installed_state12 || _securezero_tls12_native_state!(state12_native)
             _securezero_tls12_client_handshake_state!(state12)
         end
     finally
@@ -1443,9 +1475,13 @@ function _native_tls_auto_server_handshake!(conn::Conn)::Nothing
     native_state13 = _native_tls13_state(conn)
     io13 = _TLS13HandshakeRecordIO(conn.tcp, native_state13)
     raw_client_hello = _read_handshake_bytes!(io13)
-    client_hello = _unmarshal_client_hello(raw_client_hello)
-    client_hello === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: native mixed-version server expected ClientHello")
+    parsed_client_hello = _unmarshal_handshake_message_or_fail(raw_client_hello)
+    parsed_client_hello isa _ClientHelloMsg ||
+        _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: native mixed-version server expected ClientHello")
+    client_hello = parsed_client_hello::_ClientHelloMsg
     negotiated_version = _tls_mutual_supported_version(conn.config, _tls_client_hello_supported_versions(client_hello))
+    native_state13.version = negotiated_version
+    _tls_check_inappropriate_fallback!(conn.config, client_hello, negotiated_version)
     if negotiated_version == TLS1_3_VERSION
         state13 = _TLS13ServerHandshakeState(conn.config)
         try
@@ -1457,20 +1493,15 @@ function _native_tls_auto_server_handshake!(conn::Conn)::Nothing
         end
         return nothing
     end
-    state12_native = _tls12_copy_initial_state(native_state13)
+    state12_native = _activate_native_tls12_state!(conn, native_state13)
     io12 = _TLS12HandshakeRecordIO(conn.tcp, state12_native)
     state12 = _TLS12ServerHandshakeState(conn.config)
-    installed_state12 = false
     try
         state12.send_downgrade_canary = true
         _tls12_set_client_hello!(state12, raw_client_hello)
         _server_handshake_tls12_after_client_hello!(state12, io12, conn.config, raw_client_hello)
-        conn.native_state = state12_native
-        installed_state12 = true
-        _securezero_tls13_native_client_state!(native_state13)
         _finish_native_tls12_server_handshake!(conn, state12)
     finally
-        installed_state12 || _securezero_tls12_native_state!(state12_native)
         _securezero_tls12_server_handshake_state!(state12)
     end
     return nothing
@@ -1480,6 +1511,18 @@ end
     old_ns < 0 && return old_ns
     old_ns == 0 && return handshake_ns
     return min(old_ns, handshake_ns)
+end
+
+@inline function _deadline_after_ns(timeout_ns::Int64)::Int64
+    now_ns = Int64(time_ns())
+    timeout_ns >= typemax(Int64) - now_ns && return typemax(Int64)
+    return now_ns + timeout_ns
+end
+
+@inline function _handshake_owns_deadline(old_ns::Int64, handshake_ns::Int64)::Bool
+    old_ns == 0 && return true
+    old_ns < 0 && return false
+    return handshake_ns < old_ns
 end
 
 function _with_handshake_deadline(f::F, conn::Conn) where {F}
@@ -1494,13 +1537,22 @@ function _with_handshake_deadline(f::F, conn::Conn) where {F}
     pd = pfd.pd
     old_read_ns = @atomic :acquire pd.rd_ns
     old_write_ns = @atomic :acquire pd.wd_ns
-    handshake_deadline_ns = Int64(time_ns()) + timeout_ns
+    handshake_deadline_ns = _deadline_after_ns(timeout_ns)
     read_deadline_ns = _handshake_effective_deadline(old_read_ns, handshake_deadline_ns)
     write_deadline_ns = _handshake_effective_deadline(old_write_ns, handshake_deadline_ns)
+    handshake_owns_read = _handshake_owns_deadline(old_read_ns, handshake_deadline_ns)
+    handshake_owns_write = _handshake_owns_deadline(old_write_ns, handshake_deadline_ns)
     IOPoll.set_read_deadline!(pfd, read_deadline_ns)
     IOPoll.set_write_deadline!(pfd, write_deadline_ns)
     try
         return f()
+    catch err
+        if err isa _TLSTransportDeadlineError
+            timeout_err = err::_TLSTransportDeadlineError
+            handshake_owned = timeout_err.direction == _TLS_IO_READ ? handshake_owns_read : handshake_owns_write
+            throw(_TLSHandshakeDeadlineError(handshake_owned, timeout_err.cause))
+        end
+        rethrow()
     finally
         try
             IOPoll.set_read_deadline!(pfd, old_read_ns)
@@ -1596,17 +1648,47 @@ function handshake!(conn::Conn)
             end
         catch err
             ex = _as_exception(err)
-            if ex isa IOPoll.DeadlineExceededError
-                if conn.config.handshake_timeout_ns > 0
+            if ex isa _TLSHandshakeDeadlineError
+                deadline_err = ex::_TLSHandshakeDeadlineError
+                if deadline_err.handshake_owned
                     handshake_error = TLSHandshakeTimeoutError(conn.config.handshake_timeout_ns)
                     conn.handshake_error = handshake_error
                     throw(handshake_error)
                 end
+                handshake_error = TLSError("handshake", Int32(0), "i/o timeout", deadline_err.cause)
+                conn.handshake_error = handshake_error
+                throw(handshake_error)
+            end
+            if ex isa _TLSTransportDeadlineError
+                deadline_err = ex::_TLSTransportDeadlineError
+                handshake_error = TLSError("handshake", Int32(0), "i/o timeout", deadline_err.cause)
+                conn.handshake_error = handshake_error
+                throw(handshake_error)
+            end
+            if ex isa IOPoll.DeadlineExceededError
                 handshake_error = TLSError("handshake", Int32(0), "i/o timeout", ex)
                 conn.handshake_error = handshake_error
                 throw(handshake_error)
             end
             if ex isa TLSError
+                conn.handshake_error = ex
+                throw(ex)
+            end
+            if ex isa _TLSUnexpectedEOFError
+                handshake_error = TLSError("handshake", Int32(0), "unexpected EOF", ex)
+                conn.handshake_error = handshake_error
+                throw(handshake_error)
+            end
+            if ex isa _TLSRecordHeaderError
+                record_error = ex::_TLSRecordHeaderError
+                handshake_error = TLSError("handshake", Int32(0), record_error.message, record_error)
+                conn.handshake_error = handshake_error
+                throw(handshake_error)
+            end
+            if ex isa EOFError
+                # Clean peer close at a record boundary surfaces as EOFError
+                # (the docstring contract; Go returns io.EOF here), unlike a
+                # mid-record close which arrives as `_TLSUnexpectedEOFError`.
                 conn.handshake_error = ex
                 throw(ex)
             end
@@ -1725,9 +1807,11 @@ end
 end
 
 function _read_some!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
-    nbytes == 0 && return 0
     _ensure_open!(conn, "read")
     _ensure_handshake!(conn)
+    # Match Go's tls.Conn.Read ordering: an empty read still performs the
+    # handshake for its side effect, but never waits for application data.
+    nbytes == 0 && return 0
     lock(conn.read_lock)
     try
         _ensure_open!(conn, "read")
@@ -1742,6 +1826,11 @@ function _read_some!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
         ex = _as_exception(err)
         ex isa EOFError && rethrow()
         ex isa TLSError && rethrow()
+        if ex isa _TLSTransportDeadlineError
+            throw(TLSError("read", Int32(0), "i/o timeout", (ex::_TLSTransportDeadlineError).cause))
+        end
+        ex isa _TLSUnexpectedEOFError && throw(TLSError("read", Int32(0), "unexpected EOF", ex))
+        ex isa _TLSRecordHeaderError && throw(TLSError("read", Int32(0), (ex::_TLSRecordHeaderError).message, ex))
         if ex isa IOPoll.NetClosingError || _is_closed(conn)
             throw(_closed_error("read", ex))
         end
@@ -1805,6 +1894,11 @@ function _peek_eof(conn::Conn)::Bool
     catch err
         ex = _as_exception(err)
         ex isa TLSError && rethrow()
+        if ex isa _TLSTransportDeadlineError
+            throw(TLSError("peek", Int32(0), "i/o timeout", (ex::_TLSTransportDeadlineError).cause))
+        end
+        ex isa _TLSUnexpectedEOFError && throw(TLSError("peek", Int32(0), "unexpected EOF", ex))
+        ex isa _TLSRecordHeaderError && throw(TLSError("peek", Int32(0), (ex::_TLSRecordHeaderError).message, ex))
         if ex isa IOPoll.NetClosingError || _is_closed(conn)
             throw(_closed_error("peek", ex))
         end
@@ -1838,6 +1932,10 @@ Read exactly `nbytes` of decrypted application data or throw `EOFError`.
 """
 function Base.unsafe_read(conn::Conn, ptr::Ptr{UInt8}, nbytes::UInt)
     remaining = Int(nbytes)
+    if remaining == 0
+        _read_some!(conn, ptr, 0)
+        return nothing
+    end
     offset = 0
     while remaining > 0
         n = _read_some!(conn, ptr + offset, remaining)
@@ -1945,7 +2043,7 @@ function Base.readbytes!(conn::Conn, buf::MutableByteBuffer, nb::Integer = lengt
     Base.require_one_based_indexing(buf)
     requested = Int(nb)
     requested < 0 && throw(ArgumentError("nb must be >= 0"))
-    requested == 0 && return 0
+    requested == 0 && return _read_some!(conn, Ptr{UInt8}(C_NULL), 0)
     return all ? _readbytes_all!(conn, buf, requested) : _readbytes_some!(conn, buf, requested)
 end
 
@@ -2050,7 +2148,7 @@ _write_buffer(buf::ByteMemory, nbytes::Int) = buf
 function _native_tls13_write_alert!(conn::Conn, alert_level::UInt8, alert_desc::UInt8)::Nothing
     state = _native_tls13_state(conn)
     state.sent_close_notify && return nothing
-    _tls13_write_record!(conn.tcp, state.write_cipher, _TLS_RECORD_TYPE_ALERT, UInt8[alert_level, alert_desc])
+    _tls13_write_record!(conn.tcp, state, _TLS_RECORD_TYPE_ALERT, UInt8[alert_level, alert_desc])
     if alert_desc == _TLS_ALERT_CLOSE_NOTIFY
         state.sent_close_notify = true
     end
@@ -2070,7 +2168,7 @@ end
 function _native_tls12_write_alert!(conn::Conn, alert_level::UInt8, alert_desc::UInt8)::Nothing
     state = _native_tls12_state(conn)
     state.sent_close_notify && return nothing
-    _tls12_write_record!(conn.tcp, state.write_cipher, _TLS_RECORD_TYPE_ALERT, UInt8[alert_level, alert_desc])
+    _tls12_write_record!(conn.tcp, state, _TLS_RECORD_TYPE_ALERT, UInt8[alert_level, alert_desc])
     if alert_desc == _TLS_ALERT_CLOSE_NOTIFY
         state.sent_close_notify = true
     end
@@ -2090,9 +2188,24 @@ end
 function _native_auto_try_write_fatal_alert!(conn::Conn, alert_desc::UInt8)::Nothing
     _is_closed(conn) && return nothing
     !_is_tls_auto_policy(conn.policy) && return nothing
-    conn.native_state === nothing && return nothing
+    native_state = conn.native_state
+    native_state === nothing && return nothing
     try
-        _tls_write_tls_plaintext!(conn.tcp, _TLS_RECORD_TYPE_ALERT, UInt8[_TLS_ALERT_LEVEL_FATAL, alert_desc], TLS1_2_VERSION)
+        if native_state isa _TLS13NativeClientState
+            _tls13_write_record!(
+                conn.tcp,
+                native_state::_TLS13NativeClientState,
+                _TLS_RECORD_TYPE_ALERT,
+                UInt8[_TLS_ALERT_LEVEL_FATAL, alert_desc],
+            )
+        elseif native_state isa _TLS12NativeState
+            _tls12_write_record!(
+                conn.tcp,
+                native_state::_TLS12NativeState,
+                _TLS_RECORD_TYPE_ALERT,
+                UInt8[_TLS_ALERT_LEVEL_FATAL, alert_desc],
+            )
+        end
     catch
     end
     return nothing
@@ -2104,7 +2217,7 @@ function _native_tls13_write_application!(conn::Conn, ptr::Ptr{UInt8}, nbytes::I
     while total < nbytes
         chunk_len = min(nbytes - total, _TLS13_MAX_PLAINTEXT)
         _tls13_maybe_rekey_write!(conn.tcp, state)
-        _tls13_write_record!(conn.tcp, state.write_cipher, _TLS_RECORD_TYPE_APPLICATION_DATA, ptr + total, chunk_len)
+        _tls13_write_record!(conn.tcp, state, _TLS_RECORD_TYPE_APPLICATION_DATA, ptr + total, chunk_len)
         total += chunk_len
     end
     return total
@@ -2115,7 +2228,7 @@ function _native_tls12_write_application!(conn::Conn, ptr::Ptr{UInt8}, nbytes::I
     total = 0
     while total < nbytes
         chunk_len = min(nbytes - total, _TLS12_MAX_PLAINTEXT)
-        _tls12_write_record!(conn.tcp, state.write_cipher, _TLS_RECORD_TYPE_APPLICATION_DATA, ptr + total, chunk_len)
+        _tls12_write_record!(conn.tcp, state, _TLS_RECORD_TYPE_APPLICATION_DATA, ptr + total, chunk_len)
         total += chunk_len
     end
     return total
@@ -2123,13 +2236,15 @@ end
 
 function Base.unsafe_write(conn::Conn, ptr::Ptr{UInt8}, nbytes::UInt)
     nbytes_int = Int(nbytes)
-    nbytes_int == 0 && return 0
     _ensure_open!(conn, "write")
     _ensure_handshake!(conn)
     lock(conn.write_lock)
     try
         _ensure_open!(conn, "write")
         conn.write_permanent_error === nothing || throw(conn.write_permanent_error::TLSError)
+        # As in Go's tls.Conn.Write, empty writes still drive the handshake and
+        # observe permanent write-side errors, but emit no application record.
+        nbytes_int == 0 && return 0
         if _active_tls13(conn)
             return _native_tls13_write_application!(conn, ptr, nbytes_int)
         end
@@ -2139,8 +2254,9 @@ function Base.unsafe_write(conn::Conn, ptr::Ptr{UInt8}, nbytes::UInt)
         throw(ArgumentError("tls: unsupported connection mode"))
     catch err
         ex = _as_exception(err)
-        if ex isa IOPoll.DeadlineExceededError
-            timeout_err = TLSError("write", Int32(0), "i/o timeout", ex)
+        if ex isa _TLSTransportDeadlineError || ex isa IOPoll.DeadlineExceededError
+            cause = ex isa _TLSTransportDeadlineError ? (ex::_TLSTransportDeadlineError).cause : ex
+            timeout_err = TLSError("write", Int32(0), "i/o timeout", cause)
             if conn.write_permanent_error === nothing
                 conn.write_permanent_error = timeout_err
             end
@@ -2223,7 +2339,7 @@ function _with_close_write_deadline_cap(f::F, conn::Conn) where {F}
     pfd = conn.tcp.fd.pfd
     pd = pfd.pd
     old_write_ns = @atomic :acquire pd.wd_ns
-    close_deadline_ns = Int64(time_ns()) + Int64(5_000_000_000)
+    close_deadline_ns = _deadline_after_ns(Int64(5_000_000_000))
     write_deadline_ns = _handshake_effective_deadline(old_write_ns, close_deadline_ns)
     IOPoll.set_write_deadline!(pfd, write_deadline_ns)
     try
@@ -2645,8 +2761,8 @@ end
 end
 
 @inline _show_role(conn::Conn) = conn.is_server ? "server" : "client"
-@inline _show_state(listener::Listener) = listener.listener.fd.pfd.sysfd >= 0 ? "active" : "closed"
-@inline _show_closed(conn::Conn) = _is_closed(conn) || conn.native_state === nothing || conn.tcp.fd.pfd.sysfd < 0
+@inline _show_state(listener::Listener) = IOPoll._is_valid_fd(listener.listener.fd.pfd.sysfd) ? "active" : "closed"
+@inline _show_closed(conn::Conn) = _is_closed(conn) || conn.native_state === nothing || !IOPoll._is_valid_fd(conn.tcp.fd.pfd.sysfd)
 
 function Base.show(io::IO, conn::Conn)
     print(io, "TLS.Conn(")

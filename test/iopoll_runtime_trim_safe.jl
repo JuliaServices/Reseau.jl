@@ -4,10 +4,10 @@ const IP = Reseau.IOPoll
 const SO = Reseau.SocketOps
 const _TRIM_EWOULDBLOCK = @static isdefined(Base.Libc, :EWOULDBLOCK) ? Int32(getfield(Base.Libc, :EWOULDBLOCK)) : Int32(Base.Libc.EAGAIN)
 
-function _accept_with_retry(listener::Cint)::Cint
+function _accept_with_retry(listener::SO.SocketFD)::SO.SocketFD
     for _ in 1:5000
         accepted, _, errno = SO.try_accept_socket(listener)
-        accepted != -1 && return accepted
+        SO.is_valid_socket(accepted) && return accepted
         errno == Int32(Base.Libc.EAGAIN) && (yield(); continue)
         errno == _TRIM_EWOULDBLOCK && (yield(); continue)
         errno == Int32(Base.Libc.EINTR) && continue
@@ -16,10 +16,10 @@ function _accept_with_retry(listener::Cint)::Cint
     throw(ArgumentError("timed out waiting for accepted socket"))
 end
 
-function _stream_pair()::Tuple{Cint, Cint}
-    listener = Cint(-1)
-    client = Cint(-1)
-    accepted = Cint(-1)
+function _stream_pair()::Tuple{SO.SocketFD, SO.SocketFD}
+    listener = SO.INVALID_SOCKET
+    client = SO.INVALID_SOCKET
+    accepted = SO.INVALID_SOCKET
     try
         listener = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
         SO.set_sockopt_int(listener, SO.SOL_SOCKET, SO.SO_REUSEADDR, 1)
@@ -38,23 +38,23 @@ function _stream_pair()::Tuple{Cint, Cint}
         accepted = _accept_with_retry(listener)
         stream_client = client
         stream_server = accepted
-        client = Cint(-1)
-        accepted = Cint(-1)
+        client = SO.INVALID_SOCKET
+        accepted = SO.INVALID_SOCKET
         return stream_client, stream_server
     finally
-        accepted >= 0 && SO.close_socket_nothrow(accepted)
-        client >= 0 && SO.close_socket_nothrow(client)
-        listener >= 0 && SO.close_socket_nothrow(listener)
+        SO.is_valid_socket(accepted) && SO.close_socket_nothrow(accepted)
+        SO.is_valid_socket(client) && SO.close_socket_nothrow(client)
+        SO.is_valid_socket(listener) && SO.close_socket_nothrow(listener)
     end
 end
 
-function _close_fd(fd::Cint)::Nothing
-    fd < 0 && return nothing
+function _close_fd(fd::SO.SocketFD)::Nothing
+    SO.is_valid_socket(fd) || return nothing
     SO.close_socket_nothrow(fd)
     return nothing
 end
 
-function _write_byte(fd::Cint, b::UInt8)::Nothing
+function _write_byte(fd::SO.SocketFD, b::UInt8)::Nothing
     buf = Ref{UInt8}(b)
     for _ in 1:5000
         n = GC.@preserve buf SO.write_once!(fd, Base.unsafe_convert(Ptr{UInt8}, buf), Csize_t(1))
@@ -71,7 +71,7 @@ end
 function run_iopoll_runtime_trim_sample()::Nothing
     fd0, fd1 = _stream_pair()
     ipfd = IP.FD(fd0)
-    fd0 = Cint(-1)
+    fd0 = SO.INVALID_SOCKET
     try
         IP.register!(ipfd)
         IP.set_read_deadline!(ipfd, Int64(time_ns()) + Int64(50_000_000))
@@ -88,7 +88,7 @@ function run_iopoll_runtime_trim_sample()::Nothing
         nread == 1 || error("expected one-byte iopoll read")
         buf[1] == 0x44 || error("unexpected iopoll read byte")
     finally
-        ipfd.sysfd >= 0 && close(ipfd)
+        IP._is_valid_fd(ipfd.sysfd) && close(ipfd)
         _close_fd(fd0)
         _close_fd(fd1)
     end

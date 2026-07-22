@@ -5,6 +5,10 @@ on:
     tags: ["*"]
   pull_request:
   workflow_dispatch:
+# Least-privilege default token scope for all jobs; the docs job opts into the
+# wider scope it needs via its own job-level permissions block.
+permissions:
+  contents: read
 jobs:
   test:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }} - t${{ matrix.threads }} - ${{ github.event_name }}
@@ -108,6 +112,10 @@ jobs:
             release: "15.0"
     steps:
       - uses: actions/checkout@v6
+        with:
+          # Keep the repository token out of .git/config in the workspace the
+          # FreeBSD VM shares; this job only builds and tests, never pushes.
+          persist-credentials: false
       - uses: vmactions/freebsd-vm@v1
         with:
           release: ${{ matrix.release }}
@@ -124,7 +132,18 @@ jobs:
             export CIRRUS_OS="freebsd"
             export CIRRUS_WORKING_DIR="${PWD}"
             export CIRRUS_REPO_NAME="${GITHUB_REPOSITORY}"
-            sh -c "$(fetch https://raw.githubusercontent.com/ararslan/CirrusCI.jl/master/bin/install.sh -o -)"
+            # Pin the third-party installer to an immutable commit and verify its
+            # checksum before executing, so a compromised CirrusCI.jl master
+            # cannot inject code into this job.
+            CIRRUS_INSTALL_SHA="48cdcde6677896eb1baa3226fd51ac889b830617"
+            CIRRUS_INSTALL_SHA256="243e38fca52d2a2cb06f0515bc44d2684271f839acddf099e3e0107cd1383e47"
+            fetch "https://raw.githubusercontent.com/ararslan/CirrusCI.jl/${CIRRUS_INSTALL_SHA}/bin/install.sh" -o cirrus_install.sh
+            actual_sha256="$(sha256 -q cirrus_install.sh)"
+            if [ "${actual_sha256}" != "${CIRRUS_INSTALL_SHA256}" ]; then
+              echo "CirrusCI.jl install.sh checksum mismatch: ${actual_sha256}" >&2
+              exit 1
+            fi
+            sh cirrus_install.sh
           run: |
             cirrusjl build
             cirrusjl test

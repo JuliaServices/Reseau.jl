@@ -60,6 +60,7 @@ struct _TLSCertificateInfo
     max_path_len::Int
     has_key_usage::Bool
     key_usage::UInt16
+    has_extended_key_usage::Bool
     extended_key_usage::UInt8
     subject_key_id::Vector{UInt8}
     authority_key_id::Vector{UInt8}
@@ -215,7 +216,9 @@ const _ASN1_OID_CURVE_P521 = (
     UInt8(0x2b), UInt8(0x81), UInt8(0x04), UInt8(0x00), UInt8(0x23),
 )
 
+const _TLS_MIN_RSA_CERT_KEY_BITS = 1024
 const _TLS_MAX_RSA_CERT_KEY_BITS = 8192
+const _TLS_MAX_RSA_PUBLIC_EXPONENT = (1 << 31) - 1
 
 const _TLS_KEY_USAGE_DIGITAL_SIGNATURE = UInt16(1) << 0
 const _TLS_KEY_USAGE_KEY_ENCIPHERMENT = UInt16(1) << 2
@@ -429,8 +432,20 @@ end
 
 function _tls_check_rsa_certificate_key_size!(modulus::AbstractVector{UInt8})::Nothing
     bits = _tls_rsa_modulus_bit_length(modulus)
+    bits >= _TLS_MIN_RSA_CERT_KEY_BITS ||
+        throw(ArgumentError("tls: RSA certificate public key is smaller than $(_TLS_MIN_RSA_CERT_KEY_BITS) bits"))
     bits <= _TLS_MAX_RSA_CERT_KEY_BITS ||
         throw(ArgumentError("tls: RSA certificate public key is larger than $(_TLS_MAX_RSA_CERT_KEY_BITS) bits"))
+    return nothing
+end
+
+function _tls_check_rsa_public_exponent!(exponent::Int)::Nothing
+    exponent >= 3 ||
+        throw(ArgumentError("tls: RSA certificate public exponent is smaller than 3"))
+    exponent <= _TLS_MAX_RSA_PUBLIC_EXPONENT ||
+        throw(ArgumentError("tls: RSA certificate public exponent is larger than $(_TLS_MAX_RSA_PUBLIC_EXPONENT)"))
+    isodd(exponent) ||
+        throw(ArgumentError("tls: RSA certificate public exponent is not odd"))
     return nothing
 end
 
@@ -578,6 +593,7 @@ function _tls_parse_subject_public_key_info(bytes::AbstractVector{UInt8}, value_
         key_pos == key_end + 1 || throw(ArgumentError("tls: malformed RSA public key"))
         modulus = _asn1_integer_bytes(key_bytes, modulus_start, modulus_end)
         _tls_check_rsa_certificate_key_size!(modulus)
+        _tls_check_rsa_public_exponent!(_asn1_integer_value(key_bytes, exponent_start, exponent_end))
         exponent = _asn1_integer_bytes(key_bytes, exponent_start, exponent_end)
         return _TLSRSAPublicKey(modulus, exponent)
     elseif _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_ID_EC_PUBLIC_KEY)
@@ -1045,6 +1061,7 @@ function _tls_parse_der_certificate_info(cert_der::AbstractVector{UInt8})::_TLSC
     max_path_len = -1
     has_key_usage = false
     key_usage = UInt16(0)
+    has_extended_key_usage = false
     extended_key_usage = UInt8(0)
     subject_key_id = UInt8[]
     authority_key_id = UInt8[]
@@ -1088,6 +1105,7 @@ function _tls_parse_der_certificate_info(cert_der::AbstractVector{UInt8})::_TLSC
                     has_key_usage = true
                     key_usage = _tls_parse_key_usage(cert_der, octet_start, octet_end)
                 elseif _asn1_oid_equals(cert_der, oid_start, oid_end, _ASN1_OID_EXTENDED_KEY_USAGE)
+                    has_extended_key_usage = true
                     extended_key_usage = _tls_parse_extended_key_usage(cert_der, octet_start, octet_end)
                 elseif _asn1_oid_equals(cert_der, oid_start, oid_end, _ASN1_OID_SUBJECT_KEY_IDENTIFIER)
                     subject_key_id = _tls_parse_subject_key_identifier(cert_der, octet_start, octet_end)
@@ -1126,6 +1144,7 @@ function _tls_parse_der_certificate_info(cert_der::AbstractVector{UInt8})::_TLSC
         max_path_len,
         has_key_usage,
         key_usage,
+        has_extended_key_usage,
         extended_key_usage,
         subject_key_id,
         authority_key_id,

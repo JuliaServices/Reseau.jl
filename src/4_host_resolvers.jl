@@ -436,22 +436,23 @@ end
 
 function _ccall_getaddrinfo(hostname::String, hints::Ref{_AddrInfo}, result_ptr::Ptr{Ptr{_AddrInfo}})::Cint
     null_service = Ptr{UInt8}(C_NULL)
+    # Blocking OS resolution can take seconds; run it GC-safe so a slow lookup
+    # on this adopted worker thread cannot stall a stop-the-world GC elsewhere
+    # in the process.
     return @static if Sys.iswindows()
-        ccall((:getaddrinfo, "Ws2_32"), Cint,
-            (Cstring, Cstring, Ptr{_AddrInfo}, Ptr{Ptr{_AddrInfo}}),
-            hostname,
-            null_service,
-            hints,
-            result_ptr,
-        )
+        @gcsafe_ccall "Ws2_32".getaddrinfo(
+            hostname::Cstring,
+            null_service::Cstring,
+            hints::Ptr{_AddrInfo},
+            result_ptr::Ptr{Ptr{_AddrInfo}},
+        )::Cint
     else
-        ccall(:getaddrinfo, Cint,
-            (Cstring, Cstring, Ptr{_AddrInfo}, Ptr{Ptr{_AddrInfo}}),
-            hostname,
-            null_service,
-            hints,
-            result_ptr,
-        )
+        @gcsafe_ccall getaddrinfo(
+            hostname::Cstring,
+            null_service::Cstring,
+            hints::Ptr{_AddrInfo},
+            result_ptr::Ptr{Ptr{_AddrInfo}},
+        )::Cint
     end
 end
 
@@ -1382,10 +1383,10 @@ function _store_cache_entry_locked!(
     expires_ns = now_ns
     stale_expires_ns = now_ns
     if err === nothing
-        expires_ns += resolver.ttl_ns
-        stale_expires_ns = expires_ns + resolver.stale_ttl_ns
+        expires_ns = IOPoll._saturating_add_ns(now_ns, resolver.ttl_ns)
+        stale_expires_ns = IOPoll._saturating_add_ns(expires_ns, resolver.stale_ttl_ns)
     else
-        expires_ns += resolver.negative_ttl_ns
+        expires_ns = IOPoll._saturating_add_ns(now_ns, resolver.negative_ttl_ns)
         stale_expires_ns = expires_ns
     end
     resolver.entries[key] = _LookupCacheEntry(
@@ -1545,7 +1546,14 @@ lookup_port(resolver::CachingResolver, network::AbstractString, service::Abstrac
 
 @inline function _wildcard_addrs(kind::Symbol, op::Symbol)::Vector{TCP.SocketEndpoint}
     if kind == :tcp && op == :listen
-        return TCP.SocketEndpoint[TCP.any_addr6(0), TCP.any_addr(0)]
+        @static if Sys.isopenbsd() || Sys.isdragonfly()
+            # These kernels do not support IPv4-mapped IPv6 listeners, so a
+            # generic wildcard must prefer IPv4 just as Go's capability probe
+            # does. Explicit tcp6 and explicit [::] requests remain IPv6.
+            return TCP.SocketEndpoint[TCP.any_addr(0), TCP.any_addr6(0)]
+        else
+            return TCP.SocketEndpoint[TCP.any_addr6(0), TCP.any_addr(0)]
+        end
     end
     return TCP.SocketEndpoint[TCP.any_addr(0), TCP.any_addr6(0)]
 end
@@ -1558,21 +1566,23 @@ function _with_port(addr::TCP.SocketAddrV6, port::Int)::TCP.SocketAddrV6
     return TCP.SocketAddrV6(addr.ip, port; scope_id = Int(addr.scope_id))
 end
 
-function _is_self_connect(conn::TCP.Conn)::Bool
-    laddr = TCP.local_addr(conn)
-    raddr = TCP.remote_addr(conn)
-    (laddr === nothing || raddr === nothing) && return true
-    if laddr isa TCP.SocketAddrV4 && raddr isa TCP.SocketAddrV4
-        lv4 = laddr::TCP.SocketAddrV4
-        rv4 = raddr::TCP.SocketAddrV4
-        return lv4.port == rv4.port && lv4.ip == rv4.ip
+@inline function _append_unspecified_fallback!(
+        ips::Vector{TCP.SocketEndpoint},
+    )::Vector{TCP.SocketEndpoint}
+    # Go issue 18806: a host that resolves to exactly the IPv6 unspecified
+    # address (`[::]`) also gets 0.0.0.0 appended, because a machine may bind
+    # `::` yet be unable to connect back to it. Go applies this in
+    # `internetAddrList` for every network op after lookup, not just dials, so
+    # it is intentionally not gated on `op`. The empty-host wildcard never
+    # reaches here as a single address (`_wildcard_addrs` returns two), so this
+    # only fires for a literal `[::]` host.
+    if length(ips) == 1
+        only_addr = ips[1]
+        if only_addr isa TCP.SocketAddrV6 && all(iszero, (only_addr::TCP.SocketAddrV6).ip)
+            push!(ips, TCP.any_addr(0))
+        end
     end
-    if laddr isa TCP.SocketAddrV6 && raddr isa TCP.SocketAddrV6
-        lv6 = laddr::TCP.SocketAddrV6
-        rv6 = raddr::TCP.SocketAddrV6
-        return lv6.port == rv6.port && lv6.ip == rv6.ip && lv6.scope_id == rv6.scope_id
-    end
-    return false
+    return ips
 end
 
 """
@@ -1616,6 +1626,7 @@ function resolve_tcp_addrs(
     else
         _resolve_host_ips(resolver, network, host)
     end
+    _append_unspecified_fallback!(ips)
     filtered = _apply_policy_and_network(ips, kind, policy)
     isempty(filtered) && _lookup_error("no suitable address", host)
     out = empty(similar(filtered))
@@ -1733,8 +1744,12 @@ end
 
 function _connect_deadline_ns(d::HostResolver)::Int64
     now = Int64(time_ns())
-    timeout_deadline = d.timeout_ns == 0 ? Int64(0) : now + d.timeout_ns
+    timeout_deadline = d.timeout_ns == 0 ? Int64(0) : IOPoll._saturating_add_ns(now, d.timeout_ns)
     return _min_nonzero(timeout_deadline, d.deadline_ns)
+end
+
+@inline function _fallback_deadline_ns(d::HostResolver)::Int64
+    return IOPoll._saturating_add_ns(Int64(time_ns()), _effective_fallback_delay_ns(d))
 end
 
 function _spawn_timer_task(f::F, deadline_ns::Int64) where {F}
@@ -2017,6 +2032,7 @@ function _resolve_serial(
         d::HostResolver,
         network::AbstractString,
         address::AbstractString,
+        kind::Symbol,
         addrs::AbstractVector{A},
         deadline_ns::Int64,
         state::DNSRaceState,
@@ -2037,38 +2053,22 @@ function _resolve_serial(
             return nothing, DialTimeoutError(String(address))
         end
         try
-            max_attempts = d.local_addr === nothing ? 3 : 1
-            for attempt in 1:max_attempts
-                if @atomic :acquire state.done
+            conn = try
+                TCP._dial_socketaddr_impl(remote_addr, d.local_addr, attempt_deadline, state, kind)
+            catch err
+                ex = _as_exception(err)
+                if ex isa TCP.ConnectCanceledError && (@atomic :acquire state.done)
                     return nothing, first_err
                 end
-                try
-                    conn = TCP._connect_socketaddr_impl(remote_addr, d.local_addr, attempt_deadline, state)
-                    if d.local_addr === nothing && _is_self_connect(conn) && attempt < max_attempts
-                        close(conn)
-                        continue
-                    end
-                    if _mark_connect_done!(state)
-                        return conn, nothing
-                    end
-                    close(conn)
-                    return nothing, first_err
-                catch err
-                    ex = _as_exception(err)
-                    if ex isa TCP.ConnectCanceledError && (@atomic :acquire state.done)
-                        return nothing, first_err
-                    end
-                    if d.local_addr === nothing &&
-                       ex isa SystemError &&
-                       (ex::SystemError).errnum == Int(Base.Libc.EADDRNOTAVAIL) &&
-                       attempt < max_attempts
-                        continue
-                    end
-                    mapped = ex isa IOPoll.DeadlineExceededError ? DialTimeoutError(String(address)) : ex
-                    first_err === nothing && (first_err = mapped)
-                    break
-                end
+                mapped = ex isa IOPoll.DeadlineExceededError ? DialTimeoutError(String(address)) : ex
+                first_err === nothing && (first_err = mapped)
+                continue
             end
+            if _mark_connect_done!(state)
+                return conn, nothing
+            end
+            close(conn)
+            return nothing, first_err
         catch err
             ex = _as_exception(err)
             first_err === nothing && (first_err = ex)
@@ -2082,6 +2082,7 @@ function _resolve_parallel(
         d::HostResolver,
         network::AbstractString,
         address::AbstractString,
+        kind::Symbol,
         primaries::AbstractVector{A},
         fallbacks::AbstractVector{B},
         deadline_ns::Int64,
@@ -2099,17 +2100,16 @@ function _resolve_parallel(
     end
     function _start_racer(primary::Bool, addrs::AbstractVector{<:TCP.SocketEndpoint})
         return @async begin
-            conn, err = _resolve_serial(d, network, address, addrs, deadline_ns, state)
+            conn, err = _resolve_serial(d, network, address, kind, addrs, deadline_ns, state)
             _emit_event!(DNSParallelResult(primary, conn, err))
             return nothing
         end
     end
     _start_racer(true, primaries)
-    delay_ns = _effective_fallback_delay_ns(d)
     # This is the Happy Eyeballs-style stagger: start one address family first,
     # then launch the fallback family if the primary path has not succeeded
     # quickly enough.
-    fallback_timer, fallback_timer_task = _spawn_timer_task(Int64(time_ns()) + delay_ns) do
+    fallback_timer, fallback_timer_task = _spawn_timer_task(_fallback_deadline_ns(d)) do
         _emit_event!(:fallback_timer)
     end
     primary_done = false
@@ -2168,16 +2168,17 @@ function _resolve_serial_families(
         d::HostResolver,
         network::AbstractString,
         address::AbstractString,
+        kind::Symbol,
         primaries::AbstractVector{A},
         fallbacks::AbstractVector{B},
         deadline_ns::Int64,
     )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}} where {A<:TCP.SocketEndpoint, B<:TCP.SocketEndpoint}
     primary_state = DNSRaceState()
-    conn, err = _resolve_serial(d, network, address, primaries, deadline_ns, primary_state)
+    conn, err = _resolve_serial(d, network, address, kind, primaries, deadline_ns, primary_state)
     conn !== nothing && return conn, nothing
     isempty(fallbacks) && return nothing, err
     fallback_state = DNSRaceState()
-    fallback_conn, fallback_err = _resolve_serial(d, network, address, fallbacks, deadline_ns, fallback_state)
+    fallback_conn, fallback_err = _resolve_serial(d, network, address, kind, fallbacks, deadline_ns, fallback_state)
     fallback_conn !== nothing && return fallback_conn, nothing
     return nothing, err === nothing ? fallback_err : err
 end
@@ -2209,10 +2210,10 @@ function _connect_resolved_addrs_impl(
     conn = nothing
     err = nothing
     if _use_parallel_race(d, kind, fallbacks)
-        conn, err = _resolve_parallel(d, network, address, primaries, fallbacks, deadline_ns)
+        conn, err = _resolve_parallel(d, network, address, kind, primaries, fallbacks, deadline_ns)
     else
         state = DNSRaceState()
-        conn, err = _resolve_serial(d, network, address, addrs, deadline_ns, state)
+        conn, err = _resolve_serial(d, network, address, kind, addrs, deadline_ns, state)
     end
     conn !== nothing && return conn
     throw(_wrap_op_error(
@@ -2270,9 +2271,9 @@ function _connect_resolved_addrs_impl(
             end
         end
         conn, err = if _use_parallel_race(d, kind, fallbacks)
-            _resolve_parallel(d, network, address, primaries, fallbacks, deadline_ns)
+            _resolve_parallel(d, network, address, kind, primaries, fallbacks, deadline_ns)
         else
-            _resolve_serial_families(d, network, address, primaries, fallbacks, deadline_ns)
+            _resolve_serial_families(d, network, address, kind, primaries, fallbacks, deadline_ns)
         end
         conn !== nothing && return conn
         throw(_wrap_op_error(
@@ -2293,9 +2294,9 @@ function _connect_resolved_addrs_impl(
         end
     end
     conn, err = if _use_parallel_race(d, kind, fallbacks)
-        _resolve_parallel(d, network, address, primaries, fallbacks, deadline_ns)
+        _resolve_parallel(d, network, address, kind, primaries, fallbacks, deadline_ns)
     else
-        _resolve_serial_families(d, network, address, primaries, fallbacks, deadline_ns)
+        _resolve_serial_families(d, network, address, kind, primaries, fallbacks, deadline_ns)
     end
     conn !== nothing && return conn
     throw(_wrap_op_error(
@@ -2445,7 +2446,7 @@ function listen(
         backlog::Integer = 128,
         reuseaddr::Bool = true,
     )::TCP.Listener
-    try
+    kind = try
         _network_kind(network)
     catch err
         throw(_wrap_op_error("listen", network, nothing, nothing, _as_exception(err)))
@@ -2458,7 +2459,12 @@ function listen(
     first_err::Union{Nothing, Exception} = nothing
     for local_addr in addrs
         try
-            return TCP.listen(local_addr; backlog = backlog, reuseaddr = reuseaddr)
+            return TCP._listen_socketaddr_impl(
+                local_addr,
+                kind;
+                backlog = backlog,
+                reuseaddr = reuseaddr,
+            )
         catch err
             first_err === nothing && (first_err = _as_exception(err))
         end

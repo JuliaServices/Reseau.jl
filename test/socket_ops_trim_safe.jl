@@ -4,10 +4,10 @@ const IP = Reseau.IOPoll
 const SO = Reseau.SocketOps
 const _SO_EWOULDBLOCK = @static isdefined(Base.Libc, :EWOULDBLOCK) ? Int32(getfield(Base.Libc, :EWOULDBLOCK)) : Int32(Base.Libc.EAGAIN)
 
-function _accept_with_retry(listener::Cint)::Cint
+function _accept_with_retry(listener::SO.SocketFD)::SO.SocketFD
     for _ in 1:5000
         accepted, _, errno = SO.try_accept_socket(listener)
-        accepted != -1 && return accepted
+        SO.is_valid_socket(accepted) && return accepted
         if errno == Int32(Base.Libc.EAGAIN)
             yield()
             continue
@@ -18,7 +18,7 @@ function _accept_with_retry(listener::Cint)::Cint
     throw(ArgumentError("timed out waiting for accepted socket"))
 end
 
-function _write_all!(fd::Cint, data::Vector{UInt8})::Nothing
+function _write_all!(fd::SO.SocketFD, data::Vector{UInt8})::Nothing
     offset = 0
     while offset < length(data)
         n = GC.@preserve data SO.write_once!(fd, pointer(data, offset + 1), Csize_t(length(data) - offset))
@@ -35,7 +35,7 @@ function _write_all!(fd::Cint, data::Vector{UInt8})::Nothing
     return nothing
 end
 
-function _read_exact!(fd::Cint, data::Vector{UInt8})::Nothing
+function _read_exact!(fd::SO.SocketFD, data::Vector{UInt8})::Nothing
     offset = 0
     while offset < length(data)
         n = GC.@preserve data SO.read_once!(fd, pointer(data, offset + 1), Csize_t(length(data) - offset))
@@ -53,9 +53,9 @@ function _read_exact!(fd::Cint, data::Vector{UInt8})::Nothing
 end
 
 function run_socket_ops_trim_sample()::Nothing
-    listener = Cint(-1)
-    client = Cint(-1)
-    accepted = Cint(-1)
+    listener = SO.INVALID_SOCKET
+    client = SO.INVALID_SOCKET
+    accepted = SO.INVALID_SOCKET
     try
         listener = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
         SO.set_sockopt_int(listener, SO.SOL_SOCKET, SO.SO_REUSEADDR, 1)
@@ -78,9 +78,9 @@ function run_socket_ops_trim_sample()::Nothing
         _read_exact!(accepted, recv_buf)
         recv_buf == payload || error("payload mismatch")
     finally
-        accepted >= 0 && SO.close_socket_nothrow(accepted)
-        client >= 0 && SO.close_socket_nothrow(client)
-        listener >= 0 && SO.close_socket_nothrow(listener)
+        SO.is_valid_socket(accepted) && SO.close_socket_nothrow(accepted)
+        SO.is_valid_socket(client) && SO.close_socket_nothrow(client)
+        SO.is_valid_socket(listener) && SO.close_socket_nothrow(listener)
     end
     return nothing
 end

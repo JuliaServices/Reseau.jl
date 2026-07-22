@@ -93,6 +93,55 @@ end
         @test reordered.supported_curves == UInt16[TL12H.X25519, TL12H.P256]
     end
 
+    @testset "server may omit extended master secret" begin
+        client_hello = TL12H._tls12_client_hello(TL12H.Config(
+            server_name = "localhost",
+            verify_peer = false,
+            min_version = TL12H.TLS1_2_VERSION,
+            max_version = TL12H.TLS1_2_VERSION,
+        ))
+        client_hello.random = collect(UInt8(0x10):UInt8(0x2f))
+        state = TL12H._TLS12ClientHandshakeState(client_hello)
+        state.server_hello.vers = TL12H.TLS1_2_VERSION
+        state.server_hello.random = collect(UInt8(0x80):UInt8(0x9f))
+        state.server_hello.cipher_suite = TL12H._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID
+        state.server_hello.compression_method = TL12H._TLS_COMPRESSION_NONE
+        state.server_hello.extended_master_secret = false
+
+        @test TL12H._tls12_select_cipher_spec!(state) === nothing
+        @test state.cipher_suite == TL12H._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID
+
+        pre_master_secret = collect(UInt8(0x40):UInt8(0x5f))
+        transcript = TL12H._TranscriptHash(TL12H._HASH_SHA256; buffer_handshake = false)
+        TL12H._transcript_update!(transcript, Vector{UInt8}(codeunits("TLS 1.2 handshake transcript")))
+        legacy_master = TL12H._tls12_client_master_secret(
+            state,
+            TL12H._HASH_SHA256,
+            pre_master_secret,
+            transcript,
+        )
+        @test legacy_master == TL12H._tls12_master_from_pre_master_secret(
+            TL12H._HASH_SHA256,
+            pre_master_secret,
+            client_hello.random,
+            state.server_hello.random,
+        )
+
+        state.server_hello.extended_master_secret = true
+        extended_master = TL12H._tls12_client_master_secret(
+            state,
+            TL12H._HASH_SHA256,
+            pre_master_secret,
+            transcript,
+        )
+        @test extended_master == TL12H._tls12_extended_master_from_pre_master_secret(
+            TL12H._HASH_SHA256,
+            pre_master_secret,
+            TL12H._transcript_digest(transcript),
+        )
+        @test extended_master != legacy_master
+    end
+
     @testset "server key exchange parsing and verification follow TLS 1.2 ECDHE-RSA semantics" begin
         state = TL12H._TLS12ClientHandshakeState(TL12H._ClientHelloMsg())
         state.client_hello.random = collect(UInt8(0x10):UInt8(0x2f))

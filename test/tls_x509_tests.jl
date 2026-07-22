@@ -82,6 +82,7 @@ function _tls_copy_cert(
     max_path_len = cert.max_path_len,
     has_key_usage = cert.has_key_usage,
     key_usage = cert.key_usage,
+    has_extended_key_usage = cert.has_extended_key_usage,
     extended_key_usage = cert.extended_key_usage,
     subject_key_id = cert.subject_key_id,
     authority_key_id = cert.authority_key_id,
@@ -115,6 +116,7 @@ function _tls_copy_cert(
         max_path_len,
         has_key_usage,
         key_usage,
+        has_extended_key_usage,
         extended_key_usage,
         copy(subject_key_id),
         copy(authority_key_id),
@@ -167,6 +169,7 @@ end
         @test cert.has_key_usage
         @test (cert.key_usage & TLX._TLS_KEY_USAGE_DIGITAL_SIGNATURE) != 0x00
         @test (cert.key_usage & TLX._TLS_KEY_USAGE_KEY_ENCIPHERMENT) != 0x00
+        @test cert.has_extended_key_usage
         @test (cert.extended_key_usage & TLX._TLS_EXT_KEY_USAGE_SERVER) != 0x00
         @test isempty(cert.authority_key_id) == false
         @test isempty(cert.subject_key_id) == false
@@ -183,6 +186,23 @@ end
             0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x01,
         ] in cert.ip_addresses
+
+        ca_cert = _tls_cert_info(_TLS_CA_PATH)
+        @test !ca_cert.has_extended_key_usage
+        @test ca_cert.extended_key_usage == 0x00
+    end
+
+    @testset "extended key usage parsing preserves unknown restrictions" begin
+        unknown_oid = _der_tlv(TLX._ASN1_OBJECT_IDENTIFIER, UInt8[0x2a, 0x03, 0x04])
+        server_oid = _der_tlv(
+            TLX._ASN1_OBJECT_IDENTIFIER,
+            collect(TLX._ASN1_OID_EKU_SERVER_AUTH),
+        )
+        unknown_only = _der_tlv(TLX._ASN1_SEQUENCE, unknown_oid)
+        mixed = _der_tlv(TLX._ASN1_SEQUENCE, vcat(server_oid, unknown_oid))
+
+        @test TLX._tls_parse_extended_key_usage(unknown_only, 1, length(unknown_only)) == 0x00
+        @test TLX._tls_parse_extended_key_usage(mixed, 1, length(mixed)) == TLX._TLS_EXT_KEY_USAGE_SERVER
     end
 
     @testset "SHA-1 X.509 signatures parse but are rejected at verification" begin
@@ -227,6 +247,31 @@ end
         @test TLX._tls_certificate_usage_permitted(key_encipherment_only, "ssl_server")
         @test !TLX._tls_certificate_usage_permitted(key_encipherment_only, "ssl_client")
         @test !TLX._tls_certificate_usage_permitted(no_key_usage, "ssl_server")
+
+        no_eku = _tls_copy_cert(
+            server_cert;
+            has_extended_key_usage = false,
+            extended_key_usage = UInt8(0),
+        )
+        unknown_only_eku = _tls_copy_cert(
+            server_cert;
+            has_extended_key_usage = true,
+            extended_key_usage = UInt8(0),
+        )
+        mixed_server_eku = _tls_copy_cert(
+            server_cert;
+            has_extended_key_usage = true,
+            extended_key_usage = TLX._TLS_EXT_KEY_USAGE_SERVER,
+        )
+        @test TLX._tls_certificate_usage_permitted(no_eku, "ssl_server")
+        @test TLX._tls_certificate_usage_permitted(no_eku, "ssl_client")
+        @test !TLX._tls_certificate_usage_permitted(unknown_only_eku, "ssl_server")
+        @test !TLX._tls_certificate_usage_permitted(unknown_only_eku, "ssl_client")
+        @test TLX._tls_certificate_usage_permitted(mixed_server_eku, "ssl_server")
+        @test !TLX._tls_certificate_usage_permitted(mixed_server_eku, "ssl_client")
+        @test !TLX._tls_chain_extended_key_usage_permitted([unknown_only_eku], "ssl_server")
+        @test TLX._tls_chain_extended_key_usage_permitted([mixed_server_eku], "ssl_server")
+        @test !TLX._tls_chain_extended_key_usage_permitted([mixed_server_eku], "ssl_client")
 
         ca_cert = _tls_cert_info(_TLS_CA_PATH)
         @test TLX._tls_cert_subject_matches_issuer(server_cert, ca_cert)
@@ -319,6 +364,45 @@ end
         @test TLX._tls_rsa_modulus_bit_length(oversized_modulus) == TLX._TLS_MAX_RSA_CERT_KEY_BITS + 1
         oversized_spki = _rsa_spki_der(oversized_modulus)
         @test_throws ArgumentError TLX._tls_parse_subject_public_key_info(oversized_spki, 1, length(oversized_spki))
+    end
+
+    @testset "RSA certificate key size floor and public exponent are validated" begin
+        # Bit-length helper sanity: these moduli straddle the 1024-bit floor.
+        modulus_2048 = vcat(UInt8[0x80], zeros(UInt8, 255))
+        modulus_1024 = vcat(UInt8[0x80], zeros(UInt8, 127))
+        modulus_1023 = vcat(UInt8[0x40], zeros(UInt8, 127))
+        modulus_512 = vcat(UInt8[0x80], zeros(UInt8, 63))
+        @test TLX._tls_rsa_modulus_bit_length(modulus_2048) == 2048
+        @test TLX._tls_rsa_modulus_bit_length(modulus_1024) == TLX._TLS_MIN_RSA_CERT_KEY_BITS
+        @test TLX._tls_rsa_modulus_bit_length(modulus_1023) == TLX._TLS_MIN_RSA_CERT_KEY_BITS - 1
+        @test TLX._tls_rsa_modulus_bit_length(modulus_512) == 512
+
+        # (a) sub-1024-bit RSA keys are rejected at the key-size check, (b) a
+        # 2048-bit key (and the 1024-bit boundary) still passes.
+        @test TLX._tls_check_rsa_certificate_key_size!(modulus_2048) === nothing
+        @test TLX._tls_check_rsa_certificate_key_size!(modulus_1024) === nothing
+        @test_throws ArgumentError TLX._tls_check_rsa_certificate_key_size!(modulus_1023)
+        @test_throws ArgumentError TLX._tls_check_rsa_certificate_key_size!(modulus_512)
+
+        # Same behavior through the full SubjectPublicKeyInfo parse path. The
+        # parser takes the SPKI *content* range, so unwrap the outer SEQUENCE.
+        _parse_spki(spki) = TLX._tls_parse_subject_public_key_info(
+            spki, TLX._asn1_expect_tlv(spki, 1, TLX._ASN1_SEQUENCE, length(spki))[1:2]...)
+        @test _parse_spki(_rsa_spki_der(modulus_2048)) isa TLX._TLSRSAPublicKey
+        @test_throws ArgumentError _parse_spki(_rsa_spki_der(modulus_512))
+
+        # (c) Degenerate public exponents are rejected at the SPKI parse layer.
+        @test_throws ArgumentError _parse_spki(_rsa_spki_der(modulus_2048, UInt8[0x01]))
+        @test_throws ArgumentError _parse_spki(_rsa_spki_der(modulus_2048, UInt8[0x04]))
+
+        # Public-exponent check directly: must be odd, >= 3, and <= 1<<31-1.
+        @test_throws ArgumentError TLX._tls_check_rsa_public_exponent!(1)
+        @test_throws ArgumentError TLX._tls_check_rsa_public_exponent!(2)
+        @test_throws ArgumentError TLX._tls_check_rsa_public_exponent!(4)
+        @test_throws ArgumentError TLX._tls_check_rsa_public_exponent!(TLX._TLS_MAX_RSA_PUBLIC_EXPONENT + 1)
+        @test TLX._tls_check_rsa_public_exponent!(3) === nothing
+        @test TLX._tls_check_rsa_public_exponent!(65537) === nothing
+        @test TLX._tls_check_rsa_public_exponent!(TLX._TLS_MAX_RSA_PUBLIC_EXPONENT) === nothing
     end
 
     @testset "native trust verifier accepts valid server and client chains" begin
@@ -560,8 +644,16 @@ end
         client_leaf = _tls_cert_info(_TLS_CLIENT_CERT_PATH)
         root = _tls_cert_info(_TLS_CA_PATH)
 
-        client_only_root = _tls_copy_cert(root; extended_key_usage = TLX._TLS_EXT_KEY_USAGE_CLIENT)
-        server_only_root = _tls_copy_cert(root; extended_key_usage = TLX._TLS_EXT_KEY_USAGE_SERVER)
+        client_only_root = _tls_copy_cert(
+            root;
+            has_extended_key_usage = true,
+            extended_key_usage = TLX._TLS_EXT_KEY_USAGE_CLIENT,
+        )
+        server_only_root = _tls_copy_cert(
+            root;
+            has_extended_key_usage = true,
+            extended_key_usage = TLX._TLS_EXT_KEY_USAGE_SERVER,
+        )
 
         server_chain_err = try
             TLX._tls_verify_peer_certificate_chain!(

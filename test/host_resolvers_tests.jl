@@ -422,6 +422,16 @@ end
         end
         @testset "resolve_tcp_addr convenience wrapper" begin
             @test ND.resolve_tcp_addr("tcp", "127.0.0.1:80") == NC.loopback_addr(80)
+            @test ND.resolve_tcp_addr("tcp", "[::]:80") == NC.any_addr6(80)
+            unspecified = ND.resolve_tcp_addrs(ND.DEFAULT_RESOLVER, "tcp", "[::]:80"; op = :connect)
+            @test unspecified == NC.SocketEndpoint[NC.any_addr6(80), NC.any_addr(80)]
+            @test ND.resolve_tcp_addrs(ND.DEFAULT_RESOLVER, "tcp4", "[::]:80"; op = :connect) == NC.SocketAddrV4[NC.any_addr(80)]
+            @test ND.resolve_tcp_addrs(ND.DEFAULT_RESOLVER, "tcp6", "[::]:80"; op = :connect) == NC.SocketAddrV6[NC.any_addr6(80)]
+            # Go applies the issue-18806 [::] -> 0.0.0.0 fallback in
+            # internetAddrList for every op, not just dials, so :resolve and
+            # :listen see the appended IPv4 wildcard too.
+            @test ND.resolve_tcp_addrs(ND.DEFAULT_RESOLVER, "tcp", "[::]:80"; op = :resolve) == NC.SocketEndpoint[NC.any_addr6(80), NC.any_addr(80)]
+            @test ND.resolve_tcp_addrs(ND.DEFAULT_RESOLVER, "tcp", "[::]:80"; op = :listen) == NC.SocketEndpoint[NC.any_addr6(80), NC.any_addr(80)]
         end
         @testset "resolver policies and static resolver" begin
             v4 = NC.loopback_addr(9000)
@@ -472,12 +482,12 @@ end
             @test length(connect_addrs) == 2
             @test connect_addrs[1] isa NC.SocketAddrV4
             @test connect_addrs[2] isa NC.SocketAddrV6
-            fake_fd = NC._new_netfd(Cint(-1))
+            fake_fd = NC._new_netfd(SO.INVALID_SOCKET)
             fake_fd.laddr = NC.loopback_addr(5000)
             fake_fd.raddr = NC.loopback_addr(5000)
-            @test ND._is_self_connect(NC.Conn(fake_fd))
+            @test NC._is_self_connect(NC.Conn(fake_fd))
             fake_fd.raddr = NC.loopback_addr(5001)
-            @test !ND._is_self_connect(NC.Conn(fake_fd))
+            @test !NC._is_self_connect(NC.Conn(fake_fd))
         end
         @testset "host resolver internal helper utilities" begin
             @test ND._normalize_lookup_host("Example.COM..") == "example.com"
@@ -489,6 +499,9 @@ end
             @test ND._effective_fallback_delay_ns(ND.HostResolver(fallback_delay_ns = 0)) == Int64(300_000_000)
             @test !ND._use_parallel_race(ND.HostResolver(fallback_delay_ns = -1), :tcp, NC.SocketEndpoint[NC.loopback_addr6(80)])
             @test ND._use_parallel_race(ND.HostResolver(fallback_delay_ns = 1), :tcp, NC.SocketEndpoint[NC.loopback_addr6(80)])
+            @test ND._connect_deadline_ns(ND.HostResolver(timeout_ns = typemax(Int64))) == typemax(Int64)
+            @test ND._connect_deadline_ns(ND.HostResolver(timeout_ns = typemin(Int64))) < Int64(time_ns())
+            @test ND._fallback_deadline_ns(ND.HostResolver(fallback_delay_ns = typemax(Int64))) == typemax(Int64)
 
             scoped_addr = NC.SocketAddrV6(NC.loopback_addr6(1234).ip, 1234; scope_id = 7)
             scoped_ips = ND._resolve_host_ips(_SlowResolver(0.0, NC.SocketEndpoint[scoped_addr]), "tcp", "ignored.host")
@@ -646,6 +659,14 @@ end
                     laddr = NC.addr(listener)::NC.SocketAddrV6
                     accept_task = _nd_spawn_accept(listener)
                     client = NC.connect("tcp6", ND.join_host_port("::1", Int(laddr.port)); timeout_ns = 1_000_000_000)
+                    @test client.fd.net === :tcp6
+                    @static if !(Sys.isopenbsd() || Sys.isdragonfly())
+                        @test SO.get_sockopt_int(
+                            client.fd.pfd.sysfd,
+                            SO.IPPROTO_IPV6,
+                            SO.IPV6_V6ONLY,
+                        ) == 1
+                    end
                     @test _nd_wait_task_done(accept_task, 2.0) != :timed_out
                     server = fetch(accept_task)
                     server isa Exception && throw(server)
@@ -660,6 +681,140 @@ end
                     _nd_close_quiet!(listener)
                     IP.shutdown!()
                 end
+            end
+        end
+        @testset "tcp6 wildcard is IPv6-only and tcp wildcard accepts IPv4" begin
+            if !_nd_ipv6_supported()
+                @test true
+            else
+                IP.shutdown!()
+                listener6 = nothing
+                listener4 = nothing
+                listener_dual = nothing
+                client = nothing
+                server = nothing
+                accept_task = nothing
+                try
+                    # The IPv4 probe reuses whatever ephemeral port the tcp6
+                    # wildcard listener received, so an unrelated process may
+                    # own that IPv4 port (failing the bind) or grab it between
+                    # bind and connect (making the connect succeed). Retry with
+                    # a fresh tcp6 listener on such interference; only fail
+                    # when every attempt looks like the listener accepts IPv4.
+                    ipv4_isolated = false
+                    for _ in 1:3
+                        listener6 = NC.listen("tcp6", "[::]:0"; backlog = 8)
+                        addr6 = NC.addr(listener6)::NC.SocketAddrV6
+                        @test listener6.fd.net === :tcp6
+                        @static if !(Sys.isopenbsd() || Sys.isdragonfly())
+                            @test SO.get_sockopt_int(
+                                listener6.fd.pfd.sysfd,
+                                SO.IPPROTO_IPV6,
+                                SO.IPV6_V6ONLY,
+                            ) == 1
+                        end
+
+                        # An IPv4 listener can own the same port only when the
+                        # tcp6 wildcard did not also claim IPv4-mapped traffic.
+                        listener4 = try
+                            NC.listen(
+                                "tcp4",
+                                "0.0.0.0:$(Int(addr6.port))";
+                                backlog = 8,
+                            )
+                        catch
+                            nothing
+                        end
+                        if listener4 === nothing
+                            _nd_close_quiet!(listener6)
+                            listener6 = nothing
+                            continue
+                        end
+                        @test listener4.fd.net === :tcp4
+                        close(listener4)
+                        listener4 = nothing
+
+                        ipv4_result = try
+                            NC.connect(
+                                "tcp4",
+                                "127.0.0.1:$(Int(addr6.port))";
+                                timeout_ns = 500_000_000,
+                            )
+                        catch ex
+                            ex
+                        end
+                        close(listener6)
+                        listener6 = nothing
+                        if !(ipv4_result isa Exception)
+                            # Unexpected success: either an unrelated process
+                            # took over the IPv4 port or the tcp6 wildcard
+                            # accepted IPv4; retry to tell the two apart.
+                            _nd_close_quiet!(ipv4_result)
+                            continue
+                        end
+                        @test ipv4_result isa ND.OpError
+                        ipv4_isolated = true
+                        break
+                    end
+                    @test ipv4_isolated
+
+                    listener_dual = NC.listen("tcp", ":0"; backlog = 8)
+                    dual_addr = NC.addr(listener_dual)
+                    @test listener_dual.fd.net === :tcp
+                    if dual_addr isa NC.SocketAddrV6
+                        @static if !(Sys.isopenbsd() || Sys.isdragonfly())
+                            @test SO.get_sockopt_int(
+                                listener_dual.fd.pfd.sysfd,
+                                SO.IPPROTO_IPV6,
+                                SO.IPV6_V6ONLY,
+                            ) == 0
+                        end
+                    end
+                    port = Int(dual_addr.port)
+                    accept_task = _nd_spawn_accept(listener_dual)
+                    client = NC.connect(
+                        "tcp4",
+                        "127.0.0.1:$port";
+                        timeout_ns = 1_000_000_000,
+                    )
+                    @test _nd_wait_task_done(accept_task, 2.0) != :timed_out
+                    server = fetch(accept_task)
+                    server isa Exception && throw(server)
+                    @test write(client, UInt8[0xa5]) == 1
+                    payload = Vector{UInt8}(undef, 1)
+                    @test _nd_read_exact!(server, payload) == 1
+                    @test payload == UInt8[0xa5]
+                finally
+                    _nd_close_quiet!(server)
+                    _nd_close_quiet!(client)
+                    _nd_close_quiet!(listener_dual)
+                    _nd_close_quiet!(listener4)
+                    _nd_close_quiet!(listener6)
+                    IP.shutdown!()
+                end
+            end
+        end
+        @testset "IPv6-unspecified dial falls back to local IPv4" begin
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            accept_task = nothing
+            try
+                listener = NC.listen("tcp4", "127.0.0.1:0"; backlog = 8)
+                port = Int((NC.addr(listener)::NC.SocketAddrV4).port)
+                accept_task = _nd_spawn_accept(listener)
+                client = NC.connect("tcp4", "[::]:$port"; timeout_ns = 1_000_000_000)
+                @test _nd_wait_task_done(accept_task, 2.0) != :timed_out
+                server = fetch(accept_task)
+                server isa Exception && throw(server)
+                @test NC.remote_addr(client) == NC.loopback_addr(port)
+            finally
+                _nd_close_quiet!(server)
+                _nd_close_quiet!(client)
+                _nd_close_quiet!(listener)
+                accept_task isa Task && istaskdone(accept_task) && wait(accept_task)
+                IP.shutdown!()
             end
         end
         @testset "error typing and wrapping (phase 5C)" begin
@@ -771,6 +926,22 @@ end
         @testset "caching resolver fresh/stale/negative behavior" begin
             addr_a = NC.loopback_addr(1111)
             addr_b = NC.loopback_addr(2222)
+
+            saturated_parent = _CountingResolver(0.0, NC.SocketEndpoint[addr_a])
+            saturated_cache = ND.CachingResolver(saturated_parent; ttl_ns = 10, stale_ttl_ns = 10, negative_ttl_ns = 10, max_hosts = 8)
+            positive_key = ND._lookup_key("tcp", "positive-overflow.test")
+            negative_key = ND._lookup_key("tcp", "negative-overflow.test")
+            lock(saturated_cache.lock)
+            try
+                ND._store_cache_entry_locked!(saturated_cache, positive_key, NC.SocketEndpoint[addr_a], nothing, typemax(Int64) - Int64(5))
+                ND._store_cache_entry_locked!(saturated_cache, negative_key, nothing, ND.LookupError("lookup failed", "negative-overflow.test"), typemax(Int64) - Int64(5))
+                @test saturated_cache.entries[positive_key].expires_ns == typemax(Int64)
+                @test saturated_cache.entries[positive_key].stale_expires_ns == typemax(Int64)
+                @test saturated_cache.entries[negative_key].expires_ns == typemax(Int64)
+                @test saturated_cache.entries[negative_key].stale_expires_ns == typemax(Int64)
+            finally
+                unlock(saturated_cache.lock)
+            end
 
             fresh_parent = _CountingResolver(0.0, NC.SocketEndpoint[addr_a])
             fresh_cache = ND.CachingResolver(fresh_parent; ttl_ns = 1_000_000_000, stale_ttl_ns = 0, negative_ttl_ns = 0, max_hosts = 8)
