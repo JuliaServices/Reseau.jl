@@ -119,6 +119,12 @@ function init!()::Poller
         if isassigned(POLLER)
             state = POLLER[]
             (@atomic state.running) && return state
+            # A stopped poller may still own a live backend (for example after
+            # its thread exited on an error). Fully retire that generation
+            # before replacing the only references to its registrations,
+            # OVERLAPPED storage, and data-buffer roots. POLLER_LOCK is
+            # reentrant, so shutdown! safely shares the canonical teardown path.
+            shutdown!()
         end
         _runtime_supported() || throw(ArgumentError("iopoll backend is currently supported on macOS, Linux, and Windows"))
         new_state = Poller()
@@ -160,10 +166,9 @@ ordered after `wait(state.shutdown_event)`: tearing down backend resources
 while the poller thread can still touch them would race the poll loop.
 
 Registrations remain parked until backend teardown is complete. On Windows,
-their `GC.@preserve` scopes may be the last roots for raw buffers owned by an
-outstanding overlapped operation; waking those tasks before IOCP has delivered
-every terminal completion would let them return while the kernel still holds a
-pointer into Julia memory.
+each outstanding operation independently roots its submitted buffer, while the
+synchronous IOCP drain keeps both that buffer and its OVERLAPPED alive until the
+terminal completion packet has been consumed.
 """
 function shutdown!()
     lock(POLLER_LOCK)
@@ -200,11 +205,18 @@ function shutdown!()
             # backend rather than freeing memory the kernel may still write.
             wake_errno = _backend_wake!(state)
             wake_errno == Int32(0) || _throw_errno("iopoll wake", wake_errno)
+        end
+        if state.backend_state !== nothing
+            # `running=false` only requests/announces termination; the poller
+            # may still be unwinding an error path and touching backend state.
+            # Every published state with a live backend has successfully
+            # started its poller thread, so wait for its definitive exit even
+            # when this shutdown call did not perform the true→false change.
             wait(state.shutdown_event)
         end
         _backend_close!(state)
-        # Backend teardown has relinquished all kernel ownership, so blocked
-        # descriptor tasks may now leave their GC.@preserve scopes safely.
+        # Backend teardown has relinquished all kernel ownership; blocked
+        # descriptor tasks can now observe the final closing state.
         for registration in registrations
             pd = registration.pollstate
             lock(pd.lock)
@@ -424,8 +436,13 @@ function _poller_thread_main!(state::Poller)
         if errno == Int32(Base.Libc.EINTR)
             continue
         end
-        _notify_all_waiters!(state)
+        # Publish terminal poller failure before waking descriptor tasks. An
+        # interrupted raw IOCP caller must observe the stopped state instead of
+        # canceling and re-parking after the only poller has exited. Its IOCP
+        # storage remains rooted by the backend until shutdown or re-init drains
+        # the queued completion.
         @atomic :release state.running = false
+        _notify_all_waiters!(state)
     end
     notify(state.shutdown_event)
     return nothing

@@ -269,6 +269,9 @@ end
             poll_task = nothing
             try
                 _el_log_test_progress("backend delay semantics: zero timeout")
+                # Compile `_backend_poll_once!` before the timed call so the
+                # elapsed bound below measures the poll, not first-call JIT.
+                NP._backend_poll_once!(state, Int64(0))
                 t0 = time_ns()
                 errno = NP._backend_poll_once!(state, Int64(0))
                 elapsed_ns = time_ns() - t0
