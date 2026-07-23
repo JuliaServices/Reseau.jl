@@ -780,6 +780,12 @@ the init! failure path never started the thread), so nothing else dequeues from
 the port and no `state.lock` is required — every Julia-task entry point gates on
 `state.running`, which shutdown! publishes false under `state.lock` before the
 wait, leaving this drain with exclusive access to the port and op state.
+
+A zombie registration's socket handle may already be closed while its
+completion packet is still unconsumed (possible only after poller failure).
+`CancelIoEx` then fails with `ERROR_INVALID_HANDLE` and the strict throw
+deliberately leaves the backend and every op root intact rather than reasoning
+about a dead handle's remaining kernel ownership.
 """
 function _drain_pending_ops_on_close!(backend::IocpBackendState)
     backend.port == C_NULL && return nothing

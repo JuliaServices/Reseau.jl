@@ -73,6 +73,20 @@ function _ip_read_byte(fd::SO.SocketFD)::UInt8
     throw(ArgumentError("timed out reading byte"))
 end
 
+# Wait without touching the IOPoll runtime. `IP.timedwait` sleeps through
+# `sleep_until_ns`, whose `init!()` retires a stopped poller generation; tests
+# that deliberately stop the poller must not let their waiting primitive
+# trigger that re-init (or its shutdown side effects) before they assert on
+# the stopped generation's state.
+function _ip_spin_until(f; timeout_s::Real = 5.0)::Bool
+    deadline = Int64(time_ns()) + round(Int64, Float64(timeout_s) * 1.0e9)
+    while !f()
+        Int64(time_ns()) < deadline || return false
+        yield()
+    end
+    return true
+end
+
 function _ip_accept_with_retry(listener::SO.SocketFD)::Tuple{SO.SocketFD, SO.AcceptPeer}
     for _ in 1:5000
         accepted, peer, errno = SO.try_accept_socket(listener)
@@ -482,17 +496,12 @@ end
                         IP.shutdown!()
                     end)
                     take!(shutdown_started)
-                    @test IP.timedwait(
-                        () -> istaskdone(shutdown_task),
-                        5.0;
-                        pollint = 0.001,
-                    ) != :timed_out
+                    # Runtime-free waits: once shutdown has begun, an
+                    # `IP.timedwait` here would spin up a fresh poller
+                    # generation via `init!()` mid-assertion.
+                    @test _ip_spin_until(() -> istaskdone(shutdown_task); timeout_s = 5.0)
                     wait(shutdown_task)
-                    @test IP.timedwait(
-                        () -> istaskdone(read_task),
-                        2.0;
-                        pollint = 0.001,
-                    ) != :timed_out
+                    @test _ip_spin_until(() -> istaskdone(read_task); timeout_s = 2.0)
                     @test fetch(read_task) isa IP.NetClosingError
                     @test (@atomic :acquire ipfd.pd.closing)
                     @test !(@atomic :acquire ipfd.pd.pollable)
@@ -780,7 +789,10 @@ end
                     end
                     IP.set_read_deadline!(ipfd, Int64(time_ns()) - Int64(1))
 
-                    @test IP.timedwait(() -> istaskdone(read_task), 5.0; pollint = 0.001) != :timed_out
+                    # `_ip_spin_until`, not `IP.timedwait`: the runtime-backed
+                    # wait would call `init!()` and retire the stopped
+                    # generation before the assertions below observe it.
+                    @test _ip_spin_until(() -> istaskdone(read_task); timeout_s = 5.0)
                     @test fetch(read_task) isa IP.DeadlineExceededError
                     op = old_op[]::IP.IocpOp
                     @test old_state.backend_state !== nothing

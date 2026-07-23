@@ -1071,9 +1071,17 @@ function Base.readavailable(conn::Conn)::Vector{UInt8}
     return resize!(buf, n)
 end
 
+# The `Ref` roots the Windows overlapped op (mirroring `write(conn, ::UInt8)`)
+# so single-byte reads avoid the pointer-only bounce path.
 function Base.read(conn::Conn, ::Type{UInt8})::UInt8
     ref = Ref{UInt8}(0x00)
-    Base.unsafe_read(conn, ref, 1)
+    GC.@preserve ref begin
+        ptr = Base.unsafe_convert(Ptr{UInt8}, ref)
+        n = 0
+        while n == 0
+            n = _read_some!(conn, ptr, 1, ref)
+        end
+    end
     return ref[]
 end
 
@@ -1154,6 +1162,15 @@ end
 
 function Base.write(conn::Conn, buf::Base.CodeUnits{UInt8,<:AbstractString})::Int
     return GC.@preserve buf _write_rooted!(conn, pointer(buf), length(buf), buf)
+end
+
+# Specialize Base's String write (which funnels through `unsafe_write`) so the
+# string itself roots the Windows overlapped op instead of being copied
+# through the pointer-only bounce path.
+function Base.write(conn::Conn, s::Union{String, SubString{String}})::Int
+    GC.@preserve s begin
+        return _write_rooted!(conn, pointer(s), sizeof(s), s)
+    end
 end
 
 function Base.write(conn::Conn, buf::AbstractVector{UInt8})::Int
