@@ -10,6 +10,7 @@ const EPOLL_CLOEXEC = Cint(0x80000)
 const EFD_NONBLOCK = Cint(0x800)
 const EFD_CLOEXEC = Cint(0x80000)
 const MAX_EPOLL_EVENTS = 128
+const MAX_GC_UNSAFE_EPOLL_WAIT_MS = Cint(25)
 const _WAKE_TOKEN = UInt64(0)
 
 # Mirror of Linux `struct epoll_event`.
@@ -59,7 +60,13 @@ mutable struct EpollBackendState <: BackendState
     # writing into Julia-heap memory during concurrent GC. Plain C memory
     # keeps event delivery entirely outside GC-managed pages.
     events::Ptr{EpollEvent}
+    wait_gc_safe::Bool
     @atomic wake_sig::UInt32
+end
+
+@inline function _epoll_wait_gc_safe_enabled()::Bool
+    value = strip(lowercase(get(ENV, "RESEAU_EPOLL_WAIT_GCSAFE", "1")))
+    return !(isempty(value) || value == "0" || value == "false" || value == "no" || value == "off")
 end
 
 """
@@ -92,7 +99,7 @@ function _backend_init!(state::Poller)::Int32
         @ccall close(epfd::Cint)::Cint
         return Int32(Base.Libc.ENOMEM)
     end
-    state.backend_state = EpollBackendState(epfd, efd, events, UInt32(0))
+    state.backend_state = EpollBackendState(epfd, efd, events, _epoll_wait_gc_safe_enabled(), UInt32(0))
     return Int32(0)
 end
 
@@ -100,8 +107,8 @@ end
 Close epoll backend resources.
 
 Only safe after the poller thread has exited (`shutdown!` waits on
-`shutdown_event` before calling this): the backend wait has no timeout cap,
-so the thread can be parked in `epoll_wait` indefinitely, and freeing the
+`shutdown_event` before calling this): the default backend wait has no timeout
+cap, so the thread can be parked in `epoll_wait` indefinitely, and freeing the
 event buffer under a live wait would hand the kernel a dangling pointer.
 """
 function _backend_close!(state::Poller)
@@ -233,6 +240,32 @@ end
     return Cint(1_000_000_000)
 end
 
+@inline function _epoll_effective_wait_timeout_ms(waitms::Cint, wait_gc_safe::Bool)::Cint
+    wait_gc_safe && return waitms
+    return waitms < 0 ? MAX_GC_UNSAFE_EPOLL_WAIT_MS : min(waitms, MAX_GC_UNSAFE_EPOLL_WAIT_MS)
+end
+
+@inline function _epoll_wait!(
+        epoll::EpollBackendState,
+        events::Ptr{EpollEvent},
+        waitms::Cint,
+    )::Cint
+    if epoll.wait_gc_safe
+        return @gcsafe_ccall epoll_wait(
+            epoll.epfd::Cint,
+            events::Ptr{EpollEvent},
+            Cint(MAX_EPOLL_EVENTS)::Cint,
+            waitms::Cint,
+        )::Cint
+    end
+    return @ccall epoll_wait(
+        epoll.epfd::Cint,
+        events::Ptr{EpollEvent},
+        Cint(MAX_EPOLL_EVENTS)::Cint,
+        waitms::Cint,
+    )::Cint
+end
+
 @inline function _decode_epoll_mode(events::UInt32)
     mode = UInt8(0x00)
     (events & (EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR)) != UInt32(0) && (mode |= UInt8(PollMode.READ))
@@ -250,26 +283,20 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
     epoll = backend::EpollBackendState
     events = epoll.events
     events == C_NULL && return Int32(Base.Libc.EBADF)
-    waitms = _epoll_wait_timeout_ms(delay_ns)
-    # The wait runs as a GC-safe ccall so a blocked poller never stalls
-    # stop-the-world: a GC-unsafe wait added its remaining timeout to every GC
-    # pause, and the 25ms cap that used to bound the stall taxed every
-    # collection while forcing an idle poller to wake 40 times a second. The
-    # event buffer is C memory (see `EpollBackendState`), so neither the
-    # kernel nor gVisor's userspace epoll touches the Julia heap while the GC
-    # runs, and no cap is needed: an idle poller sleeps until the wake eventfd
-    # fires, matching the kqueue and IOCP backends.
+    waitms = _epoll_effective_wait_timeout_ms(
+        _epoll_wait_timeout_ms(delay_ns),
+        epoll.wait_gc_safe,
+    )
+    # GC-safe waiting is the default and lets an idle poller sleep until its
+    # eventfd wakes. Trimmed or embedded runtimes that cannot safely return
+    # from a GC-safe call on this foreign pthread can set
+    # RESEAU_EPOLL_WAIT_GCSAFE=0. That path stays GC-unsafe and caps each wait
+    # so the poller can delay a collection by at most 25ms.
     while true
-        n = @gcsafe_ccall epoll_wait(
-            epoll.epfd::Cint,
-            events::Ptr{EpollEvent},
-            Cint(MAX_EPOLL_EVENTS)::Cint,
-            waitms::Cint,
-        )::Cint
+        n = _epoll_wait!(epoll, events, waitms)
         if n == Cint(-1)
-            # Relies on the GC-safe transition back (which can block on a
-            # running collection) not clobbering errno; futex waits on
-            # glibc/musl do not touch it.
+            # The GC-safe path can wait for a running collection before it
+            # returns here. Its glibc/musl futex wait does not clobber errno.
             errno = Int32(Base.Libc.errno())
             if errno == Int32(Base.Libc.EINTR)
                 waitms > 0 && return Int32(0)

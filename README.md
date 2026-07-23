@@ -216,6 +216,14 @@ artifacts and JLLs so runtime libraries like OpenSSL are available next to the
 built executable. The trim-compile tests in `test/trim_compile_tests.jl`
 exercise that path directly.
 
+## Embedded Runtime Poller Note
+
+On Linux, the dedicated epoll thread uses a GC-safe wait by default. An
+embedded or trim-compiled runtime whose foreign-thread callbacks cannot safely
+return from a GC-safe call can set `RESEAU_EPOLL_WAIT_GCSAFE=0`. Reseau then
+uses GC-unsafe waits capped at 25 ms, which avoids that transition while
+bounding the longest GC delay caused by an idle poller.
+
 ## Development Note
 
 This rewrite made significant use of AI assistance for the initial Go-to-Julia

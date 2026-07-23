@@ -100,6 +100,34 @@ end
             @test err isa ErrorException
             @test occursin("got 5 from a write of 4", sprint(showerror, err))
         end
+        @static if Sys.islinux()
+            @testset "epoll GC-safe wait configuration" begin
+                @test IP._epoll_wait_gc_safe_enabled()
+                withenv("RESEAU_EPOLL_WAIT_GCSAFE" => "0") do
+                    @test !IP._epoll_wait_gc_safe_enabled()
+                end
+                withenv("RESEAU_EPOLL_WAIT_GCSAFE" => "false") do
+                    @test !IP._epoll_wait_gc_safe_enabled()
+                end
+                @test IP._epoll_effective_wait_timeout_ms(Cint(-1), true) == Cint(-1)
+                @test IP._epoll_effective_wait_timeout_ms(Cint(-1), false) == Cint(25)
+                @test IP._epoll_effective_wait_timeout_ms(Cint(10), false) == Cint(10)
+                @test IP._epoll_effective_wait_timeout_ms(Cint(100), false) == Cint(25)
+                withenv("RESEAU_EPOLL_WAIT_GCSAFE" => "0") do
+                    state = IP.init!()
+                    try
+                        backend = state.backend_state
+                        @test backend isa IP.EpollBackendState
+                        @test !(backend::IP.EpollBackendState).wait_gc_safe
+                        for _ in 1:4
+                            GC.gc()
+                        end
+                    finally
+                        IP.shutdown!()
+                    end
+                end
+            end
+        end
         @testset "read waits then wakes on readability" begin
             fd0, fd1 = _ip_socketpair_stream()
             ipfd = IP.FD(fd0)
