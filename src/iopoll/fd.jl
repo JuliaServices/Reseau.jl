@@ -45,6 +45,12 @@ const _MAX_RW = 1 << 30
 
 @inline _max_rw_chunk(nbytes::Int)::Int = min(nbytes, _MAX_RW)
 
+# A raw pointer does not identify the Julia object that owns its memory. On
+# Windows, copy pointer-only I/O through a bounded, op-rooted buffer so an
+# exceptional cancellation/shutdown path can never leave the kernel accessing
+# caller memory after the unsafe_read/unsafe_write call has unwound.
+const _MAX_IOCP_RAW_BUFFER = 64 * 1024
+
 @inline function _checked_write_advance(total::Int, wrote::Int, requested::Int)::Int
     wrote > requested && throw(ErrorException("invalid return from write: got $wrote from a write of $requested"))
     return total + wrote
@@ -444,37 +450,38 @@ function _wait_iocp_completion!(registration::Registration, pd::PollState, mode:
     while true
         reason = pollwait!(waiter)
         err = _check_error(pd, mode)
+        # READY dominates a latched CANCELED token in PollWaiter. Honor a
+        # concurrently published deadline/close error before consulting the
+        # operation fence, otherwise that only error wake can be consumed as
+        # stale readiness and the task may park forever.
+        err == _POLL_NO_ERROR || _convert_poll_error!(err, is_file)
         if reason == PollWakeReason.READY
             _iocp_mode_active(registration, mode) && continue
-            _convert_poll_error!(err, is_file)
             return nothing
         end
-        err == _POLL_NO_ERROR && continue
-        _convert_poll_error!(err, is_file)
+        continue
     end
 end
 
 """
-Drain a deadline/close-interrupted Windows overlapped operation until the
-kernel no longer owns it.
+Retire a deadline/close-interrupted Windows overlapped operation.
 
-After `CancelIoEx` the kernel may keep writing through the submitted
-WSARecv/WSASend buffer until the operation's completion packet is delivered;
-the zombie machinery pins the OVERLAPPED but not the caller's data buffer, so
-returning (and leaving the caller's `GC.@preserve`) before that completion
-arrives could let the kernel scribble on reclaimed memory. Mirroring Go's
-`fd_windows.go` `execIO`, this waits for the completion unconditionally,
-looping until a finish call reports the operation is no longer in flight
-(anything other than `EAGAIN`, the mapping of `ERROR_IO_INCOMPLETE`).
+After `CancelIoEx` the operation remains in flight until its completion packet
+is consumed. Mirroring Go's `fd_windows.go` `execIO`, this waits while the
+runtime is available, looping until finish reports anything other than
+`EAGAIN`. If global shutdown has already made lookup unavailable, the op-rooted
+buffer and OVERLAPPED remain owned by the backend until its synchronous drain.
 
 Wake reasons are ignored on purpose: a concurrent close's `evict!` fires
 CANCELED wakes at every waiter before the completion is delivered, and the
-drain must keep waiting through those. That is safe because the caller holds
-the fd read/write lock, so `_destroy!` (and therefore `deregister!`) cannot
-tear down the registration until the drain returns, and the running poller
-thread always dispatches a wake when it processes the completion packet. If
-the poller has shut down instead, the finish call fails its registration
-lookup (`EBADF`) and the loop exits rather than parking forever.
+drain must keep waiting through those. The caller holds the fd read/write lock,
+so `_destroy!` (and therefore `deregister!`) cannot tear down the registration
+until the drain returns.
+
+Every READ/WRITE operation independently roots its submitted buffer. For
+pointer-only APIs that buffer is a bounded copy, so an unavailable runtime may
+return `EBADF` here while global shutdown finishes draining without exposing
+caller-owned memory to the kernel.
 """
 function _drain_canceled_iocp_op!(registration::Registration, mode::PollMode.T)
     canceled = _iocp_cancel_mode!(registration, mode)
@@ -483,9 +490,8 @@ function _drain_canceled_iocp_op!(registration::Registration, mode::PollMode.T)
         canceled && pollwait!(waiter)
         _, errno = mode == PollMode.WRITE ? _iocp_finish_write!(registration) : _iocp_finish_read!(registration)
         errno == Int32(Base.Libc.EAGAIN) || return nothing
-        # Still ERROR_IO_INCOMPLETE: the operation remains in flight, so keep
-        # waiting for its completion wake (tolerating eviction CANCELED wakes
-        # consumed along the way).
+        # The completion packet has not been consumed yet. Keep waiting through
+        # stale deadline/close wakes until the poller dispatches it.
         canceled = true
     end
 end
@@ -771,8 +777,8 @@ end
 
 # `root` (when given) is the object backing `p`; on Windows it is rooted in the
 # overlapped op so the kernel-owned WSARecv buffer stays reachable for the op's
-# full lifetime. Raw-pointer callers (e.g. tcp `unsafe` reads) pass nothing and
-# rely on their own `GC.@preserve` plus the cancel/drain path.
+# full lifetime. Pointer-only callers are copied through an op-rooted bounce
+# buffer because a pointer alone cannot keep its Julia owner alive.
 function _read_ptr_some!(fd::FD, p::Ptr{UInt8}, nbytes::Int, root=nothing)::Int
     _fd_read_lock!(fd)
     try
@@ -780,28 +786,36 @@ function _read_ptr_some!(fd::FD, p::Ptr{UInt8}, nbytes::Int, root=nothing)::Int
         @static if Sys.iswindows()
             prepareread(fd.pd, fd.is_file)
             registration = _poll_registration(fd.pd)
-            n = UInt32(_max_rw_chunk(nbytes))
-            while true
-                errno = _iocp_submit_read!(registration, p, n, root)
-                errno == Int32(0) && break
-                if errno == Int32(Base.Libc.EALREADY)
-                    waitread(fd.pd, fd.is_file)
-                    continue
+            raw_pointer = root === nothing
+            n = raw_pointer ?
+                UInt32(min(_max_rw_chunk(nbytes), _MAX_IOCP_RAW_BUFFER)) :
+                UInt32(_max_rw_chunk(nbytes))
+            io_root = raw_pointer ? Vector{UInt8}(undef, Int(n)) : root
+            io_ptr = raw_pointer ? pointer(io_root::Vector{UInt8}) : p
+            return GC.@preserve io_root begin
+                while true
+                    errno = _iocp_submit_read!(registration, io_ptr, n, io_root)
+                    errno == Int32(0) && break
+                    if errno == Int32(Base.Libc.EALREADY)
+                        waitread(fd.pd, fd.is_file)
+                        continue
+                    end
+                    throw(SystemError("read", Int(errno)))
                 end
-                throw(SystemError("read", Int(errno)))
+                try
+                    _wait_iocp_completion!(registration, fd.pd, PollMode.READ, fd.is_file)
+                catch err
+                    _drain_canceled_iocp_op!(registration, PollMode.READ)
+                    rethrow(err)
+                end
+                bytes, result = _iocp_finish_read!(registration)
+                result == Int32(0) || throw(SystemError("read", Int(result)))
+                if bytes == UInt32(0) && fd.zero_read_is_eof
+                    throw(EOFError())
+                end
+                raw_pointer && unsafe_copyto!(p, io_ptr, Int(bytes))
+                return Int(bytes)
             end
-            try
-                _wait_iocp_completion!(registration, fd.pd, PollMode.READ, fd.is_file)
-            catch err
-                _drain_canceled_iocp_op!(registration, PollMode.READ)
-                rethrow(err)
-            end
-            bytes, result = _iocp_finish_read!(registration)
-            result == Int32(0) || throw(SystemError("read", Int(result)))
-            if bytes == UInt32(0) && fd.zero_read_is_eof
-                throw(EOFError())
-            end
-            return Int(bytes)
         end
         # Avoid taking the global poller lock before every successful read.
         # If the read would block, `waitread` refreshes backend event state
@@ -864,32 +878,50 @@ function write!(fd::FD, p::ByteMemory, nbytes::Integer)::Int
 end
 
 # See `_read_ptr_some!`: `root`, when supplied, keeps the WSASend source buffer
-# reachable for the overlapped op's full lifetime on Windows.
+# reachable for the overlapped op's full lifetime on Windows. Pointer-only
+# callers use the same bounded bounce-buffer fallback.
 function _write_ptr!(fd::FD, p::Ptr{UInt8}, nbytes::Int, root=nothing)::Int
     _fd_write_lock!(fd)
     nn = 0
     try
         @static if Sys.iswindows()
+            raw_pointer = root === nothing
+            bounce = raw_pointer ?
+                Vector{UInt8}(undef, min(nbytes, _MAX_IOCP_RAW_BUFFER)) :
+                nothing
             while nn < nbytes
                 preparewrite(fd.pd, fd.is_file)
                 registration = _poll_registration(fd.pd)
-                chunk = UInt32(_max_rw_chunk(nbytes - nn))
-                while true
-                    errno = _iocp_submit_write!(registration, p + nn, chunk, root)
-                    errno == Int32(0) && break
-                    if errno == Int32(Base.Libc.EALREADY)
-                        waitwrite(fd.pd, fd.is_file)
-                        continue
+                chunk_int = raw_pointer ?
+                    min(nbytes - nn, _MAX_IOCP_RAW_BUFFER) :
+                    _max_rw_chunk(nbytes - nn)
+                chunk = UInt32(chunk_int)
+                io_root = raw_pointer ? bounce::Vector{UInt8} : root
+                io_ptr = p + nn
+                if raw_pointer
+                    GC.@preserve io_root unsafe_copyto!(pointer(io_root), io_ptr, chunk_int)
+                    io_ptr = pointer(io_root)
+                end
+                bytes = UInt32(0)
+                result = Int32(0)
+                GC.@preserve io_root begin
+                    while true
+                        errno = _iocp_submit_write!(registration, io_ptr, chunk, io_root)
+                        errno == Int32(0) && break
+                        if errno == Int32(Base.Libc.EALREADY)
+                            waitwrite(fd.pd, fd.is_file)
+                            continue
+                        end
+                        throw(SystemError("write", Int(errno)))
                     end
-                    throw(SystemError("write", Int(errno)))
+                    try
+                        _wait_iocp_completion!(registration, fd.pd, PollMode.WRITE, fd.is_file)
+                    catch err
+                        _drain_canceled_iocp_op!(registration, PollMode.WRITE)
+                        rethrow(err)
+                    end
+                    bytes, result = _iocp_finish_write!(registration)
                 end
-                try
-                    _wait_iocp_completion!(registration, fd.pd, PollMode.WRITE, fd.is_file)
-                catch err
-                    _drain_canceled_iocp_op!(registration, PollMode.WRITE)
-                    rethrow(err)
-                end
-                bytes, result = _iocp_finish_write!(registration)
                 result == Int32(0) || throw(SystemError("write", Int(result)))
                 bytes == UInt32(0) && throw(EOFError())
                 nn = _checked_write_advance(nn, Int(bytes), Int(chunk))

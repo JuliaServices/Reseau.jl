@@ -853,8 +853,8 @@ end
     return IOPoll.read!(conn.fd.pfd, buf)
 end
 
-@inline function _read_some!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
-    return IOPoll._read_ptr_some!(conn.fd.pfd, ptr, nbytes)
+@inline function _read_some!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int, root=nothing)::Int
+    return IOPoll._read_ptr_some!(conn.fd.pfd, ptr, nbytes, root)
 end
 
 function _grow_readbytes_target!(buf::Vector{UInt8}, current::Int, nb::Int)::Int
@@ -937,7 +937,7 @@ function _readbytes_all!(conn::Conn, buf::Vector{UInt8}, requested::Int)::Int
         end
         chunk_capacity = min(current_len - bytes_read, requested - bytes_read)
         n = try
-            GC.@preserve buf _read_some!(conn, pointer(buf, bytes_read + 1), chunk_capacity)
+            GC.@preserve buf _read_some!(conn, pointer(buf, bytes_read + 1), chunk_capacity, buf)
         catch err
             ex = err::Exception
             ex isa EOFError || rethrow(ex)
@@ -955,7 +955,7 @@ function _readbytes_some!(conn::Conn, buf::Vector{UInt8}, requested::Int)::Int
     original_len = length(buf)
     requested > original_len && resize!(buf, requested)
     bytes_read = try
-        GC.@preserve buf _read_some!(conn, pointer(buf), requested)
+        GC.@preserve buf _read_some!(conn, pointer(buf), requested, buf)
     catch err
         ex = err::Exception
         ex isa EOFError || rethrow(ex)
@@ -973,7 +973,7 @@ function _readbytes_all!(conn::Conn, buf::MutableByteBuffer, requested::Int)::In
     bytes_read = 0
     while bytes_read < requested
         n = try
-            GC.@preserve buf _read_some!(conn, pointer(buf, bytes_read + 1), requested - bytes_read)
+            GC.@preserve buf _read_some!(conn, pointer(buf, bytes_read + 1), requested - bytes_read, buf)
         catch err
             ex = err::Exception
             ex isa EOFError || rethrow(ex)
@@ -987,7 +987,7 @@ end
 function _readbytes_some!(conn::Conn, buf::MutableByteBuffer, requested::Int)::Int
     requested <= length(buf) || throw(ArgumentError("nb exceeds fixed-size buffer length"))
     return try
-        GC.@preserve buf _read_some!(conn, pointer(buf), requested)
+        GC.@preserve buf _read_some!(conn, pointer(buf), requested, buf)
     catch err
         ex = err::Exception
         ex isa EOFError || rethrow(ex)
@@ -1100,6 +1100,10 @@ function Base.flush(::Conn)
     return nothing
 end
 
+@inline function _write_rooted!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int, root)::Int
+    return IOPoll._write_ptr!(conn.fd.pfd, ptr, nbytes, root)
+end
+
 """
     write(conn, byte::UInt8) -> Int
 
@@ -1108,7 +1112,7 @@ Write one byte to the connection and return `1`.
 function Base.write(conn::Conn, byte::UInt8)::Int
     ref = Ref{UInt8}(byte)
     GC.@preserve ref begin
-        return Int(Base.unsafe_write(conn, Base.unsafe_convert(Ptr{UInt8}, ref), UInt(1)))
+        return _write_rooted!(conn, Base.unsafe_convert(Ptr{UInt8}, ref), 1, ref)
     end
 end
 
@@ -1134,28 +1138,28 @@ Base.write(conn::Conn, buf::AbstractVector{UInt8})
 
 function Base.write(conn::Conn, buf::Vector{UInt8})::Int
     GC.@preserve buf begin
-        return Int(Base.unsafe_write(conn, pointer(buf), UInt(length(buf))))
+        return _write_rooted!(conn, pointer(buf), length(buf), buf)
     end
 end
 
 function Base.write(conn::Conn, buf::StridedVector{UInt8})::Int
     if stride(buf, 1) == 1
-        return GC.@preserve buf Int(Base.unsafe_write(conn, pointer(buf), UInt(length(buf))))
+        return GC.@preserve buf _write_rooted!(conn, pointer(buf), length(buf), buf)
     end
     data = Vector{UInt8}(buf)
     GC.@preserve data begin
-        return Int(Base.unsafe_write(conn, pointer(data), UInt(length(data))))
+        return _write_rooted!(conn, pointer(data), length(data), data)
     end
 end
 
 function Base.write(conn::Conn, buf::Base.CodeUnits{UInt8,<:AbstractString})::Int
-    return write(conn, buf.s)
+    return GC.@preserve buf _write_rooted!(conn, pointer(buf), length(buf), buf)
 end
 
 function Base.write(conn::Conn, buf::AbstractVector{UInt8})::Int
     data = Vector{UInt8}(buf)
     GC.@preserve data begin
-        return Int(Base.unsafe_write(conn, pointer(data), UInt(length(data))))
+        return _write_rooted!(conn, pointer(data), length(data), data)
     end
 end
 
@@ -1174,7 +1178,7 @@ function Base.write(conn::Conn, buf::ByteMemory, nbytes::Integer)::Int
     n < 0 && throw(ArgumentError("nbytes must be >= 0"))
     n <= length(buf) || throw(ArgumentError("nbytes exceeds buffer length"))
     GC.@preserve buf begin
-        return Int(Base.unsafe_write(conn, pointer(buf), UInt(n)))
+        return _write_rooted!(conn, pointer(buf), n, buf)
     end
 end
 

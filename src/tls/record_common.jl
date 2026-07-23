@@ -152,11 +152,12 @@ function _tls_read_record_bytes!(
         ptr::Ptr{UInt8},
         nbytes::Int,
         allow_boundary_eof::Bool,
+        root=nothing,
     )::Nothing
     offset = 0
     while offset < nbytes
         n = try
-            TCP._read_some!(tcp, ptr + offset, nbytes - offset)
+            TCP._read_some!(tcp, ptr + offset, nbytes - offset, root)
         catch err
             err isa IOPoll.DeadlineExceededError &&
                 throw(_TLSTransportDeadlineError(_TLS_IO_READ, err))
@@ -214,13 +215,25 @@ function _tls_read_wire_record!(
         negotiated_version::UInt16,
     )::Int
     resize!(record_buffer, 5)
-    GC.@preserve record_buffer _tls_read_record_bytes!(tcp, pointer(record_buffer), 5, true)
+    GC.@preserve record_buffer _tls_read_record_bytes!(
+        tcp,
+        pointer(record_buffer),
+        5,
+        true,
+        record_buffer,
+    )
     _tls_validate_record_header!(record_buffer, negotiated_version)
     payload_len = (Int(record_buffer[4]) << 8) | Int(record_buffer[5])
     payload_len <= max_ciphertext || _tls_fail(_TLS_ALERT_RECORD_OVERFLOW, "tls: received oversized TLS record")
     resize!(record_buffer, 5 + payload_len)
     if payload_len != 0
-        GC.@preserve record_buffer _tls_read_record_bytes!(tcp, pointer(record_buffer, 6), payload_len, false)
+        GC.@preserve record_buffer _tls_read_record_bytes!(
+            tcp,
+            pointer(record_buffer, 6),
+            payload_len,
+            false,
+            record_buffer,
+        )
     end
     return payload_len
 end

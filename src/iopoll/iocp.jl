@@ -115,12 +115,12 @@ mutable struct IocpOp
     token::UInt64
     kind::IocpOpKind.T
     request::IocpRequest
-    # Strong reference to the caller's data buffer for the full lifetime of a
+    # Strong reference to the submitted data buffer for the full lifetime of a
     # READ/WRITE overlapped op, mirroring how CONNECT/ACCEPT root their address
-    # buffer via `request`. The kernel keeps writing through the submitted
-    # WSARecv/WSASend buffer until the completion packet is delivered, so the op
-    # must keep the backing object reachable even if it ever outlives the
-    # caller's `GC.@preserve` scope. Cleared on terminal (non-EAGAIN) finish.
+    # buffer via `request`. This is either the caller's backing object or the
+    # bounded bounce buffer used by pointer-only APIs. The kernel retains the
+    # WSARecv/WSASend pointer until the completion packet is delivered, so the
+    # op must keep that object reachable until terminal finish.
     buffer::Any
     @atomic active::Bool
 end
@@ -137,6 +137,7 @@ end
 mutable struct IocpBackendState <: BackendState
     port::Ptr{Cvoid}
     entries::Vector{OverlappedEntry}
+    ready_events::Vector{PollEvent}
     by_fd::Dict{SysFD, IocpRegistration}
     by_ptr::Dict{Ptr{Cvoid}, IocpRegistration}
     zombies::Vector{IocpRegistration}
@@ -317,6 +318,16 @@ function _cleanup_registration_if_done!(backend::IocpBackendState, reg::IocpRegi
     return nothing
 end
 
+"""
+Request cancellation of an active overlapped operation.
+
+The return value says whether a completion packet is still owed and must be
+drained, not whether `CancelIoEx` itself found and canceled the request.
+`ERROR_NOT_FOUND` can mean that the operation has completed and its packet is
+already queued (or dequeued by the poller while it waits for `state.lock`).
+Only the completion consumer may clear `active`; until then the OVERLAPPED and
+its buffer roots must remain live and the storage must not be reused.
+"""
 function _cancel_iocp_op!(reg::IocpRegistration, op::IocpOp; strict::Bool = false)::Bool
     (@atomic :acquire op.active) || return false
     ok = @gcsafe_ccall _KERNEL32.CancelIoEx(
@@ -326,8 +337,10 @@ function _cancel_iocp_op!(reg::IocpRegistration, op::IocpOp; strict::Bool = fals
     if ok == 0
         err = _win_get_last_error()
         if err == _ERROR_NOT_FOUND
-            @atomic :release op.active = false
-            return false
+            # No request remains cancellable, but the completion packet is
+            # still the lifetime/reuse fence. In particular, GQCSEx may already
+            # have dequeued it while the poller is blocked on `state.lock`.
+            return true
         end
         # Ordinary deadline/close cancellation keeps waiting for terminal
         # completion even if cancellation itself failed. During global backend
@@ -352,6 +365,14 @@ function _submit_iocp_op!(
     )::Int32
     _, ok = @atomicreplace(op.active, false => true)
     ok || return Int32(Base.Libc.EALREADY)
+    if (kind == IocpOpKind.READ || kind == IocpOpKind.WRITE) && buffer === nothing
+        # An existing operation must win with EALREADY before validating the
+        # next request. The read/write wrappers clear a newly failed
+        # submission, so returning EINVAL for an already-active op would reset
+        # live OVERLAPPED storage before its completion packet is consumed.
+        _clear_iocp_op!(op)
+        return Int32(Base.Libc.EINVAL)
+    end
     if kind !== nothing
         op.kind = kind::IocpOpKind.T
         op.request = request
@@ -515,10 +536,16 @@ function _iocp_op_for_mode(reg::IocpRegistration, mode::PollMode.T)::IocpOp
     throw(ArgumentError("invalid IOCP mode"))
 end
 
-function _lookup_iocp_registration(registration::Registration)::Union{Nothing, IocpRegistration}
-    isassigned(POLLER) || return nothing
-    state = POLLER[]
+function _lookup_iocp_registration(
+        state::Poller,
+        registration::Registration,
+    )::Union{Nothing, IocpRegistration}
     (@atomic :acquire state.running) || return nothing
+    # Validate object identity, not only fd/token. Poller generations restart
+    # their token counter, so an old waiter must never alias a new registration
+    # after shutdown/re-init happens to reuse both values.
+    get(state.registrations_by_token, registration.token, nothing) === registration || return nothing
+    get(state.registrations, registration.fd, nothing) === registration || return nothing
     backend = _iocp_backend(state)
     backend === nothing && return nothing
     reg = get(backend.by_fd, registration.fd, nothing)
@@ -533,37 +560,41 @@ function _finish_iocp_mode!(registration::Registration, mode::PollMode.T)::Int32
 end
 
 function _finish_iocp_mode_with_bytes!(registration::Registration, mode::PollMode.T)::Tuple{UInt32, Int32}
+    isassigned(POLLER) || return UInt32(0), Int32(Base.Libc.EBADF)
     state = POLLER[]
-    reg = nothing
-    op = nothing
     lock(state.lock)
     try
-        reg = _lookup_iocp_registration(registration)
+        reg = _lookup_iocp_registration(state, registration)
         reg === nothing && return UInt32(0), Int32(Base.Libc.EBADF)
         op = _iocp_op_for_mode(reg, mode)
-    finally
-        unlock(state.lock)
-    end
-    bytes, result = _wsagetoverlappedresult_bytes(registration.fd, op::IocpOp)
-    lock(state.lock)
-    try
+        # `active` is the completion-packet fence. Even if
+        # WSAGetOverlappedResult could already report a terminal result, the
+        # OVERLAPPED cannot be reset or reused until GQCS[Ex] has consumed its
+        # packet and published active=false.
+        (@atomic :acquire op.active) &&
+            return UInt32(0), Int32(Base.Libc.EAGAIN)
+        bytes, result = _wsagetoverlappedresult_bytes(registration.fd, op)
         if result != Int32(Base.Libc.EAGAIN)
             _clear_iocp_op!(op)
         end
+        return bytes, result
     finally
         unlock(state.lock)
     end
-    return bytes, result
 end
 
 function _iocp_mode_active(registration::Registration, mode::PollMode.T)::Bool
-    isassigned(POLLER) || return false
+    # An unavailable registration is not evidence of terminal I/O: shutdown
+    # publishes running=false and clears the runtime maps before its synchronous
+    # IOCP drain. Be conservative so raw-pointer callers remain parked until
+    # shutdown marks their PollState closing after backend teardown.
+    isassigned(POLLER) || return true
     state = POLLER[]
-    (@atomic :acquire state.running) || return false
+    (@atomic :acquire state.running) || return true
     lock(state.lock)
     try
-        reg = _lookup_iocp_registration(registration)
-        reg === nothing && return false
+        reg = _lookup_iocp_registration(state, registration)
+        reg === nothing && return true
         op = _iocp_op_for_mode(reg, mode)
         return @atomic :acquire op.active
     finally
@@ -578,7 +609,7 @@ function _iocp_cancel_mode!(registration::Registration, mode::PollMode.T)::Bool
     canceled = false
     lock(state.lock)
     try
-        reg = _lookup_iocp_registration(registration)
+        reg = _lookup_iocp_registration(state, registration)
         reg === nothing && return false
         canceled = _cancel_iocp_op!(reg, _iocp_op_for_mode(reg, mode))
     finally
@@ -594,7 +625,7 @@ function _iocp_submit_read!(registration::Registration, ptr::Ptr{UInt8}, nbytes:
     errno = Int32(0)
     lock(state.lock)
     try
-        reg = _lookup_iocp_registration(registration)
+        reg = _lookup_iocp_registration(state, registration)
         reg === nothing && return Int32(Base.Libc.EBADF)
         op = reg.read_op
         errno = _submit_iocp_op!(registration, reg, op; ptr, nbytes, kind=IocpOpKind.READ, buffer=root)
@@ -618,7 +649,7 @@ function _iocp_submit_write!(registration::Registration, ptr::Ptr{UInt8}, nbytes
     errno = Int32(0)
     lock(state.lock)
     try
-        reg = _lookup_iocp_registration(registration)
+        reg = _lookup_iocp_registration(state, registration)
         reg === nothing && return Int32(Base.Libc.EBADF)
         op = reg.write_op
         errno = _submit_iocp_op!(registration, reg, op; ptr, nbytes, kind=IocpOpKind.WRITE, buffer=root)
@@ -642,7 +673,7 @@ function _iocp_submit_connect!(registration::Registration, addrbuf::Vector{UInt8
     errno = Int32(0)
     lock(state.lock)
     try
-        reg = _lookup_iocp_registration(registration)
+        reg = _lookup_iocp_registration(state, registration)
         reg === nothing && return Int32(Base.Libc.EBADF)
         op = reg.write_op
         request = IocpConnectRequest(addrbuf, addrlen)
@@ -667,7 +698,7 @@ function _iocp_submit_accept!(registration::Registration, acceptfd::SysFD, addrb
     errno = Int32(0)
     lock(state.lock)
     try
-        reg = _lookup_iocp_registration(registration)
+        reg = _lookup_iocp_registration(state, registration)
         reg === nothing && return Int32(Base.Libc.EBADF)
         op = reg.read_op
         request = IocpAcceptRequest(acceptfd, addrbuf)
@@ -682,11 +713,12 @@ function _iocp_submit_accept!(registration::Registration, acceptfd::SysFD, addrb
 end
 
 function _iocp_finish_accept!(registration::Registration)::Tuple{SysFD, Vector{UInt8}, Int32}
+    isassigned(POLLER) || return INVALID_FD, UInt8[], Int32(Base.Libc.EBADF)
     state = POLLER[]
     request = nothing
     lock(state.lock)
     try
-        reg = _lookup_iocp_registration(registration)
+        reg = _lookup_iocp_registration(state, registration)
         reg === nothing && return INVALID_FD, UInt8[], Int32(Base.Libc.EBADF)
         request = reg.read_op.request
     finally
@@ -708,6 +740,7 @@ function _backend_init!(state::Poller)::Int32
     state.backend_state = IocpBackendState(
         port,
         Vector{OverlappedEntry}(undef, _MAX_IOCP_EVENTS),
+        Vector{PollEvent}(undef, _MAX_IOCP_EVENTS),
         Dict{SysFD, IocpRegistration}(),
         Dict{Ptr{Cvoid}, IocpRegistration}(),
         IocpRegistration[],
@@ -930,6 +963,8 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
         return _map_win_errno(err)
     end
     n = Int(removed[])
+    ready_events = backend.ready_events
+    ready_count = 0
     for i in 1:n
         entry = entries[i]
         if entry.key == _WAKE_KEY && entry.overlapped == C_NULL
@@ -982,7 +1017,20 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
         end
         dispatch || continue
         status = UInt32(entry.internal & UInt(typemax(UInt32)))
-        _dispatch_ready_event!(state, PollEvent(INVALID_FD, token, mode, is_probe && status != UInt32(0)))
+        ready_count += 1
+        ready_events[ready_count] = PollEvent(
+            INVALID_FD,
+            token,
+            mode,
+            is_probe && status != UInt32(0),
+        )
+    end
+    # GQCSEx dequeues the whole batch atomically. Retire every corresponding
+    # operation above before any waiter dispatch can throw; otherwise a later
+    # entry could remain active even though its only completion packet was
+    # already removed, causing shutdown's synchronous drain to wait forever.
+    for i in 1:ready_count
+        _dispatch_ready_event!(state, ready_events[i])
     end
     return Int32(0)
 end

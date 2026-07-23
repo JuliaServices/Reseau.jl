@@ -57,6 +57,22 @@ function _ip_write_byte(fd::SO.SocketFD, b::UInt8)
     throw(ArgumentError("timed out writing byte"))
 end
 
+function _ip_read_byte(fd::SO.SocketFD)::UInt8
+    buf = Ref{UInt8}(0)
+    deadline = Int64(time_ns()) + Int64(2_000_000_000)
+    while Int64(time_ns()) < deadline
+        n = GC.@preserve buf SO.read_once!(fd, Base.unsafe_convert(Ptr{UInt8}, buf), Csize_t(1))
+        n == Cssize_t(1) && return buf[]
+        n == Cssize_t(0) && throw(EOFError())
+        errno = SO.last_error()
+        errno == Int32(Base.Libc.EAGAIN) && (yield(); continue)
+        errno == _IP_EWOULDBLOCK && (yield(); continue)
+        errno == Int32(Base.Libc.EINTR) && continue
+        throw(SystemError("read", Int(errno)))
+    end
+    throw(ArgumentError("timed out reading byte"))
+end
+
 function _ip_accept_with_retry(listener::SO.SocketFD)::Tuple{SO.SocketFD, SO.AcceptPeer}
     for _ in 1:5000
         accepted, peer, errno = SO.try_accept_socket(listener)
@@ -373,20 +389,67 @@ end
             end
         end
         @static if Sys.iswindows()
-            @testset "shutdown drains pending IOCP before releasing raw buffers" begin
+            @testset "pointer-only IOCP uses rooted bounce buffers" begin
                 IP.shutdown!()
                 fd0, fd1 = _ip_socketpair_stream()
                 ipfd = IP.FD(fd0)
                 read_task = nothing
                 shutdown_task = nothing
+                raw_ptr = Channel{Ptr{UInt8}}(1)
                 fd0 = SO.INVALID_SOCKET
                 try
                     IP._set_nonblocking!(ipfd.sysfd)
                     IP.register!(ipfd)
-                    # Exercise the raw-pointer path used by TCP/TLS: the IOCP op
-                    # has no object in its buffer root slot, so the task's
-                    # GC.@preserve scope must remain parked until shutdown has
-                    # observed the terminal completion.
+                    # A pointer-only operation must target an op-rooted bounce
+                    # buffer rather than the caller's unowned pointer.
+                    read_task = errormonitor(Threads.@spawn begin
+                        buf = Vector{UInt8}(undef, 1)
+                        return GC.@preserve buf begin
+                            put!(raw_ptr, pointer(buf))
+                            try
+                                n = IP._read_ptr_some!(ipfd, pointer(buf), 1)
+                                (n, buf[1])
+                            catch err
+                                err
+                            end
+                        end
+                    end)
+                    caller_ptr = take!(raw_ptr)
+                    state = IP.POLLER[]
+                    active = IP.timedwait(2.0; pollint = 0.001) do
+                        lock(state.lock)
+                        try
+                            backend = IP._iocp_backend(state)
+                            backend === nothing && return false
+                            reg = get(backend.by_fd, ipfd.sysfd, nothing)
+                            reg === nothing && return false
+                            op_buffer = reg.read_op.buffer
+                            return (@atomic :acquire reg.read_op.active) &&
+                                op_buffer isa Vector{UInt8} &&
+                                pointer(op_buffer::Vector{UInt8}) != caller_ptr
+                        finally
+                            unlock(state.lock)
+                        end
+                    end
+                    @test active != :timed_out
+                    @test !istaskdone(read_task)
+
+                    _ip_write_byte(fd1, 0x6a)
+                    @test IP.timedwait(() -> istaskdone(read_task), 2.0; pollint = 0.001) != :timed_out
+                    @test fetch(read_task) == (1, 0x6a)
+
+                    source = Ref{UInt8}(0x6c)
+                    written = GC.@preserve source IP._write_ptr!(
+                        ipfd,
+                        Base.unsafe_convert(Ptr{UInt8}, source),
+                        1,
+                    )
+                    @test written == 1
+                    @test _ip_read_byte(fd1) == 0x6c
+
+                    # Leave another raw read pending and verify normal runtime
+                    # shutdown retires the rooted bounce buffer before waking
+                    # the caller out of its preserve scope.
                     read_task = errormonitor(Threads.@spawn begin
                         buf = Vector{UInt8}(undef, 1)
                         return GC.@preserve buf begin
@@ -398,28 +461,39 @@ end
                             end
                         end
                     end)
-                    state = IP.POLLER[]
-                    active = IP.timedwait(2.0; pollint = 0.001) do
+                    pending = IP.timedwait(2.0; pollint = 0.001) do
                         lock(state.lock)
                         try
                             backend = IP._iocp_backend(state)
                             backend === nothing && return false
                             reg = get(backend.by_fd, ipfd.sysfd, nothing)
                             reg === nothing && return false
-                            return (@atomic :acquire reg.read_op.active) && reg.read_op.buffer === nothing
+                            return (@atomic :acquire reg.read_op.active) &&
+                                reg.read_op.buffer isa Vector{UInt8}
                         finally
                             unlock(state.lock)
                         end
                     end
-                    @test active != :timed_out
-                    @test !istaskdone(read_task)
+                    @test pending != :timed_out
 
-                    shutdown_task = errormonitor(Threads.@spawn IP.shutdown!())
-                    @test IP.timedwait(() -> istaskdone(shutdown_task), 5.0; pollint = 0.001) != :timed_out
+                    shutdown_started = Channel{Nothing}(1)
+                    shutdown_task = errormonitor(Threads.@spawn begin
+                        put!(shutdown_started, nothing)
+                        IP.shutdown!()
+                    end)
+                    take!(shutdown_started)
+                    @test IP.timedwait(
+                        () -> istaskdone(shutdown_task),
+                        5.0;
+                        pollint = 0.001,
+                    ) != :timed_out
                     wait(shutdown_task)
-                    @test IP.timedwait(() -> istaskdone(read_task), 2.0; pollint = 0.001) != :timed_out
-                    result = fetch(read_task)
-                    @test result isa IP.NetClosingError
+                    @test IP.timedwait(
+                        () -> istaskdone(read_task),
+                        2.0;
+                        pollint = 0.001,
+                    ) != :timed_out
+                    @test fetch(read_task) isa IP.NetClosingError
                     @test (@atomic :acquire ipfd.pd.closing)
                     @test !(@atomic :acquire ipfd.pd.pollable)
                 finally
@@ -429,6 +503,297 @@ end
                     if shutdown_task isa Task && istaskdone(shutdown_task)
                         wait(shutdown_task)
                     end
+                    IP._is_valid_fd(ipfd.sysfd) && close(ipfd)
+                    _ip_close_fd(fd1)
+                    IP.shutdown!()
+                end
+            end
+            @testset "CancelIoEx ERROR_NOT_FOUND preserves the queued-completion fence" begin
+                IP.shutdown!()
+                fd0, fd1 = _ip_socketpair_stream()
+                state = IP.Poller()
+                op = nothing
+                packet_posted = false
+                try
+                    @test IP._backend_init!(state) == Int32(0)
+                    backend = IP._iocp_backend(state)
+                    @test backend !== nothing
+                    token = UInt64(0x51)
+                    @test IP._backend_open_fd!(state, fd0, IP.PollMode.READWRITE, token) == Int32(0)
+                    reg = (backend::IP.IocpBackendState).by_fd[fd0]
+                    op = reg.read_op
+                    registration = IP.Registration(
+                        fd0,
+                        token,
+                        IP.PollMode.READ,
+                        IP.PollWaiter(),
+                        IP.PollWaiter(),
+                        false,
+                    )
+                    @test IP._submit_iocp_op!(
+                        registration,
+                        reg,
+                        op;
+                        ptr = Ptr{UInt8}(C_NULL),
+                        nbytes = UInt32(1),
+                        kind = IP.IocpOpKind.READ,
+                    ) == Int32(Base.Libc.EINVAL)
+                    @test !(@atomic :acquire op.active)
+                    @atomic :release op.active = true
+                    impostor = IP.Registration(
+                        fd0,
+                        token,
+                        IP.PollMode.READ,
+                        IP.PollWaiter(),
+                        IP.PollWaiter(),
+                        false,
+                    )
+                    lock(state.lock)
+                    try
+                        state.registrations[fd0] = registration
+                        state.registrations_by_token[token] = registration
+                        @atomic :release state.running = true
+                        @test IP._lookup_iocp_registration(state, registration) === reg
+                        @test IP._lookup_iocp_registration(state, impostor) === nothing
+                    finally
+                        unlock(state.lock)
+                    end
+
+                    posted = ccall(
+                        (:PostQueuedCompletionStatus, "Kernel32"),
+                        Int32,
+                        (Ptr{Cvoid}, UInt32, UInt, Ptr{Cvoid}),
+                        backend.port,
+                        UInt32(0),
+                        UInt(token),
+                        IP._op_ptr(op),
+                    )
+                    posted != 0 || error(
+                        "PostQueuedCompletionStatus failed: $(IP._win_get_last_error())",
+                    )
+                    packet_posted = posted != 0
+
+                    # There is deliberately no matching OS request, so
+                    # CancelIoEx returns ERROR_NOT_FOUND even though a packet
+                    # for this OVERLAPPED is queued.
+                    raw_cancel = ccall(
+                        (:CancelIoEx, "Kernel32"),
+                        Int32,
+                        (Ptr{Cvoid}, Ptr{Cvoid}),
+                        IP._socket_handle(fd0),
+                        IP._op_ptr(op),
+                    )
+                    raw_cancel_error = raw_cancel == 0 ? IP._win_get_last_error() : UInt32(0)
+                    @test raw_cancel == 0
+                    @test raw_cancel_error == IP._ERROR_NOT_FOUND
+                    @test IP._cancel_iocp_op!(reg, op)
+                    @test (@atomic :acquire op.active)
+
+                    @test IP._submit_iocp_op!(
+                        registration,
+                        reg,
+                        op;
+                        kind = IP.IocpOpKind.PROBE_READ,
+                    ) == Int32(Base.Libc.EALREADY)
+
+                    IP._drain_pending_ops_on_close!(backend)
+                    @test !(@atomic :acquire op.active)
+
+                    bytes_ref = Ref{UInt32}(UInt32(0))
+                    key_ref = Ref{UInt}(UInt(0))
+                    ov_ref = Ref{Ptr{Cvoid}}(C_NULL)
+                    empty_result = GC.@preserve bytes_ref key_ref ov_ref begin
+                        ccall(
+                            (:GetQueuedCompletionStatus, "Kernel32"),
+                            Int32,
+                            (Ptr{Cvoid}, Ref{UInt32}, Ref{UInt}, Ref{Ptr{Cvoid}}, UInt32),
+                            backend.port,
+                            bytes_ref,
+                            key_ref,
+                            ov_ref,
+                            UInt32(0),
+                        )
+                    end
+                    empty_error = empty_result == 0 ? IP._win_get_last_error() : UInt32(0)
+                    @test empty_result == 0
+                    @test ov_ref[] == C_NULL
+                    @test empty_error == IP._WAIT_TIMEOUT
+                finally
+                    @atomic :release state.running = false
+                    if op isa IP.IocpOp && !packet_posted
+                        active_op = op::IP.IocpOp
+                        @atomic :release active_op.active = false
+                    end
+                    state.backend_state === nothing || IP._backend_close!(state)
+                    _ip_close_fd(fd0)
+                    _ip_close_fd(fd1)
+                    IP.shutdown!()
+                end
+            end
+            @testset "active IOCP storage cannot be finished or reused before dispatch" begin
+                IP.shutdown!()
+                fd0, fd1 = _ip_socketpair_stream()
+                ipfd = IP.FD(fd0)
+                read_task = nothing
+                fd0 = SO.INVALID_SOCKET
+                try
+                    IP._set_nonblocking!(ipfd.sysfd)
+                    IP.register!(ipfd)
+                    read_task = errormonitor(Threads.@spawn begin
+                        buf = Vector{UInt8}(undef, 1)
+                        try
+                            n = IP.read!(ipfd, buf)
+                            return n, buf[1]
+                        catch err
+                            return err
+                        end
+                    end)
+                    state = IP.POLLER[]
+                    active = IP.timedwait(2.0; pollint = 0.001) do
+                        lock(state.lock)
+                        try
+                            backend = IP._iocp_backend(state)
+                            backend === nothing && return false
+                            reg = get(backend.by_fd, ipfd.sysfd, nothing)
+                            reg === nothing && return false
+                            return @atomic :acquire reg.read_op.active
+                        finally
+                            unlock(state.lock)
+                        end
+                    end
+                    @test active != :timed_out
+
+                    lock(state.lock)
+                    try
+                        backend = IP._iocp_backend(state)::IP.IocpBackendState
+                        reg = backend.by_fd[ipfd.sysfd]
+                        op = reg.read_op
+                        registration = state.registrations[ipfd.sysfd]
+                        _ip_write_byte(fd1, 0x6b)
+
+                        # For IOCP-associated handles, WSAGetOverlappedResult
+                        # becomes terminal after GQCSEx dequeues the packet. The
+                        # poller cannot publish active=false yet because this
+                        # task deliberately holds state.lock.
+                        observed = Ref((UInt32(0), Int32(Base.Libc.EAGAIN)))
+                        dequeued = false
+                        dequeue_deadline = Int64(time_ns()) + Int64(2_000_000_000)
+                        while Int64(time_ns()) < dequeue_deadline
+                            observed[] = IP._wsagetoverlappedresult_bytes(ipfd.sysfd, op)
+                            if observed[][2] != Int32(Base.Libc.EAGAIN)
+                                dequeued = true
+                                break
+                            end
+                            yield()
+                        end
+                        @test dequeued
+                        @test observed[][2] == Int32(0)
+
+                        @test IP._cancel_iocp_op!(reg, op)
+                        still_active = @atomic :acquire op.active
+                        @test still_active
+                        if still_active
+                            @test IP._iocp_finish_read!(registration) ==
+                                (UInt32(0), Int32(Base.Libc.EAGAIN))
+                            second = Vector{UInt8}(undef, 1)
+                            rootless_errno = GC.@preserve second begin
+                                IP._iocp_submit_read!(
+                                    registration,
+                                    pointer(second),
+                                    UInt32(1),
+                                )
+                            end
+                            @test rootless_errno == Int32(Base.Libc.EALREADY)
+                            @test (@atomic :acquire op.active)
+                            rooted_errno = GC.@preserve second begin
+                                IP._iocp_submit_read!(
+                                    registration,
+                                    pointer(second),
+                                    UInt32(1),
+                                    second,
+                                )
+                            end
+                            @test rooted_errno == Int32(Base.Libc.EALREADY)
+                        end
+                    finally
+                        unlock(state.lock)
+                    end
+
+                    @test IP.timedwait(() -> istaskdone(read_task), 2.0; pollint = 0.001) != :timed_out
+                    @test fetch(read_task) == (1, 0x6b)
+                finally
+                    IP._is_valid_fd(ipfd.sysfd) && close(ipfd)
+                    _ip_close_fd(fd1)
+                    IP.shutdown!()
+                end
+            end
+            @testset "re-init retires a stopped IOCP generation after a raw read unwinds" begin
+                IP.shutdown!()
+                fd0, fd1 = _ip_socketpair_stream()
+                ipfd = IP.FD(fd0)
+                read_task = nothing
+                fd0 = SO.INVALID_SOCKET
+                try
+                    IP._set_nonblocking!(ipfd.sysfd)
+                    IP.register!(ipfd)
+                    read_task = errormonitor(Threads.@spawn begin
+                        buf = Vector{UInt8}(undef, 1)
+                        return GC.@preserve buf begin
+                            try
+                                IP._read_ptr_some!(ipfd, pointer(buf), 1)
+                                :ok
+                            catch err
+                                err
+                            end
+                        end
+                    end)
+                    old_state = IP.POLLER[]
+                    old_op = Ref{Any}(nothing)
+                    active = IP.timedwait(2.0; pollint = 0.001) do
+                        lock(old_state.lock)
+                        try
+                            backend = IP._iocp_backend(old_state)
+                            backend === nothing && return false
+                            reg = get(backend.by_fd, ipfd.sysfd, nothing)
+                            reg === nothing && return false
+                            old_op[] = reg.read_op
+                            return @atomic :acquire reg.read_op.active
+                        finally
+                            unlock(old_state.lock)
+                        end
+                    end
+                    @test active != :timed_out
+
+                    lock(old_state.lock)
+                    try
+                        @atomic :release old_state.running = false
+                    finally
+                        unlock(old_state.lock)
+                    end
+                    wake_errno = IP._backend_wake!(old_state)
+                    if wake_errno != Int32(0)
+                        # Restore a serviceable poll loop before failing the
+                        # test so cleanup cannot strand the native thread.
+                        @atomic :release old_state.running = true
+                        _ip_write_byte(fd1, 0x7e)
+                        error("IOCP backend wake failed: $(wake_errno)")
+                    end
+                    IP.set_read_deadline!(ipfd, Int64(time_ns()) - Int64(1))
+
+                    @test IP.timedwait(() -> istaskdone(read_task), 5.0; pollint = 0.001) != :timed_out
+                    @test fetch(read_task) isa IP.DeadlineExceededError
+                    op = old_op[]::IP.IocpOp
+                    @test old_state.backend_state !== nothing
+                    @test (@atomic :acquire op.active)
+                    @test op.buffer isa Vector{UInt8}
+
+                    new_state = IP.init!()
+                    @test new_state !== old_state
+                    @test (@atomic :acquire new_state.running)
+                    @test old_state.backend_state === nothing
+                    @test !(@atomic :acquire op.active)
+                    @test !(@atomic :acquire ipfd.pd.pollable)
+                finally
                     IP._is_valid_fd(ipfd.sysfd) && close(ipfd)
                     _ip_close_fd(fd1)
                     IP.shutdown!()
