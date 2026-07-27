@@ -10,7 +10,7 @@ const DIAGNOSTIC_REV = get(
 println("RESEAU_136_REPRO_BEGIN")
 println("revision = ", DIAGNOSTIC_REV)
 println("trace = ", get(ENV, "RESEAU_PRECOMPILE_TRACE", ""))
-versioninfo(verbose = true)
+versioninfo()
 flush(stdout)
 
 # Match the issue reproducer while ensuring the diagnostic branch, rather than

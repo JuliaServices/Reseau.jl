@@ -19,8 +19,10 @@ From the repository root:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\diagnostics\issue136\run.ps1
 ```
 
-The default timeout is three minutes and the default Julia thread count is one.
-Both can be changed explicitly:
+The default no-progress timeout is three minutes and the default Julia thread
+count is one. Registry setup and ordinary compilation do not consume that
+budget: the timer resets after every durable Reseau trace event. Both values can
+be changed explicitly:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\diagnostics\issue136\run.ps1 `

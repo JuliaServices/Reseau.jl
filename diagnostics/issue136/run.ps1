@@ -112,7 +112,7 @@ Get-CimInstance Win32_Processor |
     Out-File -LiteralPath $SystemPath -Encoding UTF8 -Append
 "Julia:" | Out-File -LiteralPath $SystemPath -Encoding UTF8 -Append
 & $JuliaExe --startup-file=no --history-file=no -e `
-    "using InteractiveUtils; versioninfo(verbose=true)" 2>&1 |
+    "using InteractiveUtils; versioninfo()" 2>&1 |
     Out-File -LiteralPath $SystemPath -Encoding UTF8 -Append
 
 Write-Host "Downloading the pinned Microsoft Sysinternals ProcDump bundle..."
@@ -182,7 +182,12 @@ try {
     }
 }
 
-$Deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+$OverallDeadline = (Get-Date).AddSeconds([Math]::Max(600, $TimeoutSeconds * 2))
+$InitialTraceLength = (Get-Item -LiteralPath $TracePath).Length
+$LastTraceLength = $InitialTraceLength
+$LastTraceProgress = Get-Date
+$DiagnosticStarted = $false
+$TimeoutReason = ""
 $Completed = $false
 $DoneMarker = $false
 do {
@@ -199,7 +204,23 @@ do {
         $Completed = $true
         break
     }
-} while ((Get-Date) -lt $Deadline)
+    $TraceLength = (Get-Item -LiteralPath $TracePath).Length
+    if ($TraceLength -ne $LastTraceLength) {
+        $LastTraceLength = $TraceLength
+        $LastTraceProgress = Get-Date
+        $DiagnosticStarted = $TraceLength -gt $InitialTraceLength
+    }
+    $Now = Get-Date
+    if ($DiagnosticStarted -and
+        ($Now - $LastTraceProgress).TotalSeconds -ge $TimeoutSeconds) {
+        $TimeoutReason = "no Reseau trace progress for $TimeoutSeconds seconds"
+        break
+    }
+    if ($Now -ge $OverallDeadline) {
+        $TimeoutReason = "overall setup limit reached before a clean exit"
+        break
+    }
+} while ($true)
 
 if ($Completed) {
     "The reproducer exited; success marker present: $DoneMarker. No process dump was taken." |
@@ -210,7 +231,7 @@ if ($Completed) {
         Write-Host "The reproducer exited with an error; inspect stderr.log."
     }
 } else {
-    Write-Host "The reproducer is still running after $TimeoutSeconds seconds; capturing it now."
+    Write-Host "The reproducer timed out ($TimeoutReason); capturing it now."
     $Tree = @(Get-ReseauProcessTree -RootProcessId $RootProcess.Id)
     Write-ProcessSnapshot -Processes $Tree -Path $ProcessPath
     $JuliaProcesses = @(
@@ -246,4 +267,5 @@ Write-Host "Diagnostic bundle:"
 Write-Host $BundlePath
 Write-Host ""
 Write-Host "Please share that ZIP with the maintainer. It contains system metadata,"
-Write-Host "logs, the durable phase trace, and—only when a timeout occurred—mini dumps."
+Write-Host "logs, the durable phase trace, and (only on timeout) mini dumps."
+exit 0
