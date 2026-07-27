@@ -40,9 +40,9 @@ function _tls12_generate_test_ed25519_pkey()::Ptr{Cvoid}
 end
 
 function _tls12_make_server_key_exchange(client_random::Vector{UInt8}, server_random::Vector{UInt8})
-    pkey = TL12H._tls13_p256_private_key_from_bytes(_TLS12_SERVER_P256_PRIVATE_KEY)
+    pkey = TL12H._tls_ec_private_key_from_bytes(TL12H.P256, _TLS12_SERVER_P256_PRIVATE_KEY)
     try
-        public_key = TL12H._tls13_p256_public_key(pkey)
+        public_key = TL12H._tls_ec_public_key(TL12H.P256, pkey)
         params = UInt8[0x03, UInt8(TL12H.P256 >> 8), UInt8(TL12H.P256 & 0xff), UInt8(length(public_key))]
         append!(params, public_key)
         signed = vcat(client_random, server_random, params)
@@ -73,7 +73,7 @@ end
             TL12H._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID,
             TL12H._TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384_ID,
         ]
-        @test hello.supported_curves == UInt16[TL12H.P256, TL12H.P384]
+        @test hello.supported_curves == UInt16[TL12H.X25519, TL12H.P256, TL12H.P384, TL12H.P521]
         @test hello.supported_points == UInt8[0x00]
         @test hello.extended_master_secret
         @test !hello.ocsp_stapling
@@ -160,9 +160,9 @@ end
     end
 
     @testset "client key exchange generation returns an encoded EC point" begin
-        pkey = TL12H._tls13_p256_private_key_from_bytes(_TLS12_SERVER_P256_PRIVATE_KEY)
+        pkey = TL12H._tls_ec_private_key_from_bytes(TL12H.P256, _TLS12_SERVER_P256_PRIVATE_KEY)
         try
-            public_key = TL12H._tls13_p256_public_key(pkey)
+            public_key = TL12H._tls_ec_public_key(TL12H.P256, pkey)
             result = TL12H._tls12_generate_client_key_exchange(UInt16[TL12H.P256], TL12H.P256, public_key)
             @test result.message isa TL12H._ClientKeyExchangeMsgTLS12
             @test !isempty(result.shared_secret)

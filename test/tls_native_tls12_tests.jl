@@ -784,7 +784,7 @@ end
                     "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
                 )
                 @test !state.using_native_tls13
-                @test state.curve == "P-256"
+                @test state.curve == "X25519"
                 @test read(conn, 4) == UInt8[0x70, 0x69, 0x6e, 0x67]
                 write(conn, UInt8[0x70, 0x6f, 0x6e, 0x67])
                 nothing
@@ -801,7 +801,7 @@ end
                 "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
             )
             @test !state.using_native_tls13
-            @test state.curve == "P-256"
+            @test state.curve == "X25519"
 
             write(client, UInt8[0x70, 0x69, 0x6e, 0x67])
             @test read(client, 4) == UInt8[0x70, 0x6f, 0x6e, 0x67]
@@ -881,9 +881,9 @@ end
         end
     end
 
-    @testset "exact TLS 1.2 curve preferences can negotiate X25519 natively" begin
-        server_cfg = _tls12_server_config(curve_preferences = UInt16[TL12N.X25519])
-        client_cfg = _tls12_native_client_config(curve_preferences = UInt16[TL12N.X25519])
+    @testset "exact TLS 1.2 defaults negotiate X25519 natively" begin
+        server_cfg = _tls12_server_config()
+        client_cfg = _tls12_native_client_config()
         client_state, server_state = _tls12_run_public_roundtrip(server_cfg, client_cfg)
         @test client_state.handshake_complete
         @test server_state.handshake_complete
@@ -895,18 +895,20 @@ end
         @test server_state.curve == "X25519"
     end
 
-    @testset "exact TLS 1.2 curve preferences can negotiate P-384 natively" begin
-        server_cfg = _tls12_server_config(curve_preferences = UInt16[TL12N.P384])
-        client_cfg = _tls12_native_client_config(curve_preferences = UInt16[TL12N.P384])
-        client_state, server_state = _tls12_run_public_roundtrip(server_cfg, client_cfg)
-        @test client_state.handshake_complete
-        @test server_state.handshake_complete
-        @test client_state.version == "TLSv1.2"
-        @test server_state.version == "TLSv1.2"
-        @test client_state.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
-        @test server_state.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
-        @test client_state.curve == "P-384"
-        @test server_state.curve == "P-384"
+    for (group, curve_name) in ((TL12N.P384, "P-384"), (TL12N.P521, "P-521"))
+        @testset "exact TLS 1.2 curve preferences can negotiate $curve_name natively" begin
+            server_cfg = _tls12_server_config(curve_preferences = UInt16[group])
+            client_cfg = _tls12_native_client_config(curve_preferences = UInt16[group])
+            client_state, server_state = _tls12_run_public_roundtrip(server_cfg, client_cfg)
+            @test client_state.handshake_complete
+            @test server_state.handshake_complete
+            @test client_state.version == "TLSv1.2"
+            @test server_state.version == "TLSv1.2"
+            @test client_state.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+            @test server_state.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+            @test client_state.curve == curve_name
+            @test server_state.curve == curve_name
+        end
     end
 
     @testset "exact TLS 1.2 client verifies the server certificate" begin
@@ -1011,8 +1013,8 @@ end
         @test !client_state1.did_resume
         @test !server_state1.did_resume
         @test client_state1.has_resumable_session
-        @test client_state1.curve == "P-256"
-        @test server_state1.curve == "P-256"
+        @test client_state1.curve == "X25519"
+        @test server_state1.curve == "X25519"
 
         client_state2, server_state2 = _tls12_run_public_roundtrip(server_cfg, client_cfg)
         @test client_state2.handshake_complete
@@ -1024,8 +1026,8 @@ end
         @test client_state2.did_resume
         @test server_state2.did_resume
         @test client_state2.has_resumable_session
-        @test client_state2.curve == "P-256"
-        @test server_state2.curve == "P-256"
+        @test client_state2.curve == "X25519"
+        @test server_state2.curve == "X25519"
 
         client_state3, server_state3 = _tls12_run_public_roundtrip(server_cfg, client_cfg)
         @test client_state3.handshake_complete
@@ -1037,8 +1039,8 @@ end
         @test client_state3.did_resume
         @test server_state3.did_resume
         @test client_state3.has_resumable_session
-        @test client_state3.curve == "P-256"
-        @test server_state3.curve == "P-256"
+        @test client_state3.curve == "X25519"
+        @test server_state3.curve == "X25519"
     end
 
     @testset "exact TLS 1.2 ECDSA server certificates negotiate ECDHE-ECDSA" begin
@@ -1058,8 +1060,8 @@ end
         @test server_state.version == "TLSv1.2"
         @test client_state.cipher_suite == "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
         @test server_state.cipher_suite == "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
-        @test client_state.curve == "P-256"
-        @test server_state.curve == "P-256"
+        @test client_state.curve == "X25519"
+        @test server_state.curve == "X25519"
     end
 
     @testset "exact TLS 1.2 ECDSA CN-only certificates are rejected by hostname verification" begin

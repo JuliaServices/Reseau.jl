@@ -39,7 +39,7 @@ end
         curve_id = (public_key::_TLSECPublicKey).curve_id
         return (curve_id == _TLS_GROUP_SECP256R1 && signature_algorithm == _TLS_SIGNATURE_ECDSA_SECP256R1_SHA256) ||
             (curve_id == _TLS_GROUP_SECP384R1 && signature_algorithm == _TLS_SIGNATURE_ECDSA_SECP384R1_SHA384) ||
-            (curve_id == UInt16(0x0019) && signature_algorithm == _TLS_SIGNATURE_ECDSA_SECP521R1_SHA512)
+            (curve_id == _TLS_GROUP_SECP521R1 && signature_algorithm == _TLS_SIGNATURE_ECDSA_SECP521R1_SHA512)
     end
     return public_key isa _TLSEd25519PublicKey && signature_algorithm == _TLS_SIGNATURE_ED25519
 end

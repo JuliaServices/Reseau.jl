@@ -140,7 +140,11 @@ function _tls13_server_share_and_secret(client_share::TLHC._TLSKeyShare)
         return TLHC._tls13_openssl_x25519_server_share_and_secret(client_share.data, _TLS13_TEST_SERVER_X25519_PRIVATE_KEY)
     end
     if client_share.group == TLHC._TLS_GROUP_SECP256R1
-        return TLHC._tls13_openssl_p256_server_share_and_secret(client_share.data, _TLS13_TEST_SERVER_P256_PRIVATE_KEY)
+        return TLHC._tls_openssl_ec_server_share_and_secret(
+            TLHC.P256,
+            client_share.data,
+            _TLS13_TEST_SERVER_P256_PRIVATE_KEY,
+        )
     end
     error("unsupported test key-share group $(string(client_share.group, base = 16))")
 end
@@ -426,10 +430,6 @@ end
         client_p256_pkey = Ptr{Cvoid}(C_NULL)
         client_p256_secret = UInt8[]
         server_p256_secret = UInt8[]
-        client_p384_pkey = Ptr{Cvoid}(C_NULL)
-        server_p384_pkey = Ptr{Cvoid}(C_NULL)
-        client_p384_secret = UInt8[]
-        server_p384_secret = UInt8[]
         p256_cert_pkey = Ptr{Cvoid}(C_NULL)
         p384_cert_pkey = Ptr{Cvoid}(C_NULL)
         p521_cert_pkey = Ptr{Cvoid}(C_NULL)
@@ -455,25 +455,49 @@ end
                 @test err isa TLHC.TLSError || err isa ArgumentError
             end
 
-            client_p256_pkey = TLHC._tls13_p256_private_key_from_bytes(_TLS13_TEST_CLIENT_P256_PRIVATE_KEY)
-            client_p256_share = TLHC._tls13_p256_public_key(client_p256_pkey)
-            p256_result = TLHC._tls13_openssl_p256_server_share_and_secret(client_p256_share, _TLS13_TEST_SERVER_P256_PRIVATE_KEY)
+            client_p256_pkey = TLHC._tls_ec_private_key_from_bytes(TLHC.P256, _TLS13_TEST_CLIENT_P256_PRIVATE_KEY)
+            client_p256_share = TLHC._tls_ec_public_key(TLHC.P256, client_p256_pkey)
+            p256_result = TLHC._tls_openssl_ec_server_share_and_secret(
+                TLHC.P256,
+                client_p256_share,
+                _TLS13_TEST_SERVER_P256_PRIVATE_KEY,
+            )
             server_p256_secret = p256_result.secret
-            client_p256_secret = TLHC._tls13_p256_shared_secret(client_p256_pkey, p256_result.share_data)
+            client_p256_secret = TLHC._tls_ec_shared_secret(TLHC.P256, client_p256_pkey, p256_result.share_data)
             @test p256_result.group == TLHC._TLS_GROUP_SECP256R1
             @test client_p256_secret == p256_result.secret
-            @test_throws ArgumentError TLHC._tls13_p256_peer_public_key(vcat(UInt8[0x02], zeros(UInt8, 32)))
+            @test_throws ArgumentError TLHC._tls_ec_peer_public_key(
+                TLHC.P256,
+                vcat(UInt8[0x02], zeros(UInt8, 32)),
+            )
 
-            client_p384_pkey = TLHC._tls13_p384_generate_private_key()
-            server_p384_pkey = TLHC._tls13_p384_generate_private_key()
-            client_p384_share = TLHC._tls13_p384_public_key(client_p384_pkey)
-            server_p384_share = TLHC._tls13_p384_public_key(server_p384_pkey)
-            client_p384_secret = TLHC._tls13_p384_shared_secret(client_p384_pkey, server_p384_share)
-            server_p384_secret = TLHC._tls13_p384_shared_secret(server_p384_pkey, client_p384_share)
-            @test length(client_p384_share) == 97
-            @test length(server_p384_share) == 97
-            @test client_p384_secret == server_p384_secret
-            @test_throws ArgumentError TLHC._tls13_p384_peer_public_key(vcat(UInt8[0x02], zeros(UInt8, 48)))
+            for (group, public_key_length, coordinate_length) in (
+                (TLHC.P384, 97, 48),
+                (TLHC.P521, 133, 66),
+            )
+                client_pkey_nist = TLHC._tls_ec_generate_private_key(group)
+                server_pkey_nist = TLHC._tls_ec_generate_private_key(group)
+                client_secret_nist = UInt8[]
+                server_secret_nist = UInt8[]
+                try
+                    client_share_nist = TLHC._tls_ec_public_key(group, client_pkey_nist)
+                    server_share_nist = TLHC._tls_ec_public_key(group, server_pkey_nist)
+                    client_secret_nist = TLHC._tls_ec_shared_secret(group, client_pkey_nist, server_share_nist)
+                    server_secret_nist = TLHC._tls_ec_shared_secret(group, server_pkey_nist, client_share_nist)
+                    @test length(client_share_nist) == public_key_length
+                    @test length(server_share_nist) == public_key_length
+                    @test client_secret_nist == server_secret_nist
+                    @test_throws ArgumentError TLHC._tls_ec_peer_public_key(
+                        group,
+                        vcat(UInt8[0x02], zeros(UInt8, coordinate_length)),
+                    )
+                finally
+                    TLHC._free_evp_pkey!(client_pkey_nist)
+                    TLHC._free_evp_pkey!(server_pkey_nist)
+                    TLHC._securezero!(client_secret_nist)
+                    TLHC._securezero!(server_secret_nist)
+                end
+            end
 
             p256_cert_pkey = _tls13_generate_test_ec_pkey("prime256v1")
             p384_cert_pkey = _tls13_generate_test_ec_pkey("secp384r1")
@@ -505,8 +529,6 @@ end
         finally
             TLHC._free_evp_pkey!(client_pkey)
             TLHC._free_evp_pkey!(client_p256_pkey)
-            TLHC._free_evp_pkey!(client_p384_pkey)
-            TLHC._free_evp_pkey!(server_p384_pkey)
             TLHC._free_evp_pkey!(p256_cert_pkey)
             TLHC._free_evp_pkey!(p384_cert_pkey)
             TLHC._free_evp_pkey!(p521_cert_pkey)
@@ -514,8 +536,6 @@ end
             TLHC._securezero!(server_secret)
             TLHC._securezero!(client_p256_secret)
             TLHC._securezero!(server_p256_secret)
-            TLHC._securezero!(client_p384_secret)
-            TLHC._securezero!(server_p384_secret)
         end
     end
 

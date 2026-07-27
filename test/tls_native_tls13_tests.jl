@@ -1526,35 +1526,37 @@ end
         end
     end
 
-    @testset "native server handles HelloRetryRequest with P-384 through public APIs" begin
-        IPN.shutdown!()
-        listener = nothing
-        client = nothing
-        server = nothing
-        server_task = nothing
-        try
-            listener, addr, server_task, _ = _start_tls13_native_server(_tls13_native_server_config(
-                curve_preferences = UInt16[TLN.P384],
-            ))
-            client = TLN.connect(addr, _tls13_native_client_config(server_name = "localhost", verify_peer = false))
-            _finish_tls13_native_server!(server_task::Task)
-            server = fetch(server_task::Task)
-            client_state = TLN.connection_state(client)
-            server_state = TLN.connection_state(server)
-            @test client_state.using_native_tls13
-            @test server_state.using_native_tls13
-            @test client_state.did_hello_retry_request
-            @test server_state.did_hello_retry_request
-            @test client_state.curve == "P-384"
-            @test server_state.curve == "P-384"
-            payload = UInt8[0x41, 0x42, 0x43]
-            @test write(client, payload) == length(payload)
-            @test read(server, length(payload)) == payload
-        finally
-            _tls_native_close_quiet!(server)
-            _tls_native_close_quiet!(client)
-            _tls_native_close_quiet!(listener)
+    for (group, curve_name) in ((TLN.P384, "P-384"), (TLN.P521, "P-521"))
+        @testset "native server handles HelloRetryRequest with $curve_name through public APIs" begin
             IPN.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            server_task = nothing
+            try
+                listener, addr, server_task, _ = _start_tls13_native_server(_tls13_native_server_config(
+                    curve_preferences = UInt16[group],
+                ))
+                client = TLN.connect(addr, _tls13_native_client_config(server_name = "localhost", verify_peer = false))
+                _finish_tls13_native_server!(server_task::Task)
+                server = fetch(server_task::Task)
+                client_state = TLN.connection_state(client)
+                server_state = TLN.connection_state(server)
+                @test client_state.using_native_tls13
+                @test server_state.using_native_tls13
+                @test client_state.did_hello_retry_request
+                @test server_state.did_hello_retry_request
+                @test client_state.curve == curve_name
+                @test server_state.curve == curve_name
+                payload = UInt8[0x41, 0x42, 0x43]
+                @test write(client, payload) == length(payload)
+                @test read(server, length(payload)) == payload
+            finally
+                _tls_native_close_quiet!(server)
+                _tls_native_close_quiet!(client)
+                _tls_native_close_quiet!(listener)
+                IPN.shutdown!()
+            end
         end
     end
 

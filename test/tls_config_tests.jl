@@ -42,13 +42,13 @@ end
         @test cfg_default.verify_hostname
         @test !isdefined(TL, :TLS1_0_VERSION)
         @test !isdefined(TL, :TLS1_1_VERSION)
-        @test TL._native_curve_preferences(cfg_default) == UInt16[TL.X25519, TL.P256, TL.P384]
-        @test TL._tls12_curve_preferences(cfg_default) == UInt16[TL.P256, TL.P384]
+        @test TL._native_curve_preferences(cfg_default) == UInt16[TL.X25519, TL.P256, TL.P384, TL.P521]
+        @test TL._tls12_curve_preferences(cfg_default) == UInt16[TL.X25519, TL.P256, TL.P384, TL.P521]
         @test TL._native_curve_preferences(TL.Config(
             min_version = TL.TLS1_3_VERSION,
             max_version = TL.TLS1_3_VERSION,
-            curve_preferences = UInt16[TL.P384, TL.P256, TL.X25519],
-        )) == UInt16[TL.P384, TL.P256, TL.X25519]
+            curve_preferences = UInt16[TL.P521, TL.P384, TL.P256, TL.X25519],
+        )) == UInt16[TL.P521, TL.P384, TL.P256, TL.X25519]
         alpn = ["h2"]
         curves = UInt16[TL.P256]
         positional_cfg = TL.Config(
@@ -192,6 +192,7 @@ end
         @test_throws TL.ConfigError TL._validate_config(TL.Config(verify_peer = false, curve_preferences = UInt16[0x9999]); is_server = false)
         @test TL._validate_config(TL.Config(verify_peer = false, curve_preferences = UInt16[TL.P256]); is_server = false) === nothing
         @test TL._validate_config(TL.Config(verify_peer = false, curve_preferences = UInt16[TL.P384]); is_server = false) === nothing
+        @test TL._validate_config(TL.Config(verify_peer = false, curve_preferences = UInt16[TL.P521]); is_server = false) === nothing
         @test TL._validate_config(TL.Config(
             verify_peer = false,
             min_version = TL.TLS1_2_VERSION,

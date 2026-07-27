@@ -604,7 +604,7 @@ function _tls_parse_subject_public_key_info(bytes::AbstractVector{UInt8}, value_
         elseif _asn1_oid_equals(bytes, curve_oid_start, curve_oid_end, _ASN1_OID_CURVE_P384)
             _TLS_GROUP_SECP384R1
         elseif _asn1_oid_equals(bytes, curve_oid_start, curve_oid_end, _ASN1_OID_CURVE_P521)
-            UInt16(0x0019)
+            _TLS_GROUP_SECP521R1
         else
             throw(ArgumentError("tls: unsupported X.509 EC named curve"))
         end

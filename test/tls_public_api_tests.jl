@@ -969,8 +969,8 @@ end
                 @test server_state.version == "TLSv1.2"
                 @test !client_state.using_native_tls13
                 @test !server_state.using_native_tls13
-                @test client_state.curve == "P-256"
-                @test server_state.curve == "P-256"
+                @test client_state.curve == "X25519"
+                @test server_state.curve == "X25519"
             finally
                 _tls_close_quiet!(server)
                 _tls_close_quiet!(client)
@@ -1015,8 +1015,8 @@ end
                 @test server_state.version == "TLSv1.2"
                 @test !client_state.using_native_tls13
                 @test !server_state.using_native_tls13
-                @test client_state.curve == "P-256"
-                @test server_state.curve == "P-256"
+                @test client_state.curve == "X25519"
+                @test server_state.curve == "X25519"
             finally
                 _tls_close_quiet!(server)
                 _tls_close_quiet!(client)
@@ -1132,8 +1132,8 @@ end
             @test !client_state1.did_resume
             @test !server_state1.did_resume
             @test client_state1.has_resumable_session
-            @test client_state1.curve == "P-256"
-            @test server_state1.curve == "P-256"
+            @test client_state1.curve == "X25519"
+            @test server_state1.curve == "X25519"
 
             client_state2, server_state2 = run_once(server_cfg, client_cfg)
             @test client_state2.version == "TLSv1.2"
@@ -1145,8 +1145,8 @@ end
             @test client_state2.did_resume
             @test server_state2.did_resume
             @test client_state2.has_resumable_session
-            @test client_state2.curve == "P-256"
-            @test server_state2.curve == "P-256"
+            @test client_state2.curve == "X25519"
+            @test server_state2.curve == "X25519"
         end
         @testset "mixed-version native server supports TLS 1.2 mTLS and resumption against an exact TLS 1.2 client" begin
             function run_once(server_cfg::TL.Config, client_cfg::TL.Config)
@@ -1208,8 +1208,8 @@ end
             @test !client_state1.did_resume
             @test !server_state1.did_resume
             @test client_state1.has_resumable_session
-            @test client_state1.curve == "P-256"
-            @test server_state1.curve == "P-256"
+            @test client_state1.curve == "X25519"
+            @test server_state1.curve == "X25519"
 
             client_state2, server_state2 = run_once(server_cfg, client_cfg)
             @test client_state2.version == "TLSv1.2"
@@ -1221,8 +1221,8 @@ end
             @test client_state2.did_resume
             @test server_state2.did_resume
             @test client_state2.has_resumable_session
-            @test client_state2.curve == "P-256"
-            @test server_state2.curve == "P-256"
+            @test client_state2.curve == "X25519"
+            @test server_state2.curve == "X25519"
         end
         @testset "mixed-version native client still offers TLS 1.2 resumption when a TLS 1.3 session is cached" begin
             function run_once(server_cfg::TL.Config, client_cfg::TL.Config)::TL.ConnectionState
