@@ -5,12 +5,19 @@ on:
     tags: ["*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      issue136_diagnostics:
+        description: Run only the Windows issue 136 diagnostic harness
+        required: false
+        type: boolean
+        default: false
 # Least-privilege default token scope for all jobs; the docs job opts into the
 # wider scope it needs via its own job-level permissions block.
 permissions:
   contents: read
 jobs:
   test:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.issue136_diagnostics }}
     name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }} - t${{ matrix.threads }} - ${{ github.event_name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.os == 'windows-latest' && 20 || 15 }}
@@ -89,6 +96,7 @@ jobs:
           files: lcov.info
           token: ${{ secrets.GITHUB_TOKEN }}
   test-freebsd:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.issue136_diagnostics }}
     name: Julia ${{ matrix.version }} - FreeBSD ${{ matrix.release }} - ${{ matrix.arch }} - t${{ matrix.threads }} - ${{ github.event_name }}
     runs-on: ubuntu-latest
     env:
@@ -148,6 +156,7 @@ jobs:
             cirrusjl build
             cirrusjl test
   docs:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.issue136_diagnostics }}
     name: Documentation
     runs-on: ubuntu-latest
     permissions:
@@ -178,3 +187,38 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DOCUMENTER_KEY: ${{ secrets.DOCUMENTER_KEY }}
+  issue136-windows-diagnostics:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.issue136_diagnostics }}
+    name: Issue 136 Windows diagnostics
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: "1.12.6"
+          arch: x64
+      - name: Run diagnostic harness
+        shell: powershell
+        run: |
+          .\diagnostics\issue136\run.ps1 -TimeoutSeconds 180 -Threads 1
+      - name: Upload diagnostic bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reseau-issue-136-windows
+          path: reseau-issue-136-*.zip
+          if-no-files-found: warn
+      - name: Verify hosted runner completed
+        shell: powershell
+        run: |
+          $run = Get-ChildItem -Directory -Filter "reseau-issue-136-*" |
+            Sort-Object LastWriteTime |
+            Select-Object -Last 1
+          if ($null -eq $run) {
+            throw "The diagnostic harness did not create an output directory."
+          }
+          $stdout = Get-Content -LiteralPath (Join-Path $run.FullName "stdout.log") -Raw
+          if ($stdout -notmatch "RESEAU_136_REPRO_DONE") {
+            throw "The hosted Windows reproducer did not complete successfully."
+          }
