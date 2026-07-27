@@ -127,6 +127,12 @@ function _el_wait_connect_ready!(fd::SO.SocketFD)
 end
 
 @testset "IOPoll runtime phase 1" begin
+        @testset "precompile live I/O platform guard" begin
+            @test Reseau._pc_live_io_supported() == (Sys.isapple() || Sys.islinux())
+            @static if Sys.iswindows()
+                @test !Reseau._pc_live_io_supported()
+            end
+        end
         NP.shutdown!()
         _el_log_test_progress("START: poller-backed sleep/timedwait")
         @testset "poller-backed sleep/timedwait" begin
