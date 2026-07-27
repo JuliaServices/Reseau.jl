@@ -144,6 +144,36 @@ mutable struct IocpBackendState <: BackendState
     @atomic wake_sig::UInt32
 end
 
+function _diagnostic_iocp_registration(label::AbstractString, reg::IocpRegistration)::Nothing
+    _diagnostic_trace(
+        label,
+        "fd=$(reg.fd) token=$(reg.token) closing=$(@atomic :acquire reg.closing) " *
+        "wait_on_success=$(reg.wait_on_success) " *
+        "read_active=$(@atomic :acquire reg.read_op.active) read_kind=$(reg.read_op.kind) " *
+        "write_active=$(@atomic :acquire reg.write_op.active) write_kind=$(reg.write_op.kind)",
+    )
+    return nothing
+end
+
+function _diagnostic_backend_snapshot(state::Poller, label::AbstractString)::Nothing
+    backend = _iocp_backend(state)
+    if backend === nothing
+        _diagnostic_trace(label, "backend=nothing")
+        return nothing
+    end
+    _diagnostic_trace(
+        label,
+        "by_fd=$(length(backend.by_fd)) by_ptr=$(length(backend.by_ptr)) zombies=$(length(backend.zombies))",
+    )
+    for reg in values(backend.by_fd)
+        _diagnostic_iocp_registration("$(label).live", reg)
+    end
+    for reg in backend.zombies
+        _diagnostic_iocp_registration("$(label).zombie", reg)
+    end
+    return nothing
+end
+
 @inline function _socket_value(fd::SysFD)::UInt
     return fd
 end
@@ -330,12 +360,20 @@ its buffer roots must remain live and the storage must not be reused.
 """
 function _cancel_iocp_op!(reg::IocpRegistration, op::IocpOp; strict::Bool = false)::Bool
     (@atomic :acquire op.active) || return false
+    _diagnostic_trace(
+        "iocp.cancel.before",
+        "fd=$(reg.fd) token=$(reg.token) mode=$(op.mode) kind=$(op.kind) strict=$(strict)",
+    )
     ok = @gcsafe_ccall _KERNEL32.CancelIoEx(
         _socket_handle(reg.fd)::Ptr{Cvoid},
         _op_ptr(op)::Ptr{Cvoid},
     )::Int32
     if ok == 0
         err = _win_get_last_error()
+        _diagnostic_trace(
+            "iocp.cancel.after",
+            "fd=$(reg.fd) token=$(reg.token) mode=$(op.mode) kind=$(op.kind) ok=0 winerr=$(err)",
+        )
         if err == _ERROR_NOT_FOUND
             # No request remains cancellable, but the completion packet is
             # still the lifetime/reuse fence. In particular, GQCSEx may already
@@ -349,6 +387,11 @@ function _cancel_iocp_op!(reg::IocpRegistration, op::IocpOp; strict::Bool = fals
         # dropping any roots; shutdown! deliberately leaves waiters parked in
         # this case, preserving raw-pointer callers' GC.@preserve scopes.
         strict && throw(SystemError("CancelIoEx", Int(_map_win_errno(err))))
+    else
+        _diagnostic_trace(
+            "iocp.cancel.after",
+            "fd=$(reg.fd) token=$(reg.token) mode=$(op.mode) kind=$(op.kind) ok=1",
+        )
     end
     return true
 end
@@ -628,7 +671,15 @@ function _iocp_submit_read!(registration::Registration, ptr::Ptr{UInt8}, nbytes:
         reg = _lookup_iocp_registration(state, registration)
         reg === nothing && return Int32(Base.Libc.EBADF)
         op = reg.read_op
+        _diagnostic_trace(
+            "iocp.submit.read.before",
+            "fd=$(registration.fd) token=$(registration.token) nbytes=$(nbytes)",
+        )
         errno = _submit_iocp_op!(registration, reg, op; ptr, nbytes, kind=IocpOpKind.READ, buffer=root)
+        _diagnostic_trace(
+            "iocp.submit.read.after",
+            "fd=$(registration.fd) token=$(registration.token) errno=$(errno) active=$(@atomic :acquire op.active)",
+        )
         if errno != Int32(0) && errno != Int32(Base.Libc.EALREADY)
             _clear_iocp_op!(op)
         end
@@ -652,7 +703,15 @@ function _iocp_submit_write!(registration::Registration, ptr::Ptr{UInt8}, nbytes
         reg = _lookup_iocp_registration(state, registration)
         reg === nothing && return Int32(Base.Libc.EBADF)
         op = reg.write_op
+        _diagnostic_trace(
+            "iocp.submit.write.before",
+            "fd=$(registration.fd) token=$(registration.token) nbytes=$(nbytes)",
+        )
         errno = _submit_iocp_op!(registration, reg, op; ptr, nbytes, kind=IocpOpKind.WRITE, buffer=root)
+        _diagnostic_trace(
+            "iocp.submit.write.after",
+            "fd=$(registration.fd) token=$(registration.token) errno=$(errno) active=$(@atomic :acquire op.active)",
+        )
         if errno != Int32(0) && errno != Int32(Base.Libc.EALREADY)
             _clear_iocp_op!(op)
         end
@@ -677,7 +736,15 @@ function _iocp_submit_connect!(registration::Registration, addrbuf::Vector{UInt8
         reg === nothing && return Int32(Base.Libc.EBADF)
         op = reg.write_op
         request = IocpConnectRequest(addrbuf, addrlen)
+        _diagnostic_trace(
+            "iocp.submit.connect.before",
+            "fd=$(registration.fd) token=$(registration.token) addrlen=$(addrlen)",
+        )
         errno = _submit_iocp_op!(registration, reg, op; kind=IocpOpKind.CONNECT, request=request)
+        _diagnostic_trace(
+            "iocp.submit.connect.after",
+            "fd=$(registration.fd) token=$(registration.token) errno=$(errno) active=$(@atomic :acquire op.active)",
+        )
         if errno != Int32(0) && errno != Int32(Base.Libc.EALREADY)
             _clear_iocp_op!(op)
         end
@@ -702,7 +769,15 @@ function _iocp_submit_accept!(registration::Registration, acceptfd::SysFD, addrb
         reg === nothing && return Int32(Base.Libc.EBADF)
         op = reg.read_op
         request = IocpAcceptRequest(acceptfd, addrbuf)
+        _diagnostic_trace(
+            "iocp.submit.accept.before",
+            "fd=$(registration.fd) token=$(registration.token) acceptfd=$(acceptfd)",
+        )
         errno = _submit_iocp_op!(registration, reg, op; kind=IocpOpKind.ACCEPT, request=request)
+        _diagnostic_trace(
+            "iocp.submit.accept.after",
+            "fd=$(registration.fd) token=$(registration.token) errno=$(errno) active=$(@atomic :acquire op.active)",
+        )
         if errno != Int32(0) && errno != Int32(Base.Libc.EALREADY)
             _clear_iocp_op!(op)
         end
@@ -789,18 +864,29 @@ about a dead handle's remaining kernel ownership.
 """
 function _drain_pending_ops_on_close!(backend::IocpBackendState)
     backend.port == C_NULL && return nothing
+    _diagnostic_trace(
+        "iocp.drain.begin",
+        "by_fd=$(length(backend.by_fd)) zombies=$(length(backend.zombies))",
+    )
     for reg in values(backend.by_fd)
+        _diagnostic_iocp_registration("iocp.drain.live.before_cancel", reg)
         _cancel_iocp_op!(reg, reg.read_op; strict = true)
         _cancel_iocp_op!(reg, reg.write_op; strict = true)
+        _diagnostic_iocp_registration("iocp.drain.live.after_cancel", reg)
     end
     for reg in backend.zombies
+        _diagnostic_iocp_registration("iocp.drain.zombie.before_cancel", reg)
         _cancel_iocp_op!(reg, reg.read_op; strict = true)
         _cancel_iocp_op!(reg, reg.write_op; strict = true)
+        _diagnostic_iocp_registration("iocp.drain.zombie.after_cancel", reg)
     end
     bytes_ref = Ref{UInt32}(UInt32(0))
     key_ref = Ref{UInt}(UInt(0))
     ov_ref = Ref{Ptr{Cvoid}}(C_NULL)
+    iteration = 0
     while _iocp_any_op_active(backend)
+        iteration += 1
+        _diagnostic_trace("iocp.drain.wait.before", "iteration=$(iteration)")
         ov_ref[] = C_NULL
         ok = GC.@preserve bytes_ref key_ref ov_ref begin
             @gcsafe_ccall _KERNEL32.GetQueuedCompletionStatus(
@@ -812,6 +898,11 @@ function _drain_pending_ops_on_close!(backend::IocpBackendState)
             )::Int32
         end
         ov = ov_ref[]
+        winerr = ok == 0 ? _win_get_last_error() : UInt32(0)
+        _diagnostic_trace(
+            "iocp.drain.wait.after",
+            "iteration=$(iteration) ok=$(ok) winerr=$(winerr) key=$(key_ref[]) overlapped=$(UInt(ov)) bytes=$(bytes_ref[])",
+        )
         if ov == C_NULL
             # A successful null-overlapped result is the residual wake packet.
             # With an infinite wait, a failed null result is a real API failure:
@@ -820,7 +911,7 @@ function _drain_pending_ops_on_close!(backend::IocpBackendState)
             ok != 0 && continue
             throw(SystemError(
                 "GetQueuedCompletionStatus",
-                Int(_map_win_errno(_win_get_last_error())),
+                Int(_map_win_errno(winerr)),
             ))
         end
         reg = get(backend.by_ptr, ov, nothing)
@@ -831,15 +922,25 @@ function _drain_pending_ops_on_close!(backend::IocpBackendState)
         end
         if ov == _op_ptr(reg.read_op)
             @atomic :release reg.read_op.active = false
+            _diagnostic_trace(
+                "iocp.drain.retire",
+                "iteration=$(iteration) fd=$(reg.fd) token=$(reg.token) mode=read kind=$(reg.read_op.kind)",
+            )
         elseif ov == _op_ptr(reg.write_op)
             @atomic :release reg.write_op.active = false
+            _diagnostic_trace(
+                "iocp.drain.retire",
+                "iteration=$(iteration) fd=$(reg.fd) token=$(reg.token) mode=write kind=$(reg.write_op.kind)",
+            )
         end
     end
+    _diagnostic_trace("iocp.drain.done", "iterations=$(iteration)")
     return nothing
 end
 
 function _backend_close!(state::Poller)
     backend = _iocp_backend(state)
+    _diagnostic_trace("iocp.backend_close.enter", "backend=$(backend === nothing ? "nothing" : "live")")
     if backend !== nothing
         if backend.port != C_NULL
             # Retire kernel ownership of every OVERLAPPED before closing the port
@@ -848,9 +949,11 @@ function _backend_close!(state::Poller)
             _ = @gcsafe_ccall _KERNEL32.CloseHandle(
                 backend.port::Ptr{Cvoid},
             )::Int32
+            _diagnostic_trace("iocp.backend_close.port_closed")
         end
     end
     state.backend_state = nothing
+    _diagnostic_trace("iocp.backend_close.exit")
     return nothing
 end
 
@@ -885,10 +988,26 @@ function _backend_arm_waiter!(state::Poller, registration::Registration, mode::P
     reg === nothing && return Int32(0)
     reg.token == registration.token || return Int32(0)
     if _mode_has_read(mode) && _mode_has_read(registration.mode)
-        _submit_iocp_op!(registration, reg, reg.read_op; kind=IocpOpKind.PROBE_READ)
+        _diagnostic_trace(
+            "iocp.submit.probe_read.before",
+            "fd=$(registration.fd) token=$(registration.token)",
+        )
+        errno = _submit_iocp_op!(registration, reg, reg.read_op; kind=IocpOpKind.PROBE_READ)
+        _diagnostic_trace(
+            "iocp.submit.probe_read.after",
+            "fd=$(registration.fd) token=$(registration.token) errno=$(errno) active=$(@atomic :acquire reg.read_op.active)",
+        )
     end
     if _mode_has_write(mode) && _mode_has_write(registration.mode)
-        _submit_iocp_op!(registration, reg, reg.write_op; kind=IocpOpKind.PROBE_WRITE)
+        _diagnostic_trace(
+            "iocp.submit.probe_write.before",
+            "fd=$(registration.fd) token=$(registration.token)",
+        )
+        errno = _submit_iocp_op!(registration, reg, reg.write_op; kind=IocpOpKind.PROBE_WRITE)
+        _diagnostic_trace(
+            "iocp.submit.probe_write.after",
+            "fd=$(registration.fd) token=$(registration.token) errno=$(errno) active=$(@atomic :acquire reg.write_op.active)",
+        )
     end
     return Int32(0)
 end
@@ -898,6 +1017,7 @@ function _backend_close_fd!(state::Poller, fd::SysFD)::Int32
     backend === nothing && return Int32(Base.Libc.ENOSYS)
     reg = pop!(backend.by_fd, fd, nothing)
     reg === nothing && return Int32(0)
+    _diagnostic_iocp_registration("iocp.close_fd.before", reg)
     @atomic :release reg.closing = true
     _cancel_iocp_op!(reg, reg.read_op)
     _cancel_iocp_op!(reg, reg.write_op)
@@ -908,6 +1028,7 @@ function _backend_close_fd!(state::Poller, fd::SysFD)::Int32
         delete!(backend.by_ptr, _op_ptr(reg.read_op))
         delete!(backend.by_ptr, _op_ptr(reg.write_op))
     end
+    _diagnostic_iocp_registration("iocp.close_fd.after", reg)
     return Int32(0)
 end
 

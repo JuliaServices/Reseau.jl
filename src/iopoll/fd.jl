@@ -447,9 +447,17 @@ the actual completion notification arrives.
 """
 function _wait_iocp_completion!(registration::Registration, pd::PollState, mode::PollMode.T, is_file::Bool = false)
     waiter = mode == PollMode.WRITE ? registration.write_waiter : registration.read_waiter
+    _diagnostic_trace(
+        "iocp.wait.begin",
+        "fd=$(registration.fd) token=$(registration.token) mode=$(mode)",
+    )
     while true
         reason = pollwait!(waiter)
         err = _check_error(pd, mode)
+        _diagnostic_trace(
+            "iocp.wait.wake",
+            "fd=$(registration.fd) token=$(registration.token) mode=$(mode) reason=$(reason) pollerr=$(err)",
+        )
         # READY dominates a latched CANCELED token in PollWaiter. Honor a
         # concurrently published deadline/close error before consulting the
         # operation fence, otherwise that only error wake can be consumed as
@@ -457,6 +465,10 @@ function _wait_iocp_completion!(registration::Registration, pd::PollState, mode:
         err == _POLL_NO_ERROR || _convert_poll_error!(err, is_file)
         if reason == PollWakeReason.READY
             _iocp_mode_active(registration, mode) && continue
+            _diagnostic_trace(
+                "iocp.wait.done",
+                "fd=$(registration.fd) token=$(registration.token) mode=$(mode)",
+            )
             return nothing
         end
         continue
@@ -484,12 +496,28 @@ return `EBADF` here while global shutdown finishes draining without exposing
 caller-owned memory to the kernel.
 """
 function _drain_canceled_iocp_op!(registration::Registration, mode::PollMode.T)
+    _diagnostic_trace(
+        "iocp.wait_canceled.begin",
+        "fd=$(registration.fd) token=$(registration.token) mode=$(mode)",
+    )
     canceled = _iocp_cancel_mode!(registration, mode)
     waiter = mode == PollMode.WRITE ? registration.write_waiter : registration.read_waiter
     while true
-        canceled && pollwait!(waiter)
+        if canceled
+            reason = pollwait!(waiter)
+            _diagnostic_trace(
+                "iocp.wait_canceled.wake",
+                "fd=$(registration.fd) token=$(registration.token) mode=$(mode) reason=$(reason)",
+            )
+        end
         _, errno = mode == PollMode.WRITE ? _iocp_finish_write!(registration) : _iocp_finish_read!(registration)
-        errno == Int32(Base.Libc.EAGAIN) || return nothing
+        if errno != Int32(Base.Libc.EAGAIN)
+            _diagnostic_trace(
+                "iocp.wait_canceled.done",
+                "fd=$(registration.fd) token=$(registration.token) mode=$(mode) errno=$(errno)",
+            )
+            return nothing
+        end
         # The completion packet has not been consumed yet. Keep waiting through
         # stale deadline/close wakes until the poller dispatches it.
         canceled = true

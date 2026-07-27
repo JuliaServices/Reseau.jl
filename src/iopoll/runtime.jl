@@ -5,9 +5,48 @@ const POLLER = Ref{Poller}()
 const POLLER_LOCK = ReentrantLock()
 const _POLLER_THREAD_ENTRY_C = Ref{Ptr{Cvoid}}(C_NULL)
 const _pthread_t = UInt
+const _DIAGNOSTIC_TRACE_LOCK = ReentrantLock()
 
 @inline function _is_generating_output()::Bool
     return ccall(:jl_generating_output, Cint, ()) == 1
+end
+
+"""
+Append one durable issue-136 diagnostic event when
+`RESEAU_PRECOMPILE_TRACE` names a file.
+
+The diagnostic branch deliberately opens and closes the file for every event:
+the last completed transition survives even if the precompile worker is killed
+while blocked in the next Windows call.
+"""
+@noinline function _diagnostic_trace(event::AbstractString, details::AbstractString = "")::Nothing
+    path = get(ENV, "RESEAU_PRECOMPILE_TRACE", "")
+    isempty(path) && return nothing
+    lock(_DIAGNOSTIC_TRACE_LOCK)
+    try
+        open(path, "a") do io
+            print(
+                io,
+                time_ns(),
+                '\t',
+                getpid(),
+                '\t',
+                Threads.threadid(),
+                '\t',
+                _is_generating_output() ? "generating" : "runtime",
+                '\t',
+                event,
+            )
+            isempty(details) || print(io, '\t', details)
+            println(io)
+            flush(io)
+        end
+    catch
+        # Diagnostics must never change the code path being diagnosed.
+    finally
+        unlock(_DIAGNOSTIC_TRACE_LOCK)
+    end
+    return nothing
 end
 
 function _throw_errno(op::AbstractString, errno::Int32)
@@ -171,15 +210,29 @@ synchronous IOCP drain keeps both that buffer and its OVERLAPPED alive until the
 terminal completion packet has been consumed.
 """
 function shutdown!()
+    _diagnostic_trace("shutdown.enter")
+    _diagnostic_trace("shutdown.poller_lock.before")
     lock(POLLER_LOCK)
     try
-        isassigned(POLLER) || return nothing
+        _diagnostic_trace("shutdown.poller_lock.acquired")
+        if !isassigned(POLLER)
+            _diagnostic_trace("shutdown.no_poller")
+            return nothing
+        end
         state = POLLER[]
         registrations = Registration[]
         timers = TimerState[]
         stop_requested = false
+        _diagnostic_trace("shutdown.state_lock.before")
         lock(state.lock)
         try
+            _diagnostic_trace(
+                "shutdown.state_lock.acquired",
+                "running=$(@atomic :acquire state.running) registrations=$(length(state.registrations))",
+            )
+            @static if Sys.iswindows()
+                _diagnostic_backend_snapshot(state, "shutdown.snapshot")
+            end
             append!(registrations, values(state.registrations))
             _discard_stale_time_entries_locked!(state)
             for entry in state.time_heap
@@ -195,6 +248,10 @@ function shutdown!()
             end
         finally
             unlock(state.lock)
+            _diagnostic_trace(
+                "shutdown.state_lock.released",
+                "stop_requested=$(stop_requested) registrations=$(length(registrations)) timers=$(length(timers))",
+            )
         end
         for timer in timers
             _close_timer!(timer)
@@ -203,7 +260,9 @@ function shutdown!()
             # If the wake fails the poller thread may stay parked indefinitely;
             # throwing here, before `_backend_close!`, intentionally leaks the
             # backend rather than freeing memory the kernel may still write.
+            _diagnostic_trace("shutdown.wake.before")
             wake_errno = _backend_wake!(state)
+            _diagnostic_trace("shutdown.wake.after", "errno=$(wake_errno)")
             wake_errno == Int32(0) || _throw_errno("iopoll wake", wake_errno)
         end
         if state.backend_state !== nothing
@@ -212,9 +271,13 @@ function shutdown!()
             # Every published state with a live backend has successfully
             # started its poller thread, so wait for its definitive exit even
             # when this shutdown call did not perform the true→false change.
+            _diagnostic_trace("shutdown.thread_exit_wait.before")
             wait(state.shutdown_event)
+            _diagnostic_trace("shutdown.thread_exit_wait.after")
         end
+        _diagnostic_trace("shutdown.backend_close.before")
         _backend_close!(state)
+        _diagnostic_trace("shutdown.backend_close.after")
         # Backend teardown has relinquished all kernel ownership; blocked
         # descriptor tasks can now observe the final closing state.
         for registration in registrations
@@ -232,6 +295,7 @@ function shutdown!()
         end
     finally
         unlock(POLLER_LOCK)
+        _diagnostic_trace("shutdown.exit")
     end
     return nothing
 end

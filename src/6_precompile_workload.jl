@@ -8,6 +8,11 @@ const NC = TCP
 const ND = HostResolvers
 const TL = TLS
 
+@inline function _pc_trace(event::AbstractString, details::AbstractString = "")::Nothing
+    IP._diagnostic_trace("precompile.$(event)", details)
+    return nothing
+end
+
 @inline function _pc_runtime_supported()::Bool
     return Sys.isapple() || Sys.islinux() || Sys.iswindows()
 end
@@ -146,33 +151,48 @@ function _pc_workload_enabled(name::AbstractString)::Bool
 end
 
 function _pc_run_eventloops_workload!()
+    _pc_trace("eventloops.enter")
     IP.__init__()
+    _pc_trace("eventloops.iopoll_init.done")
     @assert isassigned(IP.POLLER)
     waiter = IP.PollWaiter()
     IP.pollnotify!(waiter)
     IP.pollwait!(waiter)
+    _pc_trace("eventloops.waiter_smoke.done")
     _pc_runtime_supported() || return nothing
     state = IP.Poller()
     fd0 = SO.INVALID_SOCKET
     fd1 = SO.INVALID_SOCKET
     backend_open = false
     try
+        _pc_trace("eventloops.backend_init.before")
         errno = IP._backend_init!(state)
+        _pc_trace("eventloops.backend_init.after", "errno=$(errno)")
         errno == Int32(0) || throw(SystemError("event loop backend init", Int(errno)))
         backend_open = true
+        _pc_trace("eventloops.stream_pair.before")
         fd0, fd1 = _pc_stream_pair()
+        _pc_trace("eventloops.stream_pair.after", "fd0=$(fd0) fd1=$(fd1)")
         token = UInt64(1)
         registration = IP.Registration(fd0, token, IP.PollMode.READWRITE, IP.PollWaiter(), IP.PollWaiter(), false)
         state.registrations[fd0] = registration
         state.registrations_by_token[token] = registration
+        _pc_trace("eventloops.backend_open_fd.before", "fd=$(fd0)")
         errno = IP._backend_open_fd!(state, fd0, IP.PollMode.READWRITE, token)
+        _pc_trace("eventloops.backend_open_fd.after", "errno=$(errno)")
         errno == Int32(0) || throw(SystemError("event loop open fd", Int(errno)))
+        _pc_trace("eventloops.arm_read.before")
         errno = IP._backend_arm_waiter!(state, registration, IP.PollMode.READ)
+        _pc_trace("eventloops.arm_read.after", "errno=$(errno)")
         errno == Int32(0) || throw(SystemError("event loop arm read waiter", Int(errno)))
+        _pc_trace("eventloops.write_byte.before")
         _pc_write_byte(fd1, 0x31)
+        _pc_trace("eventloops.write_byte.after")
         ready = false
-        for _ in 1:20
+        for attempt in 1:20
+            _pc_trace("eventloops.poll_once.before", "attempt=$(attempt)")
             errno = IP._backend_poll_once!(state, Int64(50_000_000))
+            _pc_trace("eventloops.poll_once.after", "attempt=$(attempt) errno=$(errno)")
             errno == Int32(0) || throw(SystemError("event loop poll once", Int(errno)))
             if (@atomic :acquire registration.read_waiter.state) === IP._POLLWAKE_READY
                 IP.pollwait!(registration.read_waiter)
@@ -182,96 +202,154 @@ function _pc_run_eventloops_workload!()
         end
         ready || throw(ArgumentError("event loop workload did not observe readability"))
         recv_buf = Vector{UInt8}(undef, 1)
+        _pc_trace("eventloops.read_exact.before")
         _pc_read_exact_fd!(fd0, recv_buf)
+        _pc_trace("eventloops.read_exact.after")
+        _pc_trace("eventloops.backend_close_fd.before")
         errno = IP._backend_close_fd!(state, fd0)
+        _pc_trace("eventloops.backend_close_fd.after", "errno=$(errno)")
         errno == Int32(0) || throw(SystemError("event loop close fd", Int(errno)))
     finally
+        _pc_trace("eventloops.finally.enter")
         _pc_close_fd(fd0)
         _pc_close_fd(fd1)
-        backend_open && IP._backend_close!(state)
+        if backend_open
+            _pc_trace("eventloops.backend_close.before")
+            IP._backend_close!(state)
+            _pc_trace("eventloops.backend_close.after")
+        end
+        _pc_trace("eventloops.shutdown.before")
         IP.shutdown!()
+        _pc_trace("eventloops.shutdown.after")
     end
+    _pc_trace("eventloops.exit")
     return nothing
 end
 
 function _pc_run_internal_poll_workload!()
+    _pc_trace("internal_poll.enter")
     _pc_runtime_supported() || return nothing
+    _pc_trace("internal_poll.stream_pair.before")
     fd0, fd1 = _pc_stream_pair()
+    _pc_trace("internal_poll.stream_pair.after", "fd0=$(fd0) fd1=$(fd1)")
     ipfd = IP.FD(fd0)
     fd0 = SO.INVALID_SOCKET
     try
         IP._set_nonblocking!(ipfd.sysfd)
+        _pc_trace("internal_poll.register.before", "fd=$(ipfd.sysfd)")
         IP.register!(ipfd)
+        _pc_trace("internal_poll.register.after")
         IP.set_read_deadline!(ipfd, time_ns() + 8_000_000)
+        _pc_trace("internal_poll.deadline_read.before")
         try
             IP.read!(ipfd, Vector{UInt8}(undef, 1))
         catch err
             err isa IP.DeadlineExceededError || rethrow(err)
+            _pc_trace("internal_poll.deadline_read.expired")
         end
         IP.set_read_deadline!(ipfd, Int64(0))
+        _pc_trace("internal_poll.write_byte.before")
         _pc_write_byte(fd1, 0x66)
+        _pc_trace("internal_poll.write_byte.after")
+        _pc_trace("internal_poll.read.before")
         n = IP.read!(ipfd, Vector{UInt8}(undef, 1))
+        _pc_trace("internal_poll.read.after", "n=$(n)")
         n == 1 || error("internal poll workload expected one-byte read")
     finally
+        _pc_trace("internal_poll.finally.enter")
         IP._is_valid_fd(ipfd.sysfd) && close(ipfd)
         _pc_close_fd(fd1)
+        _pc_trace("internal_poll.shutdown.before")
         IP.shutdown!()
+        _pc_trace("internal_poll.shutdown.after")
     end
+    _pc_trace("internal_poll.exit")
     return nothing
 end
 
 function _pc_run_socket_ops_workload!()
+    _pc_trace("socket_ops.enter")
     _pc_runtime_supported() || return nothing
     listener = SO.INVALID_SOCKET
     client = SO.INVALID_SOCKET
     accepted = SO.INVALID_SOCKET
     try
+        _pc_trace("socket_ops.listener_open.before")
         listener = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
+        _pc_trace("socket_ops.listener_open.after", "fd=$(listener)")
         SO.set_sockopt_int(listener, SO.SOL_SOCKET, SO.SO_REUSEADDR, 1)
         SO.bind_socket(listener, SO.sockaddr_in_loopback(0))
         SO.listen_socket(listener, 16)
         bound = SO.get_socket_name_in(listener)
         port = Int(SO.sockaddr_in_port(bound))
+        _pc_trace("socket_ops.client_open.before", "port=$(port)")
         client = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
+        _pc_trace("socket_ops.client_open.after", "fd=$(client)")
+        _pc_trace("socket_ops.connect.before", "port=$(port)")
         errno = SO.connect_socket(client, SO.sockaddr_in_loopback(port))
+        _pc_trace("socket_ops.connect.after", "errno=$(errno)")
         if errno != Int32(0) && errno != Int32(Base.Libc.EISCONN)
             if errno != Int32(Base.Libc.EINPROGRESS) && errno != Int32(Base.Libc.EALREADY) && errno != Int32(Base.Libc.EINTR)
                 throw(SystemError("connect", Int(errno)))
             end
+            _pc_trace("socket_ops.connect_wait.before")
             _pc_wait_connect_ready!(client)
+            _pc_trace("socket_ops.connect_wait.after")
             so_error = SO.get_socket_error(client)
             so_error == Int32(0) || throw(SystemError("connect(SO_ERROR)", Int(so_error)))
         end
+        _pc_trace("socket_ops.accept.before")
         accepted = _pc_accept_with_retry!(listener)
+        _pc_trace("socket_ops.accept.after", "fd=$(accepted)")
         payload = UInt8[0x31, 0x32]
         recv_buf = Vector{UInt8}(undef, 2)
+        _pc_trace("socket_ops.write.before")
         _pc_write_all!(client, payload)
+        _pc_trace("socket_ops.write.after")
+        _pc_trace("socket_ops.read.before")
         _pc_read_exact_fd!(accepted, recv_buf)
+        _pc_trace("socket_ops.read.after")
     finally
+        _pc_trace("socket_ops.finally.enter")
         SO.is_valid_socket(accepted) && SO.close_socket_nothrow(accepted)
         SO.is_valid_socket(client) && SO.close_socket_nothrow(client)
         SO.is_valid_socket(listener) && SO.close_socket_nothrow(listener)
+        _pc_trace("socket_ops.shutdown.before")
         IP.shutdown!()
+        _pc_trace("socket_ops.shutdown.after")
     end
+    _pc_trace("socket_ops.exit")
     return nothing
 end
 
 function _pc_run_tcp_workload!()
+    _pc_trace("tcp.enter")
     _pc_runtime_supported() || return nothing
     listener = nothing
     client = nothing
     server = nothing
     try
+        _pc_trace("tcp.listen.before")
         listener = NC.listen(NC.loopback_addr(0); backlog = 16)
+        _pc_trace("tcp.listen.after")
         laddr = NC.addr(listener)
+        _pc_trace("tcp.connect.before", "port=$(Int((laddr::NC.SocketAddrV4).port))")
         client = NC.connect(NC.loopback_addr(Int((laddr::NC.SocketAddrV4).port)))
+        _pc_trace("tcp.connect.after")
+        _pc_trace("tcp.accept.before")
         server = NC.accept(listener)
+        _pc_trace("tcp.accept.after")
         payload = UInt8[0x41, 0x42, 0x43]
+        _pc_trace("tcp.write.before")
         written = write(client, payload)
+        _pc_trace("tcp.write.after", "written=$(written)")
         written == length(payload) || throw(ArgumentError("tcp workload expected 3-byte write"))
         recv_buf = Vector{UInt8}(undef, length(payload))
+        _pc_trace("tcp.read.before")
         _pc_read_exact!(server, recv_buf) == length(payload) || throw(EOFError())
+        _pc_trace("tcp.read.after")
     finally
+        _pc_trace("tcp.finally.enter")
         try
             server === nothing || close(server)
         catch
@@ -284,27 +362,42 @@ function _pc_run_tcp_workload!()
             listener === nothing || close(listener)
         catch
         end
+        _pc_trace("tcp.shutdown.before")
         IP.shutdown!()
+        _pc_trace("tcp.shutdown.after")
     end
+    _pc_trace("tcp.exit")
     return nothing
 end
 
 function _pc_run_host_resolvers_workload!()
+    _pc_trace("host_resolvers.enter")
     _pc_runtime_supported() || return nothing
     listener = nothing
     client = nothing
     server = nothing
     try
+        _pc_trace("host_resolvers.listen.before")
         listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 16)
+        _pc_trace("host_resolvers.listen.after")
         laddr = NC.addr(listener)
+        _pc_trace("host_resolvers.connect.before", "port=$(Int((laddr::NC.SocketAddrV4).port))")
         client = ND.connect("tcp", ND.join_host_port("127.0.0.1", Int((laddr::NC.SocketAddrV4).port)))
+        _pc_trace("host_resolvers.connect.after")
+        _pc_trace("host_resolvers.accept.before")
         server = NC.accept(listener)
+        _pc_trace("host_resolvers.accept.after")
         payload = UInt8[0x51, 0x52]
+        _pc_trace("host_resolvers.write.before")
         written = write(client, payload)
+        _pc_trace("host_resolvers.write.after", "written=$(written)")
         written == length(payload) || throw(ArgumentError("host resolver workload expected 2-byte write"))
         recv_buf = Vector{UInt8}(undef, length(payload))
+        _pc_trace("host_resolvers.read.before")
         _pc_read_exact!(server, recv_buf) == length(payload) || throw(EOFError())
+        _pc_trace("host_resolvers.read.after")
     finally
+        _pc_trace("host_resolvers.finally.enter")
         try
             server === nothing || close(server)
         catch
@@ -318,11 +411,17 @@ function _pc_run_host_resolvers_workload!()
         catch
         end
         try
+            _pc_trace("host_resolvers.resolver_shutdown.before")
             ND.shutdown!()
+            _pc_trace("host_resolvers.resolver_shutdown.after")
         catch
+            _pc_trace("host_resolvers.resolver_shutdown.error")
         end
+        _pc_trace("host_resolvers.iopoll_shutdown.before")
         IP.shutdown!()
+        _pc_trace("host_resolvers.iopoll_shutdown.after")
     end
+    _pc_trace("host_resolvers.exit")
     return nothing
 end
 
@@ -537,35 +636,61 @@ function _pc_run_tls_roundtrip_states!(
     server_config::TL.Config,
     client_config::TL.Config,
 )::_PCTLSRoundtripStates
+    _pc_trace("tls.roundtrip_states.enter")
     listener = nothing
     client = nothing
     server_task = nothing
     try
+        _pc_trace("tls.listen.before")
         listener = TL.listen(NC.loopback_addr(0), server_config; backlog = 8)
+        _pc_trace("tls.listen.after")
         laddr = TL.addr(listener)::NC.SocketAddrV4
         server_task = @async begin
+            _pc_trace("tls.server.accept.before")
             conn = TL.accept(listener::TL.Listener)
+            _pc_trace("tls.server.accept.after")
             try
+                _pc_trace("tls.server.handshake.before")
                 TL.handshake!(conn)
+                _pc_trace("tls.server.handshake.after")
                 state = TL.connection_state(conn)
+                _pc_trace("tls.server.write.before")
                 write(conn, UInt8[0x41]) == 1 || throw(ArgumentError("TLS precompile workload expected 1-byte server write"))
+                _pc_trace("tls.server.write.after")
+                _pc_trace("tls.server.read.before")
                 read(conn, 1) == UInt8[0x51] || throw(ArgumentError("TLS precompile workload expected 1-byte client ack"))
+                _pc_trace("tls.server.read.after")
                 return state
             finally
+                _pc_trace("tls.server.close.before")
                 _pc_close_nothrow(conn)
+                _pc_trace("tls.server.close.after")
             end
         end
+        _pc_trace("tls.client.connect.before", "port=$(Int(laddr.port))")
         client = TL.connect(NC.loopback_addr(Int(laddr.port)), client_config)
+        _pc_trace("tls.client.connect.after")
+        _pc_trace("tls.client.read.before")
         read(client, 1) == UInt8[0x41] || throw(ArgumentError("TLS precompile workload expected server byte"))
+        _pc_trace("tls.client.read.after")
+        _pc_trace("tls.client.write.before")
         write(client, UInt8[0x51]) == 1 || throw(ArgumentError("TLS precompile workload expected client ack write"))
+        _pc_trace("tls.client.write.after")
+        _pc_trace("tls.client.eof.before")
         eof(client) || throw(ArgumentError("TLS precompile workload expected connection EOF"))
+        _pc_trace("tls.client.eof.after")
         client_state = TL.connection_state(client)
+        _pc_trace("tls.server_task_wait.before")
         _pc_wait_task_done(server_task::Task, 2.0)
+        _pc_trace("tls.server_task_wait.after")
         return _PCTLSRoundtripStates(client_state, fetch(server_task::Task)::TL.ConnectionState)
     finally
+        _pc_trace("tls.roundtrip_states.finally.enter")
         _pc_close_nothrow(client)
         _pc_close_nothrow(listener)
+        _pc_trace("tls.roundtrip_states.shutdown.before")
         IP.shutdown!()
+        _pc_trace("tls.roundtrip_states.shutdown.after")
     end
 end
 
@@ -585,9 +710,19 @@ function _pc_run_tls_roundtrip!(
     expect_server_resume::Union{Nothing, Bool} = nothing,
     expected_curve::Union{Nothing, String} = nothing,
 )::Nothing
+    _pc_trace(
+        "tls.roundtrip.enter",
+        "version=$(expected_version) native13=$(expect_native_tls13) " *
+        "client_resume=$(expect_client_resume) curve=$(expected_curve)",
+    )
     roundtrip_states = _pc_run_tls_roundtrip_states!(server_config, client_config)
     _pc_expect_tls_state!(roundtrip_states.client_state, expected_version, expect_native_tls13, expect_client_resume, expect_client_resumable, expected_curve)
     _pc_expect_tls_state!(roundtrip_states.server_state, expected_version, expect_native_tls13, expect_server_resume, false, expected_curve)
+    _pc_trace(
+        "tls.roundtrip.exit",
+        "version=$(expected_version) native13=$(expect_native_tls13) " *
+        "client_resume=$(expect_client_resume) curve=$(expected_curve)",
+    )
     return nothing
 end
 
@@ -608,6 +743,7 @@ Keeping this workload source-owned means trim/precompile coverage evolves with
 the actual supported public API rather than drifting into a test-only harness.
 """
 function _pc_run_tls_workload!()
+    _pc_trace("tls.enter")
     _pc_runtime_supported() || return nothing
     paths = _pc_tls12_paths()
     paths === nothing && return nothing
@@ -755,23 +891,54 @@ function _pc_run_tls_workload!()
             false,
         )
     end
+    _pc_trace("tls.exit")
     return nothing
 end
 
 function _pc_run_selected_workloads!()::Nothing
-    _pc_workload_enabled("eventloops") && _pc_run_eventloops_workload!()
-    _pc_workload_enabled("internal_poll") && _pc_run_internal_poll_workload!()
-    _pc_workload_enabled("socket_ops") && _pc_run_socket_ops_workload!()
-    _pc_workload_enabled("tcp") && _pc_run_tcp_workload!()
-    _pc_workload_enabled("host_resolvers") && _pc_run_host_resolvers_workload!()
-    _pc_workload_enabled("tls") && _pc_run_tls_workload!()
+    if _pc_workload_enabled("eventloops")
+        _pc_trace("selected.eventloops.before")
+        _pc_run_eventloops_workload!()
+        _pc_trace("selected.eventloops.after")
+    end
+    if _pc_workload_enabled("internal_poll")
+        _pc_trace("selected.internal_poll.before")
+        _pc_run_internal_poll_workload!()
+        _pc_trace("selected.internal_poll.after")
+    end
+    if _pc_workload_enabled("socket_ops")
+        _pc_trace("selected.socket_ops.before")
+        _pc_run_socket_ops_workload!()
+        _pc_trace("selected.socket_ops.after")
+    end
+    if _pc_workload_enabled("tcp")
+        _pc_trace("selected.tcp.before")
+        _pc_run_tcp_workload!()
+        _pc_trace("selected.tcp.after")
+    end
+    if _pc_workload_enabled("host_resolvers")
+        _pc_trace("selected.host_resolvers.before")
+        _pc_run_host_resolvers_workload!()
+        _pc_trace("selected.host_resolvers.after")
+    end
+    if _pc_workload_enabled("tls")
+        _pc_trace("selected.tls.before")
+        _pc_run_tls_workload!()
+        _pc_trace("selected.tls.after")
+    end
     return nothing
 end
 
 function _pc_run_precompile_workloads!()::Nothing
+    _pc_trace(
+        "workloads.enter",
+        "version=$(VERSION) os=$(Sys.KERNEL) arch=$(Sys.ARCH) threads=$(Threads.nthreads()) only=$(get(ENV, "RESEAU_PRECOMPILE_ONLY", ""))",
+    )
     IP.__init__()
+    _pc_trace("workloads.iopoll_init.done")
     @assert isassigned(IP.POLLER)
     _pc_run_selected_workloads!()
+    _pc_trace("workloads.exit")
     return nothing
 end
 
