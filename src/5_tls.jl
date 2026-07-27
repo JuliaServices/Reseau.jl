@@ -59,6 +59,7 @@ include("tls/handshake_server_tls12.jl")
 
 const X25519 = _TLS_GROUP_X25519
 const P256 = _TLS_GROUP_SECP256R1
+const P384 = _TLS_GROUP_SECP384R1
 
 """
     ClientAuthMode
@@ -293,8 +294,9 @@ Keyword arguments:
   certificates. This is required for server configs that verify presented client certs.
 - `alpn_protocols`: ordered ALPN protocol preference list.
 - `curve_preferences`: ordered native ECDHE group preferences for TLS 1.2/1.3.
-  When empty, native TLS 1.3 and mixed-mode handshakes default to `[TLS.X25519, TLS.P256]`,
-  while exact native TLS 1.2 defaults to `[TLS.P256]`.
+  When empty, native TLS 1.3 and mixed-mode handshakes default to
+  `[TLS.X25519, TLS.P256, TLS.P384]`, while exact native TLS 1.2 defaults to
+  `[TLS.P256, TLS.P384]`.
 - `handshake_timeout_ns`: optional cap, in monotonic nanoseconds, applied only while the
   handshake is running. Existing transport deadlines still win if they are earlier.
 - `min_version` / `max_version`: TLS protocol version bounds. Only TLS 1.2 and TLS 1.3
@@ -434,7 +436,11 @@ function Config(;
     )
 end
 
-const _NATIVE_DEFAULT_CURVE_PREFERENCES = (_TLS_GROUP_X25519, _TLS_GROUP_SECP256R1)
+const _NATIVE_DEFAULT_CURVE_PREFERENCES = (
+    _TLS_GROUP_X25519,
+    _TLS_GROUP_SECP256R1,
+    _TLS_GROUP_SECP384R1,
+)
 
 @inline _supported_tls_version(version::UInt16)::Bool = version == TLS1_2_VERSION || version == TLS1_3_VERSION
 @inline _tls_version_hex(version::UInt16)::String = "0x" * string(version, base = 16, pad = 4)
@@ -445,7 +451,9 @@ function _require_supported_tls_version!(field_name::AbstractString, version::UI
 end
 
 @inline function _native_curve_supported(group::UInt16)::Bool
-    return group == _TLS_GROUP_X25519 || group == _TLS_GROUP_SECP256R1
+    return group == _TLS_GROUP_X25519 ||
+        group == _TLS_GROUP_SECP256R1 ||
+        group == _TLS_GROUP_SECP384R1
 end
 
 @inline _curve_preference_name(group::UInt16) = "0x" * string(group, base = 16, pad = 4)
@@ -463,7 +471,7 @@ function _native_curve_preferences(config::Config)::Vector{UInt16}
 end
 
 function _tls12_curve_preferences(config::Config)::Vector{UInt16}
-    isempty(config.curve_preferences) && return UInt16[_TLS_GROUP_SECP256R1]
+    isempty(config.curve_preferences) && return UInt16[_TLS_GROUP_SECP256R1, _TLS_GROUP_SECP384R1]
     return _native_curve_preferences(config)
 end
 
@@ -2578,6 +2586,7 @@ end
 @inline function _tls_group_name(group::UInt16)::Union{Nothing, String}
     group == _TLS_GROUP_X25519 && return "X25519"
     group == _TLS_GROUP_SECP256R1 && return "P-256"
+    group == _TLS_GROUP_SECP384R1 && return "P-384"
     return nothing
 end
 

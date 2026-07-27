@@ -895,6 +895,20 @@ end
         @test server_state.curve == "X25519"
     end
 
+    @testset "exact TLS 1.2 curve preferences can negotiate P-384 natively" begin
+        server_cfg = _tls12_server_config(curve_preferences = UInt16[TL12N.P384])
+        client_cfg = _tls12_native_client_config(curve_preferences = UInt16[TL12N.P384])
+        client_state, server_state = _tls12_run_public_roundtrip(server_cfg, client_cfg)
+        @test client_state.handshake_complete
+        @test server_state.handshake_complete
+        @test client_state.version == "TLSv1.2"
+        @test server_state.version == "TLSv1.2"
+        @test client_state.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+        @test server_state.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+        @test client_state.curve == "P-384"
+        @test server_state.curve == "P-384"
+    end
+
     @testset "exact TLS 1.2 client verifies the server certificate" begin
         listener = nothing
         client = nothing

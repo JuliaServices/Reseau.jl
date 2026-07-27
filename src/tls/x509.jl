@@ -602,7 +602,7 @@ function _tls_parse_subject_public_key_info(bytes::AbstractVector{UInt8}, value_
         curve_id = if _asn1_oid_equals(bytes, curve_oid_start, curve_oid_end, _ASN1_OID_CURVE_P256)
             _TLS_GROUP_SECP256R1
         elseif _asn1_oid_equals(bytes, curve_oid_start, curve_oid_end, _ASN1_OID_CURVE_P384)
-            UInt16(0x0018)
+            _TLS_GROUP_SECP384R1
         elseif _asn1_oid_equals(bytes, curve_oid_start, curve_oid_end, _ASN1_OID_CURVE_P521)
             UInt16(0x0019)
         else

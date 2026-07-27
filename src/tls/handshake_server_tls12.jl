@@ -291,13 +291,18 @@ function _tls12_select_server_curve(client_hello::_ClientHelloMsg, config)::UInt
     preferred_curves = _tls12_curve_preferences(config)
     for group in preferred_curves
         in(group, client_hello.supported_curves) || continue
-        if group == _TLS_GROUP_SECP256R1 && !_tls12_client_supports_uncompressed_points(client_hello)
+        if (group == _TLS_GROUP_SECP256R1 || group == _TLS_GROUP_SECP384R1) &&
+           !_tls12_client_supports_uncompressed_points(client_hello)
             continue
         end
         return group
     end
-    if in(_TLS_GROUP_SECP256R1, preferred_curves) &&
-       in(_TLS_GROUP_SECP256R1, client_hello.supported_curves) &&
+    has_uncompressed_ec_overlap =
+        (in(_TLS_GROUP_SECP256R1, preferred_curves) &&
+         in(_TLS_GROUP_SECP256R1, client_hello.supported_curves)) ||
+        (in(_TLS_GROUP_SECP384R1, preferred_curves) &&
+         in(_TLS_GROUP_SECP384R1, client_hello.supported_curves))
+    if has_uncompressed_ec_overlap &&
        !_tls12_client_supports_uncompressed_points(client_hello)
         _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: client did not offer uncompressed TLS 1.2 EC points")
     end
@@ -450,7 +455,8 @@ function _tls12_send_server_hello!(
     server_hello.secure_renegotiation_supported = state.client_hello.secure_renegotiation_supported
     server_hello.server_name_ack = !isempty(state.client_hello.server_name)
     server_hello.alpn_protocol = state.selected_alpn
-    if state.curve_id == _TLS_GROUP_SECP256R1 && !isempty(state.client_hello.supported_points)
+    if (state.curve_id == _TLS_GROUP_SECP256R1 || state.curve_id == _TLS_GROUP_SECP384R1) &&
+       !isempty(state.client_hello.supported_points)
         server_hello.supported_points = UInt8[0x00]
     end
     state.server_hello = server_hello
@@ -480,6 +486,9 @@ function _tls12_server_key_exchange_params(state::_TLS12ServerHandshakeState)::V
     elseif state.curve_id == _TLS_GROUP_SECP256R1
         state.ecdhe_private_key = _tls13_p256_generate_private_key()
         public_key = _tls13_p256_public_key(state.ecdhe_private_key)
+    elseif state.curve_id == _TLS_GROUP_SECP384R1
+        state.ecdhe_private_key = _tls13_p384_generate_private_key()
+        public_key = _tls13_p384_public_key(state.ecdhe_private_key)
     else
         _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: unsupported native TLS 1.2 ECDHE group")
     end
@@ -593,6 +602,11 @@ function _tls12_read_client_key_exchange!(
             _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: malformed TLS 1.2 ClientKeyExchange")
         ciphertext[2] == 0x04 ||
             _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: malformed TLS 1.2 ClientKeyExchange")
+    elseif state.curve_id == _TLS_GROUP_SECP384R1
+        length(ciphertext) == 98 ||
+            _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: malformed TLS 1.2 ClientKeyExchange")
+        ciphertext[2] == 0x04 ||
+            _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: malformed TLS 1.2 ClientKeyExchange")
     else
         _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: unsupported native TLS 1.2 ECDHE group")
     end
@@ -607,6 +621,9 @@ function _tls12_server_shared_secret(state::_TLS12ServerHandshakeState, client_k
     end
     if state.curve_id == _TLS_GROUP_SECP256R1
         return _tls13_p256_shared_secret(state.ecdhe_private_key, @view(client_key_exchange[2:end]))
+    end
+    if state.curve_id == _TLS_GROUP_SECP384R1
+        return _tls13_p384_shared_secret(state.ecdhe_private_key, @view(client_key_exchange[2:end]))
     end
     _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: unsupported native TLS 1.2 ECDHE group")
 end

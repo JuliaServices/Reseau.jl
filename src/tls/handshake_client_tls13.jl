@@ -160,7 +160,9 @@ function _TLS13OpenSSLCertificateVerifier(;
 end
 
 @inline function _tls13_supports_key_share_group(group::UInt16)::Bool
-    return group == _TLS_GROUP_X25519 || group == _TLS_GROUP_SECP256R1
+    return group == _TLS_GROUP_X25519 ||
+        group == _TLS_GROUP_SECP256R1 ||
+        group == _TLS_GROUP_SECP384R1
 end
 
 function _tls13_generate_key_share!(provider::_TLS13OpenSSLKeyShareProvider, group::UInt16)::_TLSKeyShare
@@ -180,6 +182,11 @@ function _tls13_generate_key_share!(provider::_TLS13OpenSSLKeyShareProvider, gro
             _tls13_p256_generate_private_key()
         provider.private_key_group = group
         return _TLSKeyShare(group, _tls13_p256_public_key(provider.private_key))
+    end
+    if group == _TLS_GROUP_SECP384R1
+        provider.private_key = _tls13_p384_generate_private_key()
+        provider.private_key_group = group
+        return _TLSKeyShare(group, _tls13_p384_public_key(provider.private_key))
     end
     throw(ArgumentError("tls13 client handshake OpenSSL key share provider does not support group $(string(group, base = 16))"))
 end
@@ -203,6 +210,9 @@ function _tls13_resolve_server_shared_secret(provider::_TLS13OpenSSLKeyShareProv
         end
         if server_share.group == _TLS_GROUP_SECP256R1
             return _tls13_p256_shared_secret(provider.private_key, server_share.data)
+        end
+        if server_share.group == _TLS_GROUP_SECP384R1
+            return _tls13_p384_shared_secret(provider.private_key, server_share.data)
         end
     catch err
         ex = _as_exception(err)

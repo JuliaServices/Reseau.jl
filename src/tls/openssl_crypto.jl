@@ -13,6 +13,7 @@ const _TLS_SIGNATURE_RSA_PSS_PSS_SHA384 = UInt16(0x080a)
 const _TLS_SIGNATURE_RSA_PSS_PSS_SHA512 = UInt16(0x080b)
 
 const _TLS_GROUP_SECP256R1 = UInt16(0x0017)
+const _TLS_GROUP_SECP384R1 = UInt16(0x0018)
 const _TLS_GROUP_X25519 = UInt16(0x001d)
 
 const _X25519_PKEY_ID = Ref{Cint}(0)
@@ -265,7 +266,7 @@ end
 
 @inline function _tls_ec_curve_group_nid(curve_id::UInt16)::Cint
     curve_id == _TLS_GROUP_SECP256R1 && return _init_p256_group_nid!()
-    curve_id == UInt16(0x0018) && return _init_p384_group_nid!()
+    curve_id == _TLS_GROUP_SECP384R1 && return _init_p384_group_nid!()
     curve_id == UInt16(0x0019) && return _init_p521_group_nid!()
     throw(ArgumentError("unsupported TLS EC curve: $(string(curve_id, base = 16))"))
 end
@@ -753,6 +754,136 @@ function _tls13_p256_shared_secret(private_key::Ptr{Cvoid}, peer_public_key::Abs
         if iszero(all_zero)
             _securezero!(out)
             _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: invalid P-256 shared secret")
+        end
+        return out
+    finally
+        _free_evp_pkey_ctx!(ctx)
+        _free_evp_pkey!(peer_pkey)
+    end
+end
+
+function _tls13_p384_generate_private_key()::Ptr{Cvoid}
+    ec_key = Ptr{Cvoid}(C_NULL)
+    pkey = Ptr{Cvoid}(C_NULL)
+    try
+        ec_key = ccall((:EC_KEY_new_by_curve_name, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Cint,), _init_p384_group_nid!())
+        _openssl_require_nonnull(ec_key, "EC_KEY_new_by_curve_name(P-384)")
+        _openssl_require_ok(ccall((:EC_KEY_generate_key, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid},), ec_key), "EC_KEY_generate_key(P-384)")
+        pkey = ccall((:EVP_PKEY_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
+        _openssl_require_nonnull(pkey, "EVP_PKEY_new")
+        _openssl_require_ok(ccall((:EVP_PKEY_set1_EC_KEY, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), pkey, ec_key), "EVP_PKEY_set1_EC_KEY(P-384)")
+        out = pkey
+        pkey = C_NULL
+        return out
+    finally
+        _free_evp_pkey!(pkey)
+        _free_ec_key!(ec_key)
+    end
+end
+
+function _tls13_p384_public_key(pkey::Ptr{Cvoid})::Vector{UInt8}
+    ec_key = Ptr{Cvoid}(C_NULL)
+    try
+        ec_key = ccall((:EVP_PKEY_get1_EC_KEY, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), pkey)
+        _openssl_require_nonnull(ec_key, "EVP_PKEY_get1_EC_KEY")
+        group = ccall((:EC_KEY_get0_group, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), ec_key)
+        _openssl_require_nonnull(group, "EC_KEY_get0_group(P-384)")
+        point = ccall((:EC_KEY_get0_public_key, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), ec_key)
+        _openssl_require_nonnull(point, "EC_KEY_get0_public_key(P-384)")
+        out_len = ccall(
+            (:EC_POINT_point2oct, _LIBCRYPTO_PATH),
+            Csize_t,
+            (Ptr{Cvoid}, Ptr{Cvoid}, Cint, Ptr{UInt8}, Csize_t, Ptr{Cvoid}),
+            group,
+            point,
+            Cint(4),
+            Ptr{UInt8}(C_NULL),
+            Csize_t(0),
+            C_NULL,
+        )
+        out_len > 0 || throw(_make_tls_error("EC_POINT_point2oct(P-384)", Int32(out_len)))
+        out = Vector{UInt8}(undef, Int(out_len))
+        GC.@preserve out begin
+            wrote = ccall(
+                (:EC_POINT_point2oct, _LIBCRYPTO_PATH),
+                Csize_t,
+                (Ptr{Cvoid}, Ptr{Cvoid}, Cint, Ptr{UInt8}, Csize_t, Ptr{Cvoid}),
+                group,
+                point,
+                Cint(4),
+                pointer(out),
+                Csize_t(length(out)),
+                C_NULL,
+            )
+            Int(wrote) == length(out) || throw(_make_tls_error("EC_POINT_point2oct(P-384)", Int32(wrote)))
+        end
+        return out
+    finally
+        _free_ec_key!(ec_key)
+    end
+end
+
+function _tls13_p384_peer_public_key(peer_public_key::AbstractVector{UInt8})::Ptr{Cvoid}
+    length(peer_public_key) == 97 || throw(ArgumentError("tls13 P-384 public key must be 97 bytes in uncompressed form"))
+    peer_public_key[1] == 0x04 || throw(ArgumentError("tls13 P-384 public key must use the uncompressed point format"))
+    peer_bytes = Vector{UInt8}(peer_public_key)
+    ec_key = Ptr{Cvoid}(C_NULL)
+    point = Ptr{Cvoid}(C_NULL)
+    pkey = Ptr{Cvoid}(C_NULL)
+    try
+        ec_key = ccall((:EC_KEY_new_by_curve_name, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Cint,), _init_p384_group_nid!())
+        _openssl_require_nonnull(ec_key, "EC_KEY_new_by_curve_name(P-384)")
+        group = ccall((:EC_KEY_get0_group, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), ec_key)
+        _openssl_require_nonnull(group, "EC_KEY_get0_group(P-384)")
+        point = ccall((:EC_POINT_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), group)
+        _openssl_require_nonnull(point, "EC_POINT_new(P-384)")
+        ok = GC.@preserve peer_bytes ccall(
+            (:EC_POINT_oct2point, _LIBCRYPTO_PATH),
+            Cint,
+            (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Csize_t, Ptr{Cvoid}),
+            group,
+            point,
+            pointer(peer_bytes),
+            Csize_t(length(peer_bytes)),
+            C_NULL,
+        )
+        _openssl_require_ok(ok, "EC_POINT_oct2point(P-384)")
+        _openssl_require_ok(ccall((:EC_KEY_set_public_key, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), ec_key, point), "EC_KEY_set_public_key(P-384)")
+        pkey = ccall((:EVP_PKEY_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
+        _openssl_require_nonnull(pkey, "EVP_PKEY_new")
+        _openssl_require_ok(ccall((:EVP_PKEY_set1_EC_KEY, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), pkey, ec_key), "EVP_PKEY_set1_EC_KEY(P-384)")
+        out = pkey
+        pkey = C_NULL
+        return out
+    finally
+        _free_evp_pkey!(pkey)
+        _free_ec_point!(point)
+        _free_ec_key!(ec_key)
+    end
+end
+
+function _tls13_p384_shared_secret(private_key::Ptr{Cvoid}, peer_public_key::AbstractVector{UInt8})::Vector{UInt8}
+    peer_pkey = _tls13_p384_peer_public_key(peer_public_key)
+    ctx = Ptr{Cvoid}(C_NULL)
+    try
+        ctx = ccall((:EVP_PKEY_CTX_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid}, Ptr{Cvoid}), private_key, C_NULL)
+        _openssl_require_nonnull(ctx, "EVP_PKEY_CTX_new(P-384)")
+        _openssl_require_ok(ccall((:EVP_PKEY_derive_init, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid},), ctx), "EVP_PKEY_derive_init(P-384)")
+        _openssl_require_ok(ccall((:EVP_PKEY_derive_set_peer, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), ctx, peer_pkey), "EVP_PKEY_derive_set_peer(P-384)")
+        out_len = Ref{Csize_t}(0)
+        _openssl_require_ok(ccall((:EVP_PKEY_derive, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Csize_t}), ctx, Ptr{UInt8}(C_NULL), out_len), "EVP_PKEY_derive(P-384)")
+        out = Vector{UInt8}(undef, Int(out_len[]))
+        GC.@preserve out begin
+            _openssl_require_ok(ccall((:EVP_PKEY_derive, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Csize_t}), ctx, pointer(out), out_len), "EVP_PKEY_derive(P-384)")
+        end
+        resize!(out, Int(out_len[]))
+        all_zero = UInt8(0)
+        @inbounds for byte in out
+            all_zero |= byte
+        end
+        if iszero(all_zero)
+            _securezero!(out)
+            _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: invalid P-384 shared secret")
         end
         return out
     finally

@@ -426,6 +426,10 @@ end
         client_p256_pkey = Ptr{Cvoid}(C_NULL)
         client_p256_secret = UInt8[]
         server_p256_secret = UInt8[]
+        client_p384_pkey = Ptr{Cvoid}(C_NULL)
+        server_p384_pkey = Ptr{Cvoid}(C_NULL)
+        client_p384_secret = UInt8[]
+        server_p384_secret = UInt8[]
         p256_cert_pkey = Ptr{Cvoid}(C_NULL)
         p384_cert_pkey = Ptr{Cvoid}(C_NULL)
         p521_cert_pkey = Ptr{Cvoid}(C_NULL)
@@ -460,6 +464,17 @@ end
             @test client_p256_secret == p256_result.secret
             @test_throws ArgumentError TLHC._tls13_p256_peer_public_key(vcat(UInt8[0x02], zeros(UInt8, 32)))
 
+            client_p384_pkey = TLHC._tls13_p384_generate_private_key()
+            server_p384_pkey = TLHC._tls13_p384_generate_private_key()
+            client_p384_share = TLHC._tls13_p384_public_key(client_p384_pkey)
+            server_p384_share = TLHC._tls13_p384_public_key(server_p384_pkey)
+            client_p384_secret = TLHC._tls13_p384_shared_secret(client_p384_pkey, server_p384_share)
+            server_p384_secret = TLHC._tls13_p384_shared_secret(server_p384_pkey, client_p384_share)
+            @test length(client_p384_share) == 97
+            @test length(server_p384_share) == 97
+            @test client_p384_secret == server_p384_secret
+            @test_throws ArgumentError TLHC._tls13_p384_peer_public_key(vcat(UInt8[0x02], zeros(UInt8, 48)))
+
             p256_cert_pkey = _tls13_generate_test_ec_pkey("prime256v1")
             p384_cert_pkey = _tls13_generate_test_ec_pkey("secp384r1")
             p521_cert_pkey = _tls13_generate_test_ec_pkey("secp521r1")
@@ -490,6 +505,8 @@ end
         finally
             TLHC._free_evp_pkey!(client_pkey)
             TLHC._free_evp_pkey!(client_p256_pkey)
+            TLHC._free_evp_pkey!(client_p384_pkey)
+            TLHC._free_evp_pkey!(server_p384_pkey)
             TLHC._free_evp_pkey!(p256_cert_pkey)
             TLHC._free_evp_pkey!(p384_cert_pkey)
             TLHC._free_evp_pkey!(p521_cert_pkey)
@@ -497,6 +514,8 @@ end
             TLHC._securezero!(server_secret)
             TLHC._securezero!(client_p256_secret)
             TLHC._securezero!(server_p256_secret)
+            TLHC._securezero!(client_p384_secret)
+            TLHC._securezero!(server_p384_secret)
         end
     end
 
@@ -783,7 +802,7 @@ end
                  sh.server_share = TLHC._TLSKeyShare(TLHC._TLS_GROUP_X25519, zeros(UInt8, 32))
             end),
             ("unsupported selected group", TLHC._TLS_ALERT_ILLEGAL_PARAMETER,
-             sh -> (sh.selected_group = UInt16(0x0018))),
+             sh -> (sh.selected_group = TLHC._TLS_GROUP_SECP384R1)),
             ("redundant selected group", TLHC._TLS_ALERT_ILLEGAL_PARAMETER,
              sh -> (sh.selected_group = TLHC._TLS_GROUP_X25519)),
             ("unsolicited ECH", TLHC._TLS_ALERT_UNSUPPORTED_EXTENSION,

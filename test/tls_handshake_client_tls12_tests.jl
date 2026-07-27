@@ -73,7 +73,7 @@ end
             TL12H._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID,
             TL12H._TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384_ID,
         ]
-        @test hello.supported_curves == UInt16[TL12H.P256]
+        @test hello.supported_curves == UInt16[TL12H.P256, TL12H.P384]
         @test hello.supported_points == UInt8[0x00]
         @test hello.extended_master_secret
         @test !hello.ocsp_stapling
