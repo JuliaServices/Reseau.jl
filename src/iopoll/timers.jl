@@ -206,10 +206,22 @@ function schedule_deadlines!(
     lock(state.lock)
     try
         _registration_active_locked(state, pd) || return nothing
-        for entry in _build_deadline_entries(pd, rd_ns, wd_ns, rseq, wseq)
+        if rd_ns > 0 && wd_ns > 0 && rd_ns == wd_ns
+            entry = _deadline_entry(rd_ns, pd, PollMode.READWRITE, rseq, wseq)
             _time_push_locked!(state, entry)
-            if new_earliest == 0 || entry.deadline_ns < new_earliest
+            new_earliest = entry.deadline_ns
+        else
+            if rd_ns > 0
+                entry = _deadline_entry(rd_ns, pd, PollMode.READ, rseq, UInt64(0))
+                _time_push_locked!(state, entry)
                 new_earliest = entry.deadline_ns
+            end
+            if wd_ns > 0
+                entry = _deadline_entry(wd_ns, pd, PollMode.WRITE, UInt64(0), wseq)
+                _time_push_locked!(state, entry)
+                if new_earliest == 0 || entry.deadline_ns < new_earliest
+                    new_earliest = entry.deadline_ns
+                end
             end
         end
     finally

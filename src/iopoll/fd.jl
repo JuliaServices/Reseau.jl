@@ -215,29 +215,32 @@ function _set_deadline_impl!(fd::FD, deadline_ns::Integer, mode::PollMode.T)
         lock(pd.lock)
         try
             (@atomic :acquire pd.closing) && return nothing
+            target = if deadline == 0
+                Int64(0)
+            elseif deadline <= _monotonic_ns()
+                Int64(-1)
+            else
+                deadline
+            end
+            read_unchanged = !_mode_has_read(mode) ||
+                (@atomic :acquire pd.rd_ns) == target
+            write_unchanged = !_mode_has_write(mode) ||
+                (@atomic :acquire pd.wd_ns) == target
+            # Reapplying an identical deadline does not change observable
+            # state. Avoid invalidating timer entries and taking the global
+            # timer-heap lock for this common case.
+            read_unchanged && write_unchanged && return nothing
             if _mode_has_read(mode)
                 # The new sequence invalidates every previously scheduled read
                 # deadline entry for this descriptor.
                 @atomic pd.rseq += UInt64(1)
-                if deadline == 0
-                    @atomic :release pd.rd_ns = Int64(0)
-                elseif deadline <= _monotonic_ns()
-                    @atomic :release pd.rd_ns = Int64(-1)
-                    wake_read = true
-                else
-                    @atomic :release pd.rd_ns = deadline
-                end
+                @atomic :release pd.rd_ns = target
+                wake_read = target < 0
             end
             if _mode_has_write(mode)
                 @atomic pd.wseq += UInt64(1)
-                if deadline == 0
-                    @atomic :release pd.wd_ns = Int64(0)
-                elseif deadline <= _monotonic_ns()
-                    @atomic :release pd.wd_ns = Int64(-1)
-                    wake_write = true
-                else
-                    @atomic :release pd.wd_ns = deadline
-                end
+                @atomic :release pd.wd_ns = target
+                wake_write = target < 0
             end
             rd_ns = @atomic :acquire pd.rd_ns
             wd_ns = @atomic :acquire pd.wd_ns

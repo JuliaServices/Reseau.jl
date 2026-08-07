@@ -230,6 +230,31 @@ end
                 IP.shutdown!()
             end
         end
+        @testset "identical deadlines do not invalidate timer state" begin
+            fd0, fd1 = _ip_socketpair_stream()
+            ipfd = IP.FD(fd0)
+            fd0 = SO.INVALID_SOCKET
+            try
+                IP._set_nonblocking!(ipfd.sysfd)
+                IP.register!(ipfd)
+                initial_rseq = @atomic :acquire ipfd.pd.rseq
+                initial_wseq = @atomic :acquire ipfd.pd.wseq
+                IP.set_deadline!(ipfd, Int64(0))
+                @test (@atomic :acquire ipfd.pd.rseq) == initial_rseq
+                @test (@atomic :acquire ipfd.pd.wseq) == initial_wseq
+
+                future_deadline = Int64(time_ns()) + Int64(5_000_000_000)
+                IP.set_read_deadline!(ipfd, future_deadline)
+                updated_rseq = @atomic :acquire ipfd.pd.rseq
+                IP.set_read_deadline!(ipfd, future_deadline)
+                @test (@atomic :acquire ipfd.pd.rseq) == updated_rseq
+                @test (@atomic :acquire ipfd.pd.rd_ns) == future_deadline
+            finally
+                IP._is_valid_fd(ipfd.sysfd) && close(ipfd)
+                _ip_close_fd(fd1)
+                IP.shutdown!()
+            end
+        end
         @testset "stale deadline timer does not poison future waits" begin
             fd0, fd1 = _ip_socketpair_stream()
             ipfd = IP.FD(fd0)
