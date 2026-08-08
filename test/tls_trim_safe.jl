@@ -162,8 +162,7 @@ function _run_tls_roundtrip_states!(
         write(client, UInt8[0x21]) == 1 || error("expected TLS client ack write")
         eof(client) || error("expected TLS EOF")
         client_state = TL.connection_state(client)
-        status = IP.timedwait(() -> istaskdone(server_task::Task), 10.0; pollint = 0.001)
-        status == :timed_out && error("timed out waiting for TLS server task")
+        wait(server_task::Task)
         return _TLSRoundtripStates(client_state, fetch(server_task::Task)::TL.ConnectionState)
     finally
         _TLS_SERVER_LISTENER[] = nothing

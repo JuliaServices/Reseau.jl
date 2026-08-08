@@ -294,7 +294,7 @@ Returns:
   without blocking
 - a positive nanosecond timeout otherwise
 """
-function _poll_delay_ns(state::Poller)::Int64
+function _poll_delay_ns(state::Poller; now_ns::Int64=Int64(time_ns()))::Int64
     deadline_ns = Int64(0)
     lock(state.lock)
     try
@@ -305,7 +305,6 @@ function _poll_delay_ns(state::Poller)::Int64
         unlock(state.lock)
     end
     deadline_ns == 0 && return Int64(-1)
-    now_ns = Int64(time_ns())
     remaining_ns = deadline_ns - now_ns
     remaining_ns <= 0 && return Int64(0)
     return remaining_ns

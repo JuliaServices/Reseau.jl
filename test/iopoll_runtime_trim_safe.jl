@@ -74,7 +74,8 @@ function run_iopoll_runtime_trim_sample()::Nothing
     fd0 = SO.INVALID_SOCKET
     try
         IP.register!(ipfd)
-        IP.set_read_deadline!(ipfd, Int64(time_ns()) + Int64(50_000_000))
+        # Already expired: enters the deadline branch without waiting.
+        IP.set_read_deadline!(ipfd, Int64(1))
         try
             IP.read!(ipfd, Vector{UInt8}(undef, 1))
             error("expected read deadline timeout")

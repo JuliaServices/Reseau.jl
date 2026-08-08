@@ -13,8 +13,15 @@ const _TLS_NATIVE_SERVER_KEY_PATH = joinpath(@__DIR__, "resources", "native_tls_
 const _TLS_NATIVE_CLIENT_CERT_PATH = joinpath(@__DIR__, "resources", "native_tls_client.crt")
 const _TLS_NATIVE_CLIENT_KEY_PATH = joinpath(@__DIR__, "resources", "native_tls_client.key")
 
-function _tls_wait_task_done(task::Task, timeout_s::Float64 = 2.0)
-    return IP.timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
+# Deadlocks surface as a suite hang; the CI job timeout is the final guard.
+function _tls_wait_task_done(task::Task)
+    # Status-only wait: a task that failed is still "done" here, matching the
+    # polling helper this replaced; callers inspect results via fetch.
+    try
+        wait(task)
+    catch
+    end
+    return nothing
 end
 
 function _tls_close_quiet!(x)

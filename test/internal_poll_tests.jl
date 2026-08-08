@@ -59,8 +59,7 @@ end
 
 function _ip_read_byte(fd::SO.SocketFD)::UInt8
     buf = Ref{UInt8}(0)
-    deadline = Int64(time_ns()) + Int64(2_000_000_000)
-    while Int64(time_ns()) < deadline
+    while true
         n = GC.@preserve buf SO.read_once!(fd, Base.unsafe_convert(Ptr{UInt8}, buf), Csize_t(1))
         n == Cssize_t(1) && return buf[]
         n == Cssize_t(0) && throw(EOFError())
@@ -70,22 +69,24 @@ function _ip_read_byte(fd::SO.SocketFD)::UInt8
         errno == Int32(Base.Libc.EINTR) && continue
         throw(SystemError("read", Int(errno)))
     end
-    throw(ArgumentError("timed out reading byte"))
 end
 
 # Wait without touching the IOPoll runtime. `IP.timedwait` sleeps through
 # `sleep_until_ns`, whose `init!()` retires a stopped poller generation; tests
 # that deliberately stop the poller must not let their waiting primitive
 # trigger that re-init (or its shutdown side effects) before they assert on
-# the stopped generation's state.
-function _ip_spin_until(f; timeout_s::Real = 5.0)::Bool
-    deadline = Int64(time_ns()) + round(Int64, Float64(timeout_s) * 1.0e9)
+# the stopped generation's state. A regression spins forever here; the CI job
+# timeout is the deadlock guard.
+function _ip_spin_until(f)::Bool
     while !f()
-        Int64(time_ns()) < deadline || return false
         yield()
     end
     return true
 end
+
+# Far-future monotonic deadline: pending forever from the test's perspective,
+# but far from typemax so saturating arithmetic never wraps it.
+const _IP_FAR_FUTURE_NS = typemax(Int64) ÷ 2
 
 function _ip_accept_with_retry(listener::SO.SocketFD)::Tuple{SO.SocketFD, SO.AcceptPeer}
     for _ in 1:5000
@@ -143,16 +144,13 @@ end
                     n = IP.read!(ipfd, buf)
                     return n, buf[1]
                 end)
-                pre = IP.timedwait(() -> istaskdone(read_task), 0.05; pollint = 0.001)
-                @test pre == :timed_out
+                # Nothing has been written yet, so a completed read here means
+                # a spurious wake already happened.
+                @test !istaskdone(read_task)
                 _ip_write_byte(fd1, 0x61)
-                status = IP.timedwait(() -> istaskdone(read_task), 2.0; pollint = 0.001)
-                @test status != :timed_out
-                if status != :timed_out
-                    n, b = fetch(read_task)
-                    @test n == 1
-                    @test b == 0x61
-                end
+                n, b = fetch(read_task)
+                @test n == 1
+                @test b == 0x61
             finally
                 if read_task isa Task && !istaskdone(read_task)
                     close(ipfd)
@@ -190,7 +188,10 @@ end
             try
                 IP._set_nonblocking!(ipfd.sysfd)
                 IP.register!(ipfd)
-                IP.set_read_deadline!(ipfd, time_ns() + 40_000_000)
+                # An already-expired deadline enters the timeout branch without
+                # waiting on the wall clock; the fires-while-blocked path is
+                # covered in timing_semantics_tests.jl.
+                IP.set_read_deadline!(ipfd, Int64(1))
                 @test_throws IP.DeadlineExceededError IP.read!(ipfd, Vector{UInt8}(undef, 1))
                 IP.set_read_deadline!(ipfd, Int64(0))
                 _ip_write_byte(fd1, 0x62)
@@ -243,7 +244,7 @@ end
                 @test (@atomic :acquire ipfd.pd.rseq) == initial_rseq
                 @test (@atomic :acquire ipfd.pd.wseq) == initial_wseq
 
-                future_deadline = Int64(time_ns()) + Int64(5_000_000_000)
+                future_deadline = _IP_FAR_FUTURE_NS
                 IP.set_read_deadline!(ipfd, future_deadline)
                 updated_rseq = @atomic :acquire ipfd.pd.rseq
                 IP.set_read_deadline!(ipfd, future_deadline)
@@ -262,9 +263,11 @@ end
             try
                 IP._set_nonblocking!(ipfd.sysfd)
                 IP.register!(ipfd)
-                IP.set_read_deadline!(ipfd, time_ns() + 20_000_000)
+                # Two distinct far-future deadlines: the first exists only so a
+                # live rseq can be captured and later fired stale.
+                IP.set_read_deadline!(ipfd, _IP_FAR_FUTURE_NS - Int64(1))
                 stale_rseq = @atomic :acquire ipfd.pd.rseq
-                IP.set_read_deadline!(ipfd, time_ns() + 5_000_000_000)
+                IP.set_read_deadline!(ipfd, _IP_FAR_FUTURE_NS)
                 IP.deadline_fire!(ipfd.pd, IP.PollMode.READ, stale_rseq, UInt64(0))
                 @test IP._check_error(ipfd.pd, IP.PollMode.READ) == Int32(0)
                 _ip_write_byte(fd1, 0x63)
@@ -287,9 +290,9 @@ end
                 IP._set_nonblocking!(ipfd.sysfd)
                 IP.register!(ipfd)
                 # Far-future deadline: it only exists so a live rseq can be
-                # captured and later fired stale. A short deadline races the
+                # captured and later fired stale. A nearer deadline races the
                 # test's own setup and can legitimately expire the waiter.
-                IP.set_read_deadline!(ipfd, time_ns() + 5_000_000_000)
+                IP.set_read_deadline!(ipfd, _IP_FAR_FUTURE_NS - Int64(1))
                 stale_rseq = @atomic :acquire ipfd.pd.rseq
                 wait_started = Channel{Nothing}(1)
                 wait_task = errormonitor(Threads.@spawn begin
@@ -297,19 +300,24 @@ end
                     IP.waitread(ipfd.pd, ipfd.is_file)
                     return :ok
                 end)
-                started = IP.timedwait(() -> isready(wait_started), 2.0; pollint = 0.001)
-                @test started != :timed_out
-                started == :timed_out || take!(wait_started)
-                pre = IP.timedwait(() -> istaskdone(wait_task), 0.05; pollint = 0.001)
-                @test pre == :timed_out
-                IP.set_read_deadline!(ipfd, time_ns() + 5_000_000_000)
+                take!(wait_started)
+                waiter = IP._poll_registration(ipfd.pd).read_waiter
+                # Wait for the reader to park so the stale fire below has a
+                # parked task to (wrongly) complete if the retry regresses.
+                while !((@atomic :acquire waiter.state) isa Task) && !istaskdone(wait_task)
+                    yield()
+                end
+                @test !istaskdone(wait_task)
+                IP.set_read_deadline!(ipfd, _IP_FAR_FUTURE_NS)
                 IP.deadline_fire!(ipfd.pd, IP.PollMode.READ, stale_rseq, UInt64(0))
-                stale = IP.timedwait(() -> istaskdone(wait_task), 0.02; pollint = 0.001)
-                @test stale == :timed_out
+                # `deadline_fire!` is synchronous and the stale sequence must
+                # be suppressed at the source: the deadline is not poisoned
+                # and the parked waiter is untouched.
+                @test (@atomic :acquire ipfd.pd.rd_ns) == _IP_FAR_FUTURE_NS
+                @test (@atomic :acquire waiter.state) isa Task
+                @test !istaskdone(wait_task)
                 _ip_write_byte(fd1, 0x64)
-                status = IP.timedwait(() -> istaskdone(wait_task), 2.0; pollint = 0.001)
-                @test status != :timed_out
-                status == :timed_out || @test fetch(wait_task) == :ok
+                @test fetch(wait_task) == :ok
             finally
                 if wait_task isa Task && !istaskdone(wait_task)
                     close(ipfd)
@@ -339,7 +347,7 @@ end
                 IP._set_nonblocking!(ipfd.sysfd)
                 IP.register!(ipfd)
                 state = IP.POLLER[]
-                future_deadline = Int64(time_ns()) + Int64(5_000_000_000)
+                future_deadline = _IP_FAR_FUTURE_NS
                 IP.set_deadline!(ipfd, future_deadline)
                 lock(state.lock)
                 try
@@ -349,7 +357,7 @@ end
                 finally
                     unlock(state.lock)
                 end
-                IP.set_deadline!(ipfd, Int64(time_ns()) + Int64(30_000_000))
+                IP.set_deadline!(ipfd, _IP_FAR_FUTURE_NS - Int64(1))
                 rseq = @atomic :acquire ipfd.pd.rseq
                 wseq = @atomic :acquire ipfd.pd.wseq
                 IP.deadline_fire!(ipfd.pd, IP.PollMode.READWRITE, rseq, wseq)
@@ -380,15 +388,16 @@ end
                         return err
                     end
                 end)
-                pre = IP.timedwait(() -> istaskdone(read_task), 0.05; pollint = 0.001)
-                @test pre == :timed_out
-                close(ipfd)
-                status = IP.timedwait(() -> istaskdone(read_task), 2.0; pollint = 0.001)
-                @test status != :timed_out
-                if status != :timed_out
-                    err = fetch(read_task)
-                    @test err isa IP.NetClosingError
+                # Wait for the reader to park so the close below evicts a
+                # genuinely blocked waiter.
+                waiter = IP._poll_registration(ipfd.pd).read_waiter
+                while !((@atomic :acquire waiter.state) isa Task) && !istaskdone(read_task)
+                    yield()
                 end
+                @test !istaskdone(read_task)
+                close(ipfd)
+                err = fetch(read_task)
+                @test err isa IP.NetClosingError
             finally
                 _ip_close_fd(fd1)
                 IP.shutdown!()
@@ -411,9 +420,14 @@ end
                         return err
                     end
                 end)
-                @test IP.timedwait(() -> istaskdone(read_task), 0.05; pollint = 0.001) == :timed_out
+                # Wait for the reader to park so shutdown evicts a genuinely
+                # blocked waiter.
+                waiter = IP._poll_registration(ipfd.pd).read_waiter
+                while !((@atomic :acquire waiter.state) isa Task) && !istaskdone(read_task)
+                    yield()
+                end
+                @test !istaskdone(read_task)
                 IP.shutdown!()
-                @test IP.timedwait(() -> istaskdone(read_task), 2.0; pollint = 0.001) != :timed_out
                 result = fetch(read_task)
                 @test result isa IP.NetClosingError
                 @test (@atomic :acquire ipfd.pd.closing)
@@ -455,7 +469,7 @@ end
                     end)
                     caller_ptr = take!(raw_ptr)
                     state = IP.POLLER[]
-                    active = IP.timedwait(2.0; pollint = 0.001) do
+                    @test _ip_spin_until() do
                         lock(state.lock)
                         try
                             backend = IP._iocp_backend(state)
@@ -470,11 +484,9 @@ end
                             unlock(state.lock)
                         end
                     end
-                    @test active != :timed_out
                     @test !istaskdone(read_task)
 
                     _ip_write_byte(fd1, 0x6a)
-                    @test IP.timedwait(() -> istaskdone(read_task), 2.0; pollint = 0.001) != :timed_out
                     @test fetch(read_task) == (1, 0x6a)
 
                     source = Ref{UInt8}(0x6c)
@@ -500,7 +512,7 @@ end
                             end
                         end
                     end)
-                    pending = IP.timedwait(2.0; pollint = 0.001) do
+                    @test _ip_spin_until() do
                         lock(state.lock)
                         try
                             backend = IP._iocp_backend(state)
@@ -513,7 +525,6 @@ end
                             unlock(state.lock)
                         end
                     end
-                    @test pending != :timed_out
 
                     shutdown_started = Channel{Nothing}(1)
                     shutdown_task = errormonitor(Threads.@spawn begin
@@ -524,9 +535,9 @@ end
                     # Runtime-free waits: once shutdown has begun, an
                     # `IP.timedwait` here would spin up a fresh poller
                     # generation via `init!()` mid-assertion.
-                    @test _ip_spin_until(() -> istaskdone(shutdown_task); timeout_s = 5.0)
+                    @test _ip_spin_until(() -> istaskdone(shutdown_task))
                     wait(shutdown_task)
-                    @test _ip_spin_until(() -> istaskdone(read_task); timeout_s = 2.0)
+                    @test _ip_spin_until(() -> istaskdone(read_task))
                     @test fetch(read_task) isa IP.NetClosingError
                     @test (@atomic :acquire ipfd.pd.closing)
                     @test !(@atomic :acquire ipfd.pd.pollable)
@@ -683,7 +694,7 @@ end
                         end
                     end)
                     state = IP.POLLER[]
-                    active = IP.timedwait(2.0; pollint = 0.001) do
+                    @test _ip_spin_until() do
                         lock(state.lock)
                         try
                             backend = IP._iocp_backend(state)
@@ -695,7 +706,6 @@ end
                             unlock(state.lock)
                         end
                     end
-                    @test active != :timed_out
 
                     lock(state.lock)
                     try
@@ -710,17 +720,11 @@ end
                         # poller cannot publish active=false yet because this
                         # task deliberately holds state.lock.
                         observed = Ref((UInt32(0), Int32(Base.Libc.EAGAIN)))
-                        dequeued = false
-                        dequeue_deadline = Int64(time_ns()) + Int64(2_000_000_000)
-                        while Int64(time_ns()) < dequeue_deadline
+                        while true
                             observed[] = IP._wsagetoverlappedresult_bytes(ipfd.sysfd, op)
-                            if observed[][2] != Int32(Base.Libc.EAGAIN)
-                                dequeued = true
-                                break
-                            end
+                            observed[][2] != Int32(Base.Libc.EAGAIN) && break
                             yield()
                         end
-                        @test dequeued
                         @test observed[][2] == Int32(0)
 
                         @test IP._cancel_iocp_op!(reg, op)
@@ -753,7 +757,6 @@ end
                         unlock(state.lock)
                     end
 
-                    @test IP.timedwait(() -> istaskdone(read_task), 2.0; pollint = 0.001) != :timed_out
                     @test fetch(read_task) == (1, 0x6b)
                 finally
                     IP._is_valid_fd(ipfd.sysfd) && close(ipfd)
@@ -783,7 +786,7 @@ end
                     end)
                     old_state = IP.POLLER[]
                     old_op = Ref{Any}(nothing)
-                    active = IP.timedwait(2.0; pollint = 0.001) do
+                    @test _ip_spin_until() do
                         lock(old_state.lock)
                         try
                             backend = IP._iocp_backend(old_state)
@@ -796,7 +799,6 @@ end
                             unlock(old_state.lock)
                         end
                     end
-                    @test active != :timed_out
 
                     lock(old_state.lock)
                     try
@@ -812,12 +814,13 @@ end
                         _ip_write_byte(fd1, 0x7e)
                         error("IOCP backend wake failed: $(wake_errno)")
                     end
-                    IP.set_read_deadline!(ipfd, Int64(time_ns()) - Int64(1))
+                    # Positive but long past on the monotonic clock: already expired.
+                    IP.set_read_deadline!(ipfd, Int64(1))
 
                     # `_ip_spin_until`, not `IP.timedwait`: the runtime-backed
                     # wait would call `init!()` and retire the stopped
                     # generation before the assertions below observe it.
-                    @test _ip_spin_until(() -> istaskdone(read_task); timeout_s = 5.0)
+                    @test _ip_spin_until(() -> istaskdone(read_task))
                     @test fetch(read_task) isa IP.DeadlineExceededError
                     op = old_op[]::IP.IocpOp
                     @test old_state.backend_state !== nothing
@@ -857,14 +860,15 @@ end
                 @test sysfd == ipfd.sysfd
 
                 close_task = errormonitor(Threads.@spawn close(ipfd))
-                @test IP.timedwait(() -> istaskdone(close_task), 0.05; pollint = 0.001) == :timed_out
+                # `close` must block while the control reference is held: the
+                # descriptor stays valid and usable, and close only completes
+                # after the release below.
+                @test !istaskdone(close_task)
                 @test ipfd.sysfd == sysfd
                 @test SO.get_sockopt_int(sysfd, SO.SOL_SOCKET, SO.SO_KEEPALIVE) >= 0
 
                 put!(release_control, nothing)
-                @test IP.timedwait(() -> istaskdone(control_task), 2.0; pollint = 0.001) != :timed_out
                 @test fetch(control_task) == sysfd
-                @test IP.timedwait(() -> istaskdone(close_task), 2.0; pollint = 0.001) != :timed_out
                 @test fetch(close_task) === nothing
                 @test ipfd.sysfd == IP.INVALID_FD
 
@@ -912,14 +916,11 @@ end
                     IP.waitcancelled(ipfd.pd, IP.PollMode.READ)
                     return :ok
                 end)
-                pre = IP.timedwait(() -> istaskdone(wait_task), 0.05; pollint = 0.001)
-                @test pre == :timed_out
+                # Nothing has been written yet, so a completed wait here
+                # means a spurious wake already happened.
+                @test !istaskdone(wait_task)
                 _ip_write_byte(fd1, 0x71)
-                status = IP.timedwait(() -> istaskdone(wait_task), 2.0; pollint = 0.001)
-                @test status != :timed_out
-                if status != :timed_out
-                    @test fetch(wait_task) == :ok
-                end
+                @test fetch(wait_task) == :ok
             finally
                 if wait_task isa Task && !istaskdone(wait_task)
                     close(ipfd)
@@ -933,16 +934,13 @@ end
             mu = IP.FDLock()
             @test IP._fdlock_rwlock!(mu, true, true)
             waiters = [errormonitor(Threads.@spawn IP._fdlock_rwlock!(mu, true, true)) for _ in 1:32]
-            pre = IP.timedwait(() -> all(istaskdone, waiters), 0.05; pollint = 0.001)
-            @test pre == :timed_out
+            # The write lock is held, so no waiter can have acquired it; a
+            # completed waiter here means the lock was wrongly granted.
+            @test !any(istaskdone, waiters)
             @test IP._fdlock_incref_and_close!(mu)
             _ = IP._fdlock_rwunlock!(mu, true)
             for waiter in waiters
-                status = IP.timedwait(() -> istaskdone(waiter), 2.0; pollint = 0.001)
-                @test status != :timed_out
-                if status != :timed_out
-                    @test fetch(waiter) == false
-                end
+                @test fetch(waiter) == false
             end
         end
     end

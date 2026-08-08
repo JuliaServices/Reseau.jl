@@ -79,16 +79,25 @@ function _el_read_byte(fd::SO.SocketFD)
     throw(ArgumentError("timed out reading byte"))
 end
 
-function _el_wait_task_done(task::Task, timeout_s::Float64 = 2.0)
-    status = timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
-    return status
+# Deadlocks surface as a suite hang; the CI job timeout is the final guard.
+function _el_wait_task_done(task::Task)
+    # Status-only wait: a task that failed is still "done" here, matching the
+    # polling helper this replaced; callers inspect results via fetch.
+    try
+        wait(task)
+    catch
+    end
+    return nothing
 end
 
-function _el_wait_channel_ready(ch::Channel{Nothing}, timeout_s::Float64 = 2.0)
-    status = timedwait(() -> isready(ch), timeout_s; pollint = 0.001)
-    status == :timed_out || take!(ch)
-    return status
+function _el_wait_channel_ready(ch::Channel{Nothing})
+    take!(ch)
+    return nothing
 end
+
+# Far-future monotonic deadline: pending forever from the test's perspective,
+# but far from typemax so saturating arithmetic never wraps it.
+const _EL_FAR_FUTURE_NS = typemax(Int64) ÷ 2
 
 function _el_log_test_progress(msg::AbstractString)
     println("[iopoll_runtime_tests] ", msg)
@@ -133,25 +142,18 @@ end
             @test IP._saturating_add_ns(Int64(20), Int64(22)) == Int64(42)
             @test IP._saturating_add_ns(typemax(Int64) - Int64(2), Int64(3)) == typemax(Int64)
             @test IP._saturating_add_ns(typemin(Int64) + Int64(2), Int64(-3)) == typemin(Int64)
-            _el_log_test_progress("poller-backed sleep/timedwait: sleep")
-            t0 = time_ns()
-            IP.sleep(0.03)
-            elapsed_ns = time_ns() - t0
-            @test elapsed_ns >= 15_000_000
-            _el_log_test_progress("poller-backed sleep/timedwait: timedwait false")
-            @test IP.timedwait(() -> false, 0.05; pollint = 0.001) == :timed_out
+            # Latency semantics (sleep waits at least its delay, a future
+            # timedwait deadline expires) live in timing_semantics_tests.jl;
+            # here cover only the deterministic branches.
+            _el_log_test_progress("poller-backed sleep/timedwait: sleep zero delay")
+            IP.sleep(0.0)
+            _el_log_test_progress("poller-backed sleep/timedwait: timedwait expired deadline")
+            @test IP.timedwait(() -> false, 0.0) == :timed_out
+            _el_log_test_progress("poller-backed sleep/timedwait: timedwait ready predicate")
             wake_ch = Channel{Nothing}(1)
-            _el_log_test_progress("poller-backed sleep/timedwait: spawn wake task")
-            wake_task = errormonitor(@async begin
-                IP.sleep(0.03)
-                put!(wake_ch, nothing)
-                return nothing
-            end)
-            _el_log_test_progress("poller-backed sleep/timedwait: wait for wake")
-            status = IP.timedwait(() -> isready(wake_ch), 2.0; pollint = 0.001)
-            @test status != :timed_out
-            status == :timed_out || take!(wake_ch)
-            wait(wake_task)
+            put!(wake_ch, nothing)
+            @test IP.timedwait(() -> isready(wake_ch), 60.0) == :ok
+            take!(wake_ch)
         end
         _el_log_test_progress("DONE: poller-backed sleep/timedwait")
         _el_log_test_progress("START: pollwait wake reason precedence")
@@ -218,9 +220,7 @@ end
                 waiter = NP.PollWaiter()
                 expected = isodd(i) ? NP.PollWakeReason.READY : NP.PollWakeReason.CANCELED
                 waiter_task = errormonitor(Threads.@spawn NP.pollwait!(waiter))
-                deadline = time_ns() + 2_000_000_000
                 while !((@atomic :acquire waiter.state) isa Task) && !istaskdone(waiter_task)
-                    time_ns() < deadline || error("timed out waiting for PollWaiter to park")
                     yield()
                 end
                 @test NP.pollnotify!(waiter, expected)
@@ -232,7 +232,6 @@ end
             # parked waiter woken CANCELED while a concurrent READY upgrade
             # lands mid-consume must return a reason — never re-park with its
             # wake token already spent.
-            deadlocked = false
             for _ in 1:256
                 waiter = NP.PollWaiter()
                 waiter_task = Threads.@spawn NP.pollwait!(waiter)
@@ -241,13 +240,8 @@ end
                 end
                 cancel_task = Threads.@spawn NP.pollnotify!(waiter, NP.PollWakeReason.CANCELED)
                 ready_task = Threads.@spawn NP.pollnotify!(waiter, NP.PollWakeReason.READY)
-                status = timedwait(() -> istaskdone(waiter_task), 20.0)
-                if status !== :ok
-                    deadlocked = true
-                    # Unstick the parked task so the testset can finish.
-                    schedule(waiter_task, InterruptException(); error = true)
-                    break
-                end
+                # A lost-wakeup regression parks this fetch forever; the CI job
+                # timeout is the deadlock guard.
                 @test fetch(waiter_task) isa NP.PollWakeReason.T
                 wait(cancel_task)
                 wait(ready_task)
@@ -258,7 +252,6 @@ end
                 end
                 @test (@atomic :acquire waiter.state) === nothing
             end
-            @test !deadlocked
         end
         _el_log_test_progress("DONE: pollwait wake reason precedence")
         _el_log_test_progress("START: backend delay semantics")
@@ -269,20 +262,11 @@ end
             poll_task = nothing
             try
                 _el_log_test_progress("backend delay semantics: zero timeout")
-                # Compile `_backend_poll_once!` before the timed call so the
-                # elapsed bound below measures the poll, not first-call JIT.
-                NP._backend_poll_once!(state, Int64(0))
-                t0 = time_ns()
+                # Finite-timeout latency semantics live in
+                # timing_semantics_tests.jl; here cover the zero-timeout path
+                # and the wake path, which need no clock.
                 errno = NP._backend_poll_once!(state, Int64(0))
-                elapsed_ns = time_ns() - t0
                 @test errno == Int32(0)
-                @test elapsed_ns < 50_000_000
-                _el_log_test_progress("backend delay semantics: finite timeout")
-                t0 = time_ns()
-                errno = NP._backend_poll_once!(state, Int64(30_000_000))
-                elapsed_ns = time_ns() - t0
-                @test errno == Int32(0)
-                @test elapsed_ns >= 15_000_000
                 if _el_can_block_julia_worker()
                     _el_log_test_progress("backend delay semantics: blocking wake")
                     wake_ch = Channel{Nothing}(1)
@@ -292,21 +276,19 @@ end
                         put!(wake_ch, nothing)
                         return nothing
                     end)
-                    sleep(0.03)
+                    # The backend wake is sticky: a wake posted before the
+                    # poller enters the syscall still terminates the next
+                    # poll, so both sides of the race pass without settling.
                     @test NP._backend_wake!(state) == Int32(0)
-                    status = timedwait(() -> isready(wake_ch), 2.0; pollint = 0.001)
-                    @test status != :timed_out
-                    if status != :timed_out
-                        take!(wake_ch)
-                        wait(poll_task)
-                    end
+                    take!(wake_ch)
+                    wait(poll_task)
                 else
                     @test NP._backend_wake!(state) == Int32(0)
                 end
             finally
                 if poll_task isa Task && !istaskdone(poll_task)
                     NP._backend_wake!(state)
-                    @test _el_wait_task_done(poll_task, 1.0) != :timed_out
+                    _el_wait_task_done(poll_task)
                 end
                 poll_task isa Task && istaskdone(poll_task) && wait(poll_task)
                 NP._backend_close!(state)
@@ -331,28 +313,29 @@ end
                 registration = NP.Registration(fd0, token, NP.PollMode.READWRITE, NP.PollWaiter(), NP.PollWaiter(), false)
                 state.registrations[fd0] = registration
                 state.registrations_by_token[token] = registration
-                @atomic :release state.poll_until_ns = Int64(time_ns()) + Int64(5_000_000_000)
+                @atomic :release state.poll_until_ns = _EL_FAR_FUTURE_NS
+                deadline_ns = _EL_FAR_FUTURE_NS - Int64(20_000_000)
                 if _el_can_block_julia_worker()
+                    # Poll with no timeout at all: the fetch below completing
+                    # is exactly the earlier-deadline wake working. A wake that
+                    # lands before the poll enters the syscall stays pending,
+                    # so both sides of the race pass.
                     poll_task = errormonitor(Threads.@spawn begin
-                        t0 = time_ns()
-                        err = NP._backend_poll_once!(state, Int64(5_000_000_000))
-                        return err, time_ns() - t0
+                        return NP._backend_poll_once!(state, Int64(-1))
                     end)
-                    sleep(0.03)
-                    NP.schedule_deadlines!(registration.pollstate, Int64(time_ns()) + Int64(20_000_000), Int64(0), UInt64(1), UInt64(0))
-                    err, elapsed_ns = fetch(poll_task)
-                    @test err == Int32(0)
-                    @test elapsed_ns < 500_000_000
+                    NP.schedule_deadlines!(registration.pollstate, deadline_ns, Int64(0), UInt64(1), UInt64(0))
+                    @test fetch(poll_task) == Int32(0)
                 else
-                    NP.schedule_deadlines!(registration.pollstate, Int64(time_ns()) + Int64(20_000_000), Int64(0), UInt64(1), UInt64(0))
-                    delay_ns = NP._poll_delay_ns(state)
-                    @test delay_ns >= 0
-                    @test delay_ns < 500_000_000
+                    NP.schedule_deadlines!(registration.pollstate, deadline_ns, Int64(0), UInt64(1), UInt64(0))
+                    # With an injected clock the next-delay computation is
+                    # exact: 20ms before the deadline, and zero once expired.
+                    @test NP._poll_delay_ns(state; now_ns = deadline_ns - Int64(20_000_000)) == Int64(20_000_000)
+                    @test NP._poll_delay_ns(state; now_ns = deadline_ns) == Int64(0)
                 end
             finally
                 if poll_task isa Task && !istaskdone(poll_task)
                     NP._backend_wake!(state)
-                    @test _el_wait_task_done(poll_task, 1.0) != :timed_out
+                    _el_wait_task_done(poll_task)
                 end
                 poll_task isa Task && istaskdone(poll_task) && wait(poll_task)
                 NP.POLLER[] = old_poller
@@ -382,18 +365,15 @@ end
                     put!(wait_ch, nothing)
                     return nothing
                 end)
-                @test _el_wait_channel_ready(wait_started, 2.0) != :timed_out
-                pre = timedwait(() -> isready(wait_ch), 0.05; pollint = 0.001)
-                @test pre == :timed_out
+                _el_wait_channel_ready(wait_started)
+                # Nothing has been written yet, so a completed wait here means
+                # a spurious wake already happened.
+                @test !isready(wait_ch)
                 _el_log_test_progress("runtime register/pollwait/deregister: trigger read ready")
                 _el_write_byte(fd1, 0x33)
-                status = timedwait(() -> isready(wait_ch), 2.0; pollint = 0.001)
-                @test status != :timed_out
-                if status != :timed_out
-                    take!(wait_ch)
-                    wait(waiter_task)
-                    @test _el_read_byte(fd0) == 0x33
-                end
+                take!(wait_ch)
+                wait(waiter_task)
+                @test _el_read_byte(fd0) == 0x33
                 NP.deregister!(fd0)
             finally
                 if waiter_task !== nothing && !istaskdone(waiter_task)
@@ -401,7 +381,7 @@ end
                         NP.deregister!(fd0)
                     catch
                     end
-                    @test _el_wait_task_done(waiter_task, 1.0) != :timed_out
+                    _el_wait_task_done(waiter_task)
                 end
                 waiter_task isa Task && istaskdone(waiter_task) && wait(waiter_task)
                 _el_close_fd(fd0)
@@ -436,19 +416,22 @@ end
                     put!(wait_ch, nothing)
                     return nothing
                 end)
-                @test _el_wait_channel_ready(wait_started, 2.0) != :timed_out
+                _el_wait_channel_ready(wait_started)
+                # Wait for the waiter to park so the stale dispatch below has a
+                # parked task to (wrongly) wake if suppression regresses.
+                while !((@atomic :acquire registration2.read_waiter.state) isa Task) && !istaskdone(waiter_task)
+                    yield()
+                end
                 stale = NP.PollEvent(NP.INVALID_FD, token1, NP.PollMode.READ, false)
                 NP._dispatch_ready_event!(state, stale)
-                stale_status = timedwait(() -> isready(wait_ch), 0.05; pollint = 0.001)
-                @test stale_status == :timed_out
+                # Dispatch is synchronous: a suppression regression would have
+                # replaced the parked task with a wake token already.
+                @test (@atomic :acquire registration2.read_waiter.state) isa Task
+                @test !isready(wait_ch)
                 _el_write_byte(fd1, 0x44)
-                status = timedwait(() -> isready(wait_ch), 2.0; pollint = 0.001)
-                @test status != :timed_out
-                if status != :timed_out
-                    take!(wait_ch)
-                    wait(waiter_task)
-                    @test _el_read_byte(fd0) == 0x44
-                end
+                take!(wait_ch)
+                wait(waiter_task)
+                @test _el_read_byte(fd0) == 0x44
                 NP.deregister!(fd0)
             finally
                 if waiter_task !== nothing && !istaskdone(waiter_task)
@@ -456,7 +439,7 @@ end
                         NP.deregister!(fd0)
                     catch
                     end
-                    @test _el_wait_task_done(waiter_task, 1.0) != :timed_out
+                    _el_wait_task_done(waiter_task)
                 end
                 waiter_task isa Task && istaskdone(waiter_task) && wait(waiter_task)
                 _el_close_fd(fd0)
@@ -484,15 +467,11 @@ end
                     put!(wait_ch, nothing)
                     return nothing
                 end)
-                @test _el_wait_channel_ready(wait_started, 2.0) != :timed_out
+                _el_wait_channel_ready(wait_started)
                 _el_write_byte(fd1, 0x55)
-                status = timedwait(() -> isready(wait_ch), 2.0; pollint = 0.001)
-                @test status != :timed_out
-                if status != :timed_out
-                    take!(wait_ch)
-                    wait(waiter_task)
-                    @test _el_read_byte(fd0) == 0x55
-                end
+                take!(wait_ch)
+                wait(waiter_task)
+                @test _el_read_byte(fd0) == 0x55
                 NP.deregister!(fd0)
             finally
                 if waiter_task !== nothing && !istaskdone(waiter_task)
@@ -500,7 +479,7 @@ end
                         NP.deregister!(fd0)
                     catch
                     end
-                    @test _el_wait_task_done(waiter_task, 1.0) != :timed_out
+                    _el_wait_task_done(waiter_task)
                 end
                 waiter_task isa Task && istaskdone(waiter_task) && wait(waiter_task)
                 _el_close_fd(fd0)
@@ -516,7 +495,7 @@ end
             fd0, fd1 = _el_socketpair_stream()
             try
                 dereg_task = errormonitor(@async NP.deregister!(fd0))
-                @test _el_wait_task_done(dereg_task, 0.5) != :timed_out
+                _el_wait_task_done(dereg_task)
                 wait(dereg_task)
             finally
                 _el_close_fd(fd0)
@@ -528,11 +507,11 @@ end
         @testset "shutdown wakes timer waiters" begin
             NP.shutdown!()
             timer = NP.TimerState()
-            @test NP.schedule_timer!(timer, Int64(time_ns()) + Int64(60_000_000_000))
+            @test NP.schedule_timer!(timer, _EL_FAR_FUTURE_NS)
             timer_task = errormonitor(@async NP.waittimer(timer))
             try
                 NP.shutdown!()
-                @test _el_wait_task_done(timer_task, 1.0) != :timed_out
+                _el_wait_task_done(timer_task)
                 @test fetch(timer_task) === false
                 @test (@atomic :acquire timer.closed)
                 @test (@atomic :acquire timer.deadline_ns) == Int64(0)
@@ -553,7 +532,7 @@ end
                 state = NP.init!()
                 registration = NP.register!(fd0; mode = NP.PollMode.READ)
                 timer = NP.TimerState()
-                @test NP.schedule_timer!(timer, Int64(time_ns()) + Int64(5_000_000_000))
+                @test NP.schedule_timer!(timer, _EL_FAR_FUTURE_NS)
                 reg_started = Channel{Nothing}(1)
                 timer_started = Channel{Nothing}(1)
                 reg_task = errormonitor(@async begin
@@ -566,11 +545,11 @@ end
                     timer_reason[] = NP.pollwait!(timer.waiter)
                     return nothing
                 end)
-                @test _el_wait_channel_ready(reg_started, 2.0) != :timed_out
-                @test _el_wait_channel_ready(timer_started, 2.0) != :timed_out
+                _el_wait_channel_ready(reg_started)
+                _el_wait_channel_ready(timer_started)
                 NP._notify_all_waiters!(state)
-                @test _el_wait_task_done(reg_task, 2.0) != :timed_out
-                @test _el_wait_task_done(timer_task, 2.0) != :timed_out
+                _el_wait_task_done(reg_task)
+                _el_wait_task_done(timer_task)
                 wait(reg_task)
                 wait(timer_task)
                 @test reg_reason[] == NP.PollWakeReason.CANCELED
@@ -592,7 +571,9 @@ end
             state = NP.Poller()
             t1 = NP.TimerState()
             t2 = NP.TimerState()
-            now = Int64(time_ns())
+            # The drain compares entry deadlines against a caller-supplied
+            # cutoff, so a fixed clock keeps this fully deterministic.
+            now = Int64(1_000_000_000)
             for (timer, offset) in ((t1, Int64(-2_000_000)), (t2, Int64(-1_000_000)))
                 @atomic :release timer.deadline_ns = now + offset
                 seq = @atomic timer.seq += UInt64(1)
@@ -615,11 +596,10 @@ end
             # The drain runs on the detached poller thread every cycle, and
             # allocating there has crashed under gVisor's sandbox. Coverage
             # instrumentation adds allocations, so only assert without it.
-            drained = NP._drain_expired_time_entries!(state, Int64(time_ns()))
+            drained = NP._drain_expired_time_entries!(state, now)
             @test drained === nothing
             if Base.JLOptions().code_coverage == 0
-                allocation_check_now = Int64(time_ns())
-                allocs = @allocated NP._drain_expired_time_entries!(state, allocation_check_now)
+                allocs = @allocated NP._drain_expired_time_entries!(state, now)
                 @test allocs == 0
             end
         end
@@ -629,15 +609,16 @@ end
             NP.shutdown!()
             state = NP.init!()
             @test @atomic state.running
-            # Let the poller thread commit to its uncapped backend wait: with
-            # no registrations and no timers there is no poll timeout at all,
-            # so shutdown completing is exactly the backend wake working.
-            sleep(0.1)
+            # With no registrations and no timers the poller's backend wait is
+            # uncapped, so shutdown completing is exactly the backend wake
+            # working. The wake is sticky: posted before the poller commits to
+            # the syscall, it still terminates the next wait, so no settling
+            # delay is needed for either side of the race.
             shutdown_task = errormonitor(Threads.@spawn begin
                 NP.shutdown!()
                 return nothing
             end)
-            @test _el_wait_task_done(shutdown_task, 10.0) != :timed_out
+            _el_wait_task_done(shutdown_task)
             if istaskdone(shutdown_task)
                 wait(shutdown_task)
                 @test !(@atomic state.running)

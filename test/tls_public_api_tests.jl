@@ -1,6 +1,10 @@
 using Test
 using Reseau
 
+# Far-future monotonic deadline: pending forever from the test's perspective,
+# but far from typemax so saturating arithmetic never wraps it.
+const _TLS_FAR_FUTURE_NS = typemax(Int64) ÷ 2
+
 isdefined(@__MODULE__, :_RESEAU_TLS_TEST_UTILS_LOADED) || include("tls_test_utils.jl")
 
 function _tls_public_read_record(conn::NC.Conn)::Tuple{Vector{UInt8}, Vector{UInt8}}
@@ -38,7 +42,7 @@ end
                         server_name = "localhost",
                         handshake_timeout_ns = 1_000_000_000,
                     )
-                    @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                    _tls_wait_task_done(accept_task)
                     server = fetch(accept_task)
                     client_local = TL.local_addr(client)::NC.SocketAddrV4
                     @test client_local.ip == NC.loopback_addr(0).ip
@@ -89,7 +93,7 @@ end
                         server_name = "localhost",
                     ))
                     @test request_client isa TL.Conn
-                    @test _tls_wait_task_done(request_accept, 2.0) != :timed_out
+                    _tls_wait_task_done(request_accept)
                     request_server = fetch(request_accept)
                     @test request_server isa TL.Conn
                 finally
@@ -128,7 +132,7 @@ end
                 else
                     @test client isa TL.Conn
                 end
-                accept_task !== nothing && _tls_wait_task_done(accept_task, 12.0)
+                accept_task !== nothing && _tls_wait_task_done(accept_task)
             finally
                 _tls_close_quiet!(client)
                 _tls_close_quiet!(listener)
@@ -160,7 +164,7 @@ end
                     alpn_protocols = ["h2", "http/1.1"],
                 )
                 client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
-                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                _tls_wait_task_done(accept_task)
                 server = fetch(accept_task)
                 @test TL.connection_state(client).alpn_protocol == "h2"
                 @test TL.connection_state(server).alpn_protocol == "h2"
@@ -196,7 +200,7 @@ end
                     alpn_protocols = ["http/1.1"],
                 )
                 client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
-                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                _tls_wait_task_done(accept_task)
                 server = fetch(accept_task)
                 @test TL.connection_state(client).alpn_protocol == ""
                 @test TL.connection_state(server).alpn_protocol == ""
@@ -243,7 +247,7 @@ end
                 if err isa TL.TLSError
                     @test occursin("alert 120", err.message)
                 end
-                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                _tls_wait_task_done(accept_task)
                 server_err = fetch(accept_task)
                 @test server_err isa TL.TLSError
             finally
@@ -273,7 +277,7 @@ end
                 tcp_laddr = NC.addr(tcp_listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn NC.accept(tcp_listener))
                 client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(tcp_laddr.port))")
-                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                _tls_wait_task_done(accept_task)
                 server_tcp = fetch(accept_task)
 
                 server_cfg = TL.Config(
@@ -300,7 +304,7 @@ end
 
                 server_task = errormonitor(Threads.@spawn TL.handshake!(server_tls))
                 TL.handshake!(client_tls)
-                @test _tls_wait_task_done(server_task, 2.0) != :timed_out
+                _tls_wait_task_done(server_task)
                 fetch(server_task)
 
                 client_state = TL.connection_state(client_tls)
@@ -336,13 +340,13 @@ end
                 @test isopen(listener)
                 @test TL.local_addr(listener) == laddr
 
-                TL.set_deadline!(listener, Int64(time_ns()) - Int64(1))
+                TL.set_deadline!(listener, Int64(1))
                 @test_throws TL.DeadlineExceededError TL.accept(listener)
 
                 TL.set_deadline!(listener, Int64(0))
                 accept_task = errormonitor(Threads.@spawn TL.accept(listener))
                 client = NC.connect(NC.loopback_addr(Int(laddr.port)))
-                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                _tls_wait_task_done(accept_task)
                 server = fetch(accept_task)
                 @test server isa TL.Conn
 
@@ -396,7 +400,7 @@ end
                 recv_view_buf = Vector{UInt8}(undef, length(payload_view))
                 @test read!(client, recv_view_buf) === recv_view_buf
                 @test recv_view_buf == collect(payload_view)
-                @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                _tls_wait_task_done(accept_task)
                 server_result = fetch(accept_task)
                 server_result isa Exception && throw(server_result)
                 server = server_result::TL.Conn
@@ -428,7 +432,7 @@ end
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn NC.accept(listener))
                 client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
-                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                _tls_wait_task_done(accept_task)
                 server_tcp = fetch(accept_task)
                 client_tls = TL.client(client_tcp, TL.Config(
                     verify_peer = false,
@@ -439,7 +443,7 @@ end
 
                 server_task = errormonitor(Threads.@spawn read(server_tls, 0))
                 @test write(client_tls, UInt8[]) == 0
-                @test _tls_wait_task_done(server_task, 2.0) != :timed_out
+                _tls_wait_task_done(server_task)
                 @test fetch(server_task) == UInt8[]
                 @test TL.connection_state(client_tls).handshake_complete
                 @test TL.connection_state(server_tls).handshake_complete
@@ -478,7 +482,7 @@ end
                         laddr = NC.addr(listener)::NC.SocketAddrV4
                         accept_task = errormonitor(Threads.@spawn NC.accept(listener))
                         client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
-                        @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                        _tls_wait_task_done(accept_task)
                         peer_tcp = fetch(accept_task)
                         close(peer_tcp)
                         peer_tcp = nothing
@@ -525,7 +529,7 @@ end
                     laddr = NC.addr(listener)::NC.SocketAddrV4
                     accept_task = errormonitor(Threads.@spawn NC.accept(listener))
                     client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
-                    @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                    _tls_wait_task_done(accept_task)
                     server_tcp = fetch(accept_task)
                     server_tls = TL.server(server_tcp, _tls_server_config(handshake_timeout_ns = 2_000_000_000))
                     write(client_tcp, UInt8[TL._TLS_RECORD_TYPE_HANDSHAKE, 0x03])
@@ -565,7 +569,7 @@ end
                     laddr = NC.addr(listener)::NC.SocketAddrV4
                     accept_task = errormonitor(Threads.@spawn NC.accept(listener))
                     client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
-                    @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                    _tls_wait_task_done(accept_task)
                     server_tcp = fetch(accept_task)
                     client_tls = TL.client(client_tcp, TL.Config(
                         verify_peer = false,
@@ -581,7 +585,7 @@ end
                     ))
                     server_task = errormonitor(Threads.@spawn TL.handshake!(server_tls))
                     TL.handshake!(client_tls)
-                    @test _tls_wait_task_done(server_task, 2.0) != :timed_out
+                    _tls_wait_task_done(server_task)
                     fetch(server_task)
 
                     write(client_tls.tcp, UInt8[TL._TLS_RECORD_TYPE_APPLICATION_DATA, 0x03])
@@ -619,7 +623,7 @@ end
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn NC.accept(listener))
                 client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
-                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                _tls_wait_task_done(accept_task)
                 server_tcp = fetch(accept_task)
                 server_tls = TL.server(server_tcp, _tls_server_config(handshake_timeout_ns = 2_000_000_000))
                 write(client_tcp, UInt8[TL._TLS_RECORD_TYPE_APPLICATION_DATA, 0x03, 0x03, 0x00, 0x00])
@@ -636,7 +640,8 @@ end
                     @test err.cause isa TL._TLSRecordHeaderError
                 end
 
-                NC.set_read_deadline!(client_tcp, time_ns() + 100_000_000)
+                # Already expired: enters the timeout branch without waiting.
+                NC.set_read_deadline!(client_tcp, Int64(1))
                 @test_throws NC.DeadlineExceededError read!(client_tcp, Vector{UInt8}(undef, 1))
             finally
                 _tls_close_quiet!(server_tls)
@@ -685,7 +690,7 @@ end
                     )
                     header, payload = _tls_public_read_record(client_tcp)
 
-                    @test _tls_wait_task_done(server_task, 2.0) != :timed_out
+                    _tls_wait_task_done(server_task)
                     err = fetch(server_task)
                     @test err isa TL.TLSError
                     if err isa TL.TLSError
@@ -779,7 +784,7 @@ end
                     @test displaced_state.version == UInt16(0)
                     @test isempty(displaced_state.record_buffer)
 
-                    @test _tls_wait_task_done(server_task, 2.0) != :timed_out
+                    _tls_wait_task_done(server_task)
                     header, payload = fetch(server_task)
                     @test header[1] == TL._TLS_RECORD_TYPE_ALERT
                     @test header[2:3] == UInt8[0x03, 0x03]
@@ -832,7 +837,7 @@ end
                     )
                     header, payload = _tls_public_read_record(client_tcp)
 
-                    @test _tls_wait_task_done(server_task, 2.0) != :timed_out
+                    _tls_wait_task_done(server_task)
                     err = fetch(server_task)
                     @test err isa TL.TLSError
                     if err isa TL.TLSError
@@ -875,7 +880,7 @@ end
                     addr = NC.addr(listener)::NC.SocketAddrV4
                     accept_task = errormonitor(Threads.@spawn NC.accept(listener))
                     client_tcp = NC.connect(addr)
-                    @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                    _tls_wait_task_done(accept_task)
                     server_tcp = fetch(accept_task)
                     client_tls = TL.client(client_tcp, TL.Config(
                         verify_peer = false,
@@ -957,7 +962,7 @@ end
                     handshake_timeout_ns = 10_000_000_000,
                 ))
                 @test read(client, 1) == UInt8[0x31]
-                @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                _tls_wait_task_done(accept_task)
                 server_result = fetch(accept_task)
                 server_result isa Exception && throw(server_result)
                 server = server_result::TL.Conn
@@ -1003,7 +1008,7 @@ end
                     max_version = TL.TLS1_2_VERSION,
                 ))
                 @test read(client, 1) == UInt8[0x41]
-                @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                _tls_wait_task_done(accept_task)
                 server_result = fetch(accept_task)
                 server_result isa Exception && throw(server_result)
                 server = server_result::TL.Conn
@@ -1053,7 +1058,7 @@ end
                     curve_preferences = UInt16[TL.X25519],
                 ))
                 @test read(client, 1) == UInt8[0x58]
-                @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                _tls_wait_task_done(accept_task)
                 server_result = fetch(accept_task)
                 server_result isa Exception && throw(server_result)
                 server = server_result::TL.Conn
@@ -1094,7 +1099,7 @@ end
                     client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
                     read(client, 1) == UInt8[0x51] || error("unexpected TLS server byte")
                     write(client, UInt8[0x61]) == 1 || error("unexpected TLS client ack write")
-                    @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                    _tls_wait_task_done(accept_task)
                     return TL.connection_state(client), fetch(accept_task)::TL.ConnectionState
                 finally
                     _tls_close_quiet!(client)
@@ -1170,7 +1175,7 @@ end
                     client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
                     read(client, 1) == UInt8[0x52] || error("unexpected TLS server byte")
                     write(client, UInt8[0x62]) == 1 || error("unexpected TLS client ack write")
-                    @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                    _tls_wait_task_done(accept_task)
                     return TL.connection_state(client), fetch(accept_task)::TL.ConnectionState
                 finally
                     _tls_close_quiet!(client)
@@ -1246,7 +1251,7 @@ end
                     client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
                     read(client, 1) == UInt8[0x53] || error("unexpected TLS server byte")
                     write(client, UInt8[0x63]) == 1 || error("unexpected TLS client ack write")
-                    @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                    _tls_wait_task_done(accept_task)
                     fetch(accept_task)
                     return TL.connection_state(client)
                 finally
@@ -1318,7 +1323,7 @@ end
                     max_version = TL.TLS1_2_VERSION,
                 ))
                 @test client_tls.policy == TL._TLS_POLICY_TLS12
-                @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                _tls_wait_task_done(accept_task)
                 server_tls = fetch(accept_task)
                 client_state = TL.connection_state(client_tls)
                 server_state = TL.connection_state(server_tls)
@@ -1344,7 +1349,7 @@ end
                 accept_task = errormonitor(Threads.@spawn begin
                     conn = TL.accept(listener)
                     TL.handshake!(conn)
-                    TL.set_read_deadline!(conn, time_ns() + 5_000_000_000)
+                    TL.set_read_deadline!(conn, _TLS_FAR_FUTURE_NS)
                     server_codeunits_buf = Vector{UInt8}(undef, 2)
                     read!(conn, server_codeunits_buf)
                     write(conn, server_codeunits_buf)
@@ -1355,12 +1360,12 @@ end
                     server_name = "localhost",
                     handshake_timeout_ns = 10_000_000_000,
                 ))
-                TL.set_read_deadline!(client, time_ns() + 5_000_000_000)
+                TL.set_read_deadline!(client, _TLS_FAR_FUTURE_NS)
                 @test write(client, codeunits("hi")) == 2
                 client_codeunits_buf = Vector{UInt8}(undef, 2)
                 @test read!(client, client_codeunits_buf) === client_codeunits_buf
                 @test String(client_codeunits_buf) == "hi"
-                @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                _tls_wait_task_done(accept_task)
                 server = fetch(accept_task)
             finally
                 _tls_close_quiet!(server)
@@ -1389,7 +1394,7 @@ end
                     verify_peer = false,
                     server_name = "localhost",
                 ))
-                @test _tls_wait_task_done(close_task, 2.0) != :timed_out
+                _tls_wait_task_done(close_task)
                 buf = Vector{UInt8}(undef, 1)
                 @test eof(client)
                 @test_throws EOFError read!(client, buf)
@@ -1416,7 +1421,7 @@ end
                     verify_peer = false,
                     server_name = "localhost",
                 ))
-                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                _tls_wait_task_done(accept_task)
                 server = fetch(accept_task)
                 closewrite(client)
                 write_err = try
@@ -1430,7 +1435,7 @@ end
                     @test write_err.message == "tls: protocol is shutdown"
                 end
                 @test_throws TL.TLSError write(client, UInt8[])
-                TL.set_read_deadline!(server, time_ns() + 1_000_000_000)
+                TL.set_read_deadline!(server, _TLS_FAR_FUTURE_NS)
                 @test eof(server)
                 @test_throws EOFError read!(server, Vector{UInt8}(undef, 1))
             finally
@@ -1451,7 +1456,7 @@ end
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn NC.accept(listener))
                 client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
-                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                _tls_wait_task_done(accept_task)
                 server_tcp = fetch(accept_task)
                 tls_client = TL.client(client_tcp, TL.Config(
                     verify_peer = false,
@@ -1505,7 +1510,7 @@ end
                 end
                 if connect_result isa TL.Conn
                     client = connect_result
-                    @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                    _tls_wait_task_done(accept_task)
                     server_result = fetch(accept_task)
                     server_result isa Exception && throw(server_result)
                     server = server_result::TL.Conn
@@ -1545,7 +1550,7 @@ end
                     max_version = TL.TLS1_2_VERSION,
                 )
                 client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
-                @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                _tls_wait_task_done(accept_task)
                 server_result = fetch(accept_task)
                 server_result isa Exception && throw(server_result)
                 server = server_result::TL.Conn
@@ -1591,7 +1596,7 @@ end
                 if connect_err isa TL.TLSError
                     @test occursin("certificate is not valid for host", connect_err.message)
                 end
-                accept_task !== nothing && _tls_wait_task_done(accept_task, 2.0)
+                accept_task !== nothing && _tls_wait_task_done(accept_task)
             finally
                 _tls_close_quiet!(listener)
                 IP.shutdown!()
@@ -1628,7 +1633,7 @@ end
                 if bad_connect_err !== nothing
                     @test _tls_handshake_connect_error(bad_connect_err)
                 end
-                accept_task !== nothing && _tls_wait_task_done(accept_task, 2.0)
+                accept_task !== nothing && _tls_wait_task_done(accept_task)
             finally
                 _tls_close_quiet!(listener)
                 IP.shutdown!()
@@ -1659,7 +1664,7 @@ end
                     handshake_timeout_ns = 10_000_000_000,
                 )
                 client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
-                @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                _tls_wait_task_done(accept_task)
                 server = fetch(accept_task)
                 client_state = TL.connection_state(client)
                 server_state = TL.connection_state(server)
@@ -1692,16 +1697,17 @@ end
                     return conn
                 end)
                 client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
-                accepted_status = IP.timedwait(() -> isready(accepted), 2.0; pollint = 0.001)
-                @test accepted_status != :timed_out
-                accepted_status == :timed_out || take!(accepted)
+                take!(accepted)
                 client_tls = TL.client(client_tcp, TL.Config(
                     verify_peer = false,
                     server_name = "localhost",
-                    handshake_timeout_ns = 200_000_000,
+                    # 1ns: the handshake deadline is already expired when the
+                    # handshake starts, firing before the far-future transport
+                    # deadlines below.
+                    handshake_timeout_ns = 1,
                 ))
-                original_read_deadline = time_ns() + 2_000_000_000
-                original_write_deadline = time_ns() + 2_500_000_000
+                original_read_deadline = _TLS_FAR_FUTURE_NS - Int64(1)
+                original_write_deadline = _TLS_FAR_FUTURE_NS - Int64(2)
                 TL.set_read_deadline!(client_tls, original_read_deadline)
                 TL.set_write_deadline!(client_tls, original_write_deadline)
                 pfd = client_tls.tcp.fd.pfd
@@ -1715,7 +1721,7 @@ end
                 _tls_close_quiet!(client_tls)
                 client_tcp = nothing
                 isready(release_peer) || put!(release_peer, nothing)
-                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                _tls_wait_task_done(accept_task)
                 stalled_peer = fetch(accept_task)
             finally
                 isready(release_peer) || put!(release_peer, nothing)
@@ -1743,18 +1749,18 @@ end
                     return conn
                 end)
                 client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
-                accepted_status = IP.timedwait(() -> isready(accepted), 2.0; pollint = 0.001)
-                @test accepted_status != :timed_out
-                accepted_status == :timed_out || take!(accepted)
+                take!(accepted)
                 client_tls = TL.client(client_tcp, TL.Config(
                     verify_peer = false,
                     server_name = "localhost",
                     handshake_timeout_ns = 2_000_000_000,
                 ))
-                TL.set_read_deadline!(client_tls, time_ns() + 100_000_000)
-                TL.set_write_deadline!(client_tls, time_ns() + 2_500_000_000)
+                # Expired read deadline fires before the handshake timeout; an
+                # already-expired deadline is latched as fired (-1) on arming.
+                TL.set_read_deadline!(client_tls, Int64(1))
+                TL.set_write_deadline!(client_tls, _TLS_FAR_FUTURE_NS)
                 pfd = client_tls.tcp.fd.pfd
-                pre_read_ns = @atomic :acquire pfd.pd.rd_ns
+                @test (@atomic :acquire pfd.pd.rd_ns) < 0
                 pre_write_ns = @atomic :acquire pfd.pd.wd_ns
                 err = try
                     TL.handshake!(client_tls)
@@ -1768,14 +1774,13 @@ end
                     @test err.message == "i/o timeout"
                     @test err.cause isa TL.DeadlineExceededError
                 end
-                @test pre_read_ns > 0
                 @test (@atomic :acquire pfd.pd.rd_ns) < 0
                 @test (@atomic :acquire pfd.pd.wd_ns) == pre_write_ns
                 _tls_close_quiet!(client_tls)
                 client_tls = nothing
                 client_tcp = nothing
                 isready(release_peer) || put!(release_peer, nothing)
-                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                _tls_wait_task_done(accept_task)
                 stalled_peer = fetch(accept_task)
             finally
                 isready(release_peer) || put!(release_peer, nothing)
@@ -1804,16 +1809,14 @@ end
                     return conn
                 end)
                 client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
-                accepted_status = IP.timedwait(() -> isready(accepted), 2.0; pollint = 0.001)
-                @test accepted_status != :timed_out
-                accepted_status == :timed_out || take!(accepted)
+                take!(accepted)
                 client_tls = TL.client(client_tcp, TL.Config(
                     verify_peer = false,
                     server_name = "localhost",
                     handshake_timeout_ns = 0,
                 ))
-                TL.set_read_deadline!(client_tls, time_ns() + 100_000_000)
-                TL.set_write_deadline!(client_tls, time_ns() + 100_000_000)
+                TL.set_read_deadline!(client_tls, Int64(1))
+                TL.set_write_deadline!(client_tls, Int64(1))
                 err = try
                     TL.handshake!(client_tls)
                     nothing
@@ -1826,7 +1829,7 @@ end
                     @test err.message == "i/o timeout"
                 end
                 isready(release_peer) || put!(release_peer, nothing)
-                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                _tls_wait_task_done(accept_task)
                 stalled_peer = fetch(accept_task)
             finally
                 isready(release_peer) || put!(release_peer, nothing)
@@ -1879,15 +1882,12 @@ end
                         ex
                     end
                 end)
-                accepted_status = IP.timedwait(() -> isready(accepted), 2.0; pollint = 0.001)
-                @test accepted_status != :timed_out
-                accepted_status == :timed_out || take!(accepted)
-                connect_status = _tls_wait_task_done(connect_task, 2.0)
-                @test connect_status != :timed_out
-                err = connect_status == :timed_out ? nothing : fetch(connect_task)
+                take!(accepted)
+                _tls_wait_task_done(connect_task)
+                err = fetch(connect_task)
                 @test !istaskdone(accept_task)
                 isready(release_peer) || put!(release_peer, nothing)
-                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                _tls_wait_task_done(accept_task)
                 if istaskdone(accept_task)
                     fetch(accept_task)
                 end
@@ -1920,7 +1920,7 @@ end
                     verify_peer = false,
                     server_name = "localhost",
                 ))
-                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                _tls_wait_task_done(accept_task)
                 server = fetch(accept_task)
                 close(client)
                 close(client)
@@ -1955,12 +1955,12 @@ end
                     verify_peer = false,
                     server_name = "localhost",
                 ))
-                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                _tls_wait_task_done(accept_task)
                 server = fetch(accept_task)
 
                 first_payload = UInt8[0x41, 0x42]
                 @test write(client, first_payload) == length(first_payload)
-                TL.set_read_deadline!(server, time_ns() + 250_000_000)
+                TL.set_read_deadline!(server, _TLS_FAR_FUTURE_NS)
                 first_buf = Vector{UInt8}(undef, 4)
                 @test readbytes!(server, first_buf, 4; all = false) == length(first_payload)
                 @test first_buf[1:2] == first_payload
@@ -1968,13 +1968,13 @@ end
 
                 second_payload = UInt8[0x43, 0x44]
                 @test write(client, second_payload) == length(second_payload)
-                TL.set_read_deadline!(server, time_ns() + 250_000_000)
+                TL.set_read_deadline!(server, _TLS_FAR_FUTURE_NS)
                 @test read(server, 4; all = false) == second_payload
                 TL.set_read_deadline!(server, Int64(0))
 
                 third_payload = UInt8[0x45, 0x46]
                 @test write(client, third_payload) == length(third_payload)
-                TL.set_read_deadline!(server, time_ns() + 250_000_000)
+                TL.set_read_deadline!(server, _TLS_FAR_FUTURE_NS)
                 grown_buf = fill(UInt8(0x00), 3)
                 @test readbytes!(server, grown_buf, 5; all = false) == length(third_payload)
                 @test grown_buf[1:2] == third_payload
@@ -1983,7 +1983,7 @@ end
 
                 fourth_payload = UInt8[0x47, 0x48]
                 @test write(client, fourth_payload) == length(fourth_payload)
-                TL.set_read_deadline!(server, time_ns() + 250_000_000)
+                TL.set_read_deadline!(server, _TLS_FAR_FUTURE_NS)
                 view_backing = fill(UInt8(0x00), 5)
                 view_buf = @view view_backing[2:4]
                 @test readbytes!(server, view_buf, 3; all = false) == length(fourth_payload)
@@ -2020,11 +2020,12 @@ end
                     verify_peer = false,
                     server_name = "localhost",
                 ))
-                hold_status = IP.timedwait(() -> isready(hold_ready), 2.0; pollint = 0.001)
-                @test hold_status != :timed_out
-                hold_status == :timed_out || take!(hold_ready)
-                TL.set_write_deadline!(client, time_ns() + 5_000_000)
-                payload = fill(UInt8(0x5a), 64 * 1024 * 1024)
+                take!(hold_ready)
+                # Already expired: any deadline error during a TLS write sets
+                # the permanent write error, so no oversized payload or short
+                # real deadline is needed.
+                TL.set_write_deadline!(client, Int64(1))
+                payload = fill(UInt8(0x5a), 1024)
                 first_err = try
                     write(client, payload)
                     nothing
@@ -2047,7 +2048,7 @@ end
                     @test second_err === first_err
                 end
                 isready(release_hold) || put!(release_hold, nothing)
-                @test _tls_wait_task_done(hold_task, 2.0) != :timed_out
+                _tls_wait_task_done(hold_task)
                 fetch(hold_task)
             finally
                 isready(release_hold) || put!(release_hold, nothing)
@@ -2074,7 +2075,7 @@ end
                     verify_peer = false,
                     server_name = "localhost",
                 ))
-                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                _tls_wait_task_done(accept_task)
                 server = fetch(accept_task)
                 read_task = errormonitor(Threads.@spawn begin
                     try
@@ -2084,9 +2085,11 @@ end
                     end
                     return :ok
                 end)
-                @test _tls_wait_task_done(read_task, 0.05) == :timed_out
+                # The server never writes, so a completed read here means a
+                # spurious wake or error already happened.
+                @test !istaskdone(read_task)
                 close(client)
-                @test _tls_wait_task_done(read_task, 2.0) != :timed_out
+                _tls_wait_task_done(read_task)
                 result = fetch(read_task)
                 @test result isa TL.TLSError
                 if result isa TL.TLSError

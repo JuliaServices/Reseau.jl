@@ -5,9 +5,20 @@ const NC = Reseau.TCP
 const IP = Reseau.IOPoll
 const SO = Reseau.SocketOps
 
-function _nc_wait_task_done(task::Task, timeout_s::Float64 = 2.0)
-    return IP.timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
+# Deadlocks surface as a suite hang; the CI job timeout is the final guard.
+function _nc_wait_task_done(task::Task)
+    # Status-only wait: a task that failed is still "done" here, matching the
+    # polling helper this replaced; callers inspect results via fetch.
+    try
+        wait(task)
+    catch
+    end
+    return nothing
 end
+
+# Far-future monotonic deadline: pending forever from the test's perspective,
+# but far from typemax so saturating arithmetic never wraps it.
+const _NC_FAR_FUTURE_NS = typemax(Int64) ÷ 2
 
 function _read_exact!(conn::NC.Conn, buf::Vector{UInt8})::Int
     read!(conn, buf)
@@ -30,25 +41,19 @@ function _fake_dial_conn(; self_connect::Bool)::NC.Conn
     return NC.Conn(fd)
 end
 
-function _readavailable_until_quiet(conn::NC.Conn; timeout_s::Float64 = 2.0, quiet_timeout_s::Float64 = 0.1)::Vector{UInt8}
+# Every caller's peer closes or half-closes after writing, so reading to EOF
+# is a deterministic replacement for quiet-window timing.
+function _read_until_close(conn::NC.Conn)::Vector{UInt8}
     out = UInt8[]
-    deadline_ns = Int64(time_ns()) + round(Int64, timeout_s * 1.0e9)
-    saw_bytes = false
     while true
-        remaining_ns = deadline_ns - Int64(time_ns())
-        remaining_ns <= 0 && break
-        read_timeout_s = saw_bytes ? min(quiet_timeout_s, remaining_ns / 1.0e9) : (remaining_ns / 1.0e9)
-        NC.set_read_deadline!(conn, Int64(time_ns()) + round(Int64, read_timeout_s * 1.0e9))
         chunk = try
             readavailable(conn)
         catch err
-            ex = err::Exception
-            (ex isa IP.DeadlineExceededError || ex isa EOFError) || rethrow(ex)
-            break
+            (err::Exception) isa EOFError && break
+            rethrow(err)
         end
         isempty(chunk) && break
         append!(out, chunk)
-        saw_bytes = true
     end
     return out
 end
@@ -77,14 +82,11 @@ end
                 @test laddr isa NC.SocketAddrV4
                 @test (laddr::NC.SocketAddrV4).port > 0
                 accept_task = errormonitor(@async NC.accept(listener))
-                pre = _nc_wait_task_done(accept_task, 0.05)
-                @test pre == :timed_out
+                # No client has dialed yet, so a completed accept here means a
+                # phantom connection.
+                @test !istaskdone(accept_task)
                 client = NC.connect(NC.loopback_addr(Int((laddr::NC.SocketAddrV4).port)))
-                status = _nc_wait_task_done(accept_task, 2.0)
-                @test status != :timed_out
-                if status != :timed_out
-                    server = fetch(accept_task)
-                end
+                server = fetch(accept_task)
                 @test server isa NC.Conn
                 local_client = NC.local_addr(client)
                 remote_client = NC.remote_addr(client)
@@ -208,7 +210,7 @@ end
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(@async NC.accept(listener))
                 client = NC.connect("tcp", "127.0.0.1:$(Int(laddr.port))"; local_addr = NC.loopback_addr(0))
-                @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
+                _nc_wait_task_done(accept_task)
                 server = fetch(accept_task)
                 client_local = NC.local_addr(client)::NC.SocketAddrV4
                 @test client_local.ip == NC.loopback_addr(0).ip
@@ -240,7 +242,7 @@ end
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(@async NC.accept(listener))
                 client = NC.connect(NC.loopback_addr(Int(laddr.port)))
-                @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
+                _nc_wait_task_done(accept_task)
                 server = fetch(accept_task)
 
                 first_payload = UInt8[0x41, 0x42]
@@ -295,7 +297,7 @@ end
                 buf = Vector{UInt8}(undef, length(payload))
                 @test readbytes!(client, buf, length(buf); all = true) == length(payload)
                 @test buf == payload
-                @test _nc_wait_task_done(server_task, 2.0) != :timed_out
+                _nc_wait_task_done(server_task)
                 wait(server_task)
             finally
                 _close_quiet!(client)
@@ -335,8 +337,8 @@ end
                 client = NC.connect(NC.loopback_addr(Int(laddr.port)))
                 @test write(client, request) == length(request)
                 closewrite(client)
-                @test _readavailable_until_quiet(client; timeout_s = 2.0, quiet_timeout_s = 0.1) == expected
-                @test _nc_wait_task_done(server_task, 2.0) != :timed_out
+                @test _read_until_close(client) == expected
+                _nc_wait_task_done(server_task)
                 wait(server_task)
             finally
                 _close_quiet!(client)
@@ -369,7 +371,7 @@ end
                 client = NC.connect(NC.loopback_addr(Int(laddr.port)))
                 @test write(client, request) == length(request)
                 closewrite(client)
-                @test _nc_wait_task_done(server_task, 2.0) != :timed_out
+                _nc_wait_task_done(server_task)
                 wait(server_task)
             finally
                 _close_quiet!(client)
@@ -391,7 +393,7 @@ end
                     for _ in 1:iterations
                         server = NC.accept(listener)
                         try
-                            raw_request = _readavailable_until_quiet(server; timeout_s = 2.0, quiet_timeout_s = 0.02)
+                            raw_request = _read_until_close(server)
                             @test raw_request == request
                             @test write(server, response) == length(response)
                         finally
@@ -406,12 +408,12 @@ end
                         client = NC.connect(NC.loopback_addr(Int(laddr.port)))
                         @test write(client, request) == length(request)
                         closewrite(client)
-                        @test _readavailable_until_quiet(client; timeout_s = 2.0, quiet_timeout_s = 0.02) == response
+                        @test _read_until_close(client) == response
                     finally
                         _close_quiet!(client)
                     end
                 end
-                @test _nc_wait_task_done(server_task, 2.0) != :timed_out
+                _nc_wait_task_done(server_task)
                 wait(server_task)
             finally
                 _close_quiet!(listener)
@@ -447,12 +449,12 @@ end
                     try
                         client = NC.connect(NC.loopback_addr(Int(laddr.port)))
                         @test write(client, request) == length(request)
-                        @test _readavailable_until_quiet(client; timeout_s = 2.0, quiet_timeout_s = 0.02) == response
+                        @test _read_until_close(client) == response
                     finally
                         _close_quiet!(client)
                     end
                 end
-                @test _nc_wait_task_done(server_task, 2.0) != :timed_out
+                _nc_wait_task_done(server_task)
                 wait(server_task)
             finally
                 _close_quiet!(listener)
@@ -469,7 +471,7 @@ end
                 laddr = NC.addr(listener)
                 accept_task = errormonitor(@async NC.accept(listener))
                 client = NC.connect(NC.loopback_addr(Int((laddr::NC.SocketAddrV4).port)))
-                @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
+                _nc_wait_task_done(accept_task)
                 server = fetch(accept_task)
 
                 client_local = NC.local_addr(client)
@@ -505,7 +507,7 @@ end
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(@async NC.accept(listener))
                 client = NC.connect(NC.loopback_addr(Int(laddr.port)))
-                @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
+                _nc_wait_task_done(accept_task)
                 server = fetch(accept_task)
                 @test SO.get_sockopt_int(client.fd.pfd.sysfd, SO.IPPROTO_TCP, SO.TCP_NODELAY) != 0
                 @test SO.get_sockopt_int(server.fd.pfd.sysfd, SO.IPPROTO_TCP, SO.TCP_NODELAY) != 0
@@ -556,16 +558,18 @@ end
                         return err
                     end
                 end)
-                pre = _nc_wait_task_done(accept_task, 0.05)
-                @test pre == :timed_out
+                # Wait for the accept to park so the close below evicts a
+                # genuinely blocked waiter (closing before the accept enters
+                # its wait surfaces a different, also-valid error).
+                waiter = IP._poll_registration(listener.fd.pfd.pd).read_waiter
+                while !((@atomic :acquire waiter.state) isa Task) && !istaskdone(accept_task)
+                    yield()
+                end
+                @test !istaskdone(accept_task)
                 close(listener)
                 listener = nothing
-                status = _nc_wait_task_done(accept_task, 2.0)
-                @test status != :timed_out
-                if status != :timed_out
-                    err = fetch(accept_task)
-                    @test err isa IP.NetClosingError
-                end
+                err = fetch(accept_task)
+                @test err isa IP.NetClosingError
             finally
                 _close_quiet!(listener)
                 IP.shutdown!()
@@ -581,10 +585,11 @@ end
                 laddr = NC.addr(listener)
                 accept_task = errormonitor(@async NC.accept(listener))
                 client = NC.connect(NC.loopback_addr(Int((laddr::NC.SocketAddrV4).port)))
-                status = _nc_wait_task_done(accept_task, 2.0)
-                @test status != :timed_out
                 server = fetch(accept_task)
-                NC.set_read_deadline!(server, time_ns() + 30_000_000)
+                # Already expired: enters the timeout branch without waiting on
+                # the wall clock (fires-while-blocked is covered in
+                # timing_semantics_tests.jl).
+                NC.set_read_deadline!(server, Int64(1))
                 @test_throws NC.DeadlineExceededError read!(server, Vector{UInt8}(undef, 1))
                 NC.set_read_deadline!(server, Int64(0))
                 @test write(client, UInt8[0x77]) == 1
@@ -608,14 +613,14 @@ end
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(@async NC.accept(listener))
                 client = NC.connect(NC.loopback_addr(Int(laddr.port)))
-                @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
+                _nc_wait_task_done(accept_task)
                 server = fetch(accept_task)
                 pfd = server.fd.pfd
-                future_deadline = Int64(time_ns()) + Int64(5_000_000_000)
+                future_deadline = _NC_FAR_FUTURE_NS
                 NC.set_deadline!(server, future_deadline)
                 @test (@atomic :acquire pfd.pd.rd_ns) == future_deadline
                 @test (@atomic :acquire pfd.pd.wd_ns) == future_deadline
-                NC.set_deadline!(server, Int64(time_ns()) + Int64(30_000_000))
+                NC.set_deadline!(server, _NC_FAR_FUTURE_NS - Int64(1))
                 rseq = @atomic :acquire pfd.pd.rseq
                 wseq = @atomic :acquire pfd.pd.wseq
                 IP.deadline_fire!(pfd.pd, IP.PollMode.READWRITE, rseq, wseq)
@@ -642,7 +647,7 @@ end
                 @test isopen(listener)
                 @test NC.local_addr(listener) == laddr
 
-                NC.set_deadline!(listener, Int64(time_ns()) - Int64(1))
+                NC.set_deadline!(listener, Int64(1))
                 @test_throws NC.DeadlineExceededError NC.accept(listener)
 
                 NC.set_deadline!(listener, Int64(-1))
@@ -656,9 +661,11 @@ end
                         return err
                     end
                 end)
-                @test _nc_wait_task_done(accept_task, 0.05) == :timed_out
+                # No client has dialed yet, so a completed accept here means a
+                # phantom connection.
+                @test !istaskdone(accept_task)
                 client = NC.connect(NC.loopback_addr(Int(laddr.port)))
-                @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
+                _nc_wait_task_done(accept_task)
                 server_result = fetch(accept_task)
                 server_result isa Exception && throw(server_result)
                 server = server_result
@@ -685,8 +692,6 @@ end
                 laddr = NC.addr(listener)
                 accept_task = errormonitor(@async NC.accept(listener))
                 client = NC.connect(NC.loopback_addr(Int((laddr::NC.SocketAddrV4).port)))
-                status = _nc_wait_task_done(accept_task, 2.0)
-                @test status != :timed_out
                 server = fetch(accept_task)
                 read_task = errormonitor(Threads.@spawn begin
                     try
@@ -696,16 +701,13 @@ end
                         return err
                     end
                 end)
-                pre = _nc_wait_task_done(read_task, 0.05)
-                @test pre == :timed_out
+                # Nothing has been written, so a completed read here means a
+                # spurious wake already happened.
+                @test !istaskdone(read_task)
                 @test close(server) === nothing
                 @test close(server) === nothing
-                done = _nc_wait_task_done(read_task, 2.0)
-                @test done != :timed_out
-                if done != :timed_out
-                    err = fetch(read_task)
-                    @test err isa IP.NetClosingError
-                end
+                err = fetch(read_task)
+                @test err isa IP.NetClosingError
                 @test close(listener) === nothing
                 @test close(listener) === nothing
             finally
@@ -728,7 +730,7 @@ end
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(@async NC.accept(listener))
                 client = NC.connect(NC.loopback_addr(Int(laddr.port)))
-                @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
+                _nc_wait_task_done(accept_task)
                 server = fetch(accept_task)
 
                 empty = UInt8[]
@@ -744,11 +746,13 @@ end
                         return err
                     end
                 end)
-                @test _nc_wait_task_done(eof_task, 0.05) == :timed_out
+                # `eof` must stay queued behind the held read lock; completing
+                # here means it bypassed FD read ownership.
+                @test !istaskdone(eof_task)
                 @test write(client, UInt8[0x5a]) == 1
                 IP._fd_read_unlock!(server.fd.pfd)
                 read_lock_held = false
-                @test _nc_wait_task_done(eof_task, 2.0) != :timed_out
+                _nc_wait_task_done(eof_task)
                 @test fetch(eof_task) === false
 
                 # A close that lands while eof is queued on the read lock must
@@ -762,13 +766,15 @@ end
                         return err
                     end
                 end)
-                @test _nc_wait_task_done(eof_task, 0.05) == :timed_out
+                # `eof` must stay queued behind the held read lock; completing
+                # here means it bypassed FD read ownership.
+                @test !istaskdone(eof_task)
                 close_task = errormonitor(Threads.@spawn close(server))
-                @test _nc_wait_task_done(eof_task, 2.0) != :timed_out
+                _nc_wait_task_done(eof_task)
                 @test fetch(eof_task) === true
                 IP._fd_read_unlock!(server.fd.pfd)
                 read_lock_held = false
-                @test _nc_wait_task_done(close_task, 2.0) != :timed_out
+                _nc_wait_task_done(close_task)
 
                 @test eof(server)
                 @test_throws IP.NetClosingError read!(server, UInt8[])
@@ -795,24 +801,23 @@ end
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(@async NC.accept(listener))
                 client = NC.connect(NC.loopback_addr(Int(laddr.port)))
-                @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
+                _nc_wait_task_done(accept_task)
                 server = fetch(accept_task)
 
                 IP._fd_read_lock!(server.fd.pfd)
                 read_lock_held = true
                 close_task = errormonitor(Threads.@spawn close(server))
-                @test IP.timedwait(
-                    () -> IP._fdlock_closing(server.fd.pfd.fdlock),
-                    2.0;
-                    pollint = 0.001,
-                ) != :timed_out
+                while !IP._fdlock_closing(server.fd.pfd.fdlock)
+                    yield()
+                end
                 @test !isopen(server)
                 @test IP._is_valid_fd(server.fd.pfd.sysfd)
-                @test _nc_wait_task_done(close_task, 0.05) == :timed_out
+                # `close` must stay blocked behind the held read lock.
+                @test !istaskdone(close_task)
 
                 IP._fd_read_unlock!(server.fd.pfd)
                 read_lock_held = false
-                @test _nc_wait_task_done(close_task, 2.0) != :timed_out
+                _nc_wait_task_done(close_task)
                 @test fetch(close_task) === nothing
                 @test server.fd.pfd.sysfd == IP.INVALID_FD
             finally
@@ -838,7 +843,7 @@ end
                     laddr = NC.addr(listener)::NC.SocketAddrV4
                     accept_task = errormonitor(@async NC.accept(listener))
                     client = NC.connect(NC.loopback_addr(Int(laddr.port)))
-                    @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
+                    _nc_wait_task_done(accept_task)
                     server = fetch(accept_task)
 
                     eof_task = errormonitor(Threads.@spawn eof(server))
@@ -849,8 +854,8 @@ end
                     end)
                     @test write(client, UInt8[0xa5]) == 1
                     closewrite(client)
-                    @test _nc_wait_task_done(eof_task, 2.0) != :timed_out
-                    @test _nc_wait_task_done(read_task, 2.0) != :timed_out
+                    _nc_wait_task_done(eof_task)
+                    _nc_wait_task_done(read_task)
                     @test fetch(eof_task) isa Bool
                     @test fetch(read_task) == 0xa5
                 finally
@@ -889,7 +894,7 @@ end
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(@async NC.accept(listener))
                 client = NC.connect(NC.loopback_addr(Int(laddr.port)))
-                @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
+                _nc_wait_task_done(accept_task)
                 server = fetch(accept_task)
                 NC.set_nodelay!(client, false)
                 @test SO.get_sockopt_int(client.fd.pfd.sysfd, SO.IPPROTO_TCP, SO.TCP_NODELAY) == 0
@@ -901,7 +906,9 @@ end
                 @test SO.get_sockopt_int(client.fd.pfd.sysfd, SO.SOL_SOCKET, SO.SO_KEEPALIVE) != 0
                 @test NC.closeread(client) === nothing
                 closewrite(client)
-                NC.set_read_deadline!(server, time_ns() + 1_000_000_000)
+                # Hang guard only; the peer already half-closed, so EOF is
+                # immediate and the deadline never fires.
+                NC.set_read_deadline!(server, _NC_FAR_FUTURE_NS)
                 @test eof(server)
                 @test_throws EOFError read!(server, Vector{UInt8}(undef, 1))
 
@@ -930,7 +937,7 @@ end
                     laddr = NC.addr(listener)::NC.SocketAddrV4
                     accept_task = errormonitor(@async NC.accept(listener))
                     client = NC.connect(NC.loopback_addr(Int(laddr.port)))
-                    @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
+                    _nc_wait_task_done(accept_task)
                     server = fetch(accept_task)
 
                     controls = (
@@ -952,7 +959,7 @@ end
                     close_task = errormonitor(Threads.@spawn close(client))
 
                     for task in control_tasks
-                        @test _nc_wait_task_done(task, 2.0) != :timed_out
+                        _nc_wait_task_done(task)
                         result = fetch(task)
                         # Go's internal/poll Shutdown and SetsockoptInt take
                         # shared lifetime references, but do not serialize
@@ -969,7 +976,7 @@ end
                             @test result === nothing || result isa IP.NetClosingError
                         end
                     end
-                    @test _nc_wait_task_done(close_task, 2.0) != :timed_out
+                    _nc_wait_task_done(close_task)
                     @test fetch(close_task) === nothing
                     @test client.fd.pfd.sysfd == IP.INVALID_FD
                 finally

@@ -20,9 +20,8 @@ function _socks_close_quiet!(x)
     return nothing
 end
 
-function _socks_wait_task!(task::Task; timeout_s::Float64 = 2.0)
-    status = timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
-    status == :timed_out && error("timed out waiting for SOCKS test task")
+# Deadlocks surface as a suite hang; the CI job timeout is the final guard.
+function _socks_wait_task!(task::Task)
     fetch(task)
     return nothing
 end
@@ -107,7 +106,7 @@ function _socks_with_proxy(server_handler::Function, client_handler::Function)
         _socks_close_quiet!(client)
         _socks_close_quiet!(listener)
         if server_task !== nothing && !istaskdone(server_task)
-            _socks_wait_task!(server_task; timeout_s = 2.0)
+            _socks_wait_task!(server_task)
         end
         IP.shutdown!()
     end
@@ -129,13 +128,13 @@ function _socks_expect_no_proxy_bytes(
         server_task = errormonitor(Threads.@spawn begin
             conn = NC.accept(listener)
             try
-                NC.set_read_deadline!(conn, Int64(time_ns()) + 50_000_000)
+                # EOF from the client's close below proves the client sent no
+                # bytes; any byte that was sent arrives before the EOF.
                 try
                     read(conn, UInt8)
                     return :saw_byte
                 catch err
-                    ex = err::Exception
-                    ex isa NC.DeadlineExceededError || rethrow(ex)
+                    (err::Exception) isa EOFError || rethrow(err)
                     return :no_bytes
                 end
             finally
@@ -144,13 +143,14 @@ function _socks_expect_no_proxy_bytes(
         end)
         client = NC.connect(NC.loopback_addr(Int(laddr.port)))
         @test_throws errtype SK.connect!(client, target; kwargs...)
+        _socks_close_quiet!(client)
         _socks_wait_task!(server_task)
         @test fetch(server_task) == :no_bytes
     finally
         _socks_close_quiet!(client)
         _socks_close_quiet!(listener)
         if server_task !== nothing && !istaskdone(server_task)
-            _socks_wait_task!(server_task; timeout_s = 2.0)
+            _socks_wait_task!(server_task)
         end
         IP.shutdown!()
     end
@@ -323,11 +323,18 @@ end
 @testset "SOCKS5 handshake observes connection deadline" begin
     _socks_with_proxy(
         conn -> begin
-            sleep(0.2)
+            # Stay silent; the client's close below delivers EOF here.
+            try
+                read(conn, UInt8)
+            catch
+            end
+            return nothing
         end,
         conn -> begin
-            deadline_ns = Int64(time_ns()) + 50_000_000
-            @test_throws NC.DeadlineExceededError SK.connect!(conn, "example.com:80"; deadline_ns)
+            # Already expired: the handshake hits its deadline branch without
+            # waiting on the wall clock.
+            @test_throws NC.DeadlineExceededError SK.connect!(conn, "example.com:80"; deadline_ns = Int64(1))
+            _socks_close_quiet!(conn)
         end,
     )
 end

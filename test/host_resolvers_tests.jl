@@ -7,7 +7,6 @@ const IP = Reseau.IOPoll
 const SO = Reseau.SocketOps
 
 struct _SlowResolver <: ND.AbstractResolver
-    delay_s::Float64
     addrs::Vector{NC.SocketEndpoint}
 end
 
@@ -28,7 +27,6 @@ function ND.resolve_tcp_addrs(
     _ = address
     _ = op
     _ = policy
-    sleep(resolver.delay_s)
     return copy(resolver.addrs)
 end
 
@@ -49,14 +47,16 @@ function ND.resolve_tcp_addrs(
 end
 
 mutable struct _CountingResolver <: ND.AbstractResolver
-    delay_s::Float64
+    # When set, resolve blocks until the test notifies the gate; used to hold
+    # a lookup in flight so concurrent callers deterministically join it.
+    gate::Union{Nothing, Base.Event}
     addrs::Vector{NC.SocketEndpoint}
     lock::ReentrantLock
     calls::Int
 end
 
-function _CountingResolver(delay_s::Float64, addrs::Vector{NC.SocketEndpoint})
-    return _CountingResolver(delay_s, addrs, ReentrantLock(), 0)
+function _CountingResolver(addrs::Vector{NC.SocketEndpoint}; gate::Union{Nothing, Base.Event} = nothing)
+    return _CountingResolver(gate, addrs, ReentrantLock(), 0)
 end
 
 function ND.resolve_tcp_addrs(
@@ -76,19 +76,18 @@ function ND.resolve_tcp_addrs(
     finally
         unlock(resolver.lock)
     end
-    sleep(resolver.delay_s)
+    resolver.gate === nothing || wait(resolver.gate::Base.Event)
     return copy(resolver.addrs)
 end
 
 mutable struct _FlappingResolver <: ND.AbstractResolver
     responses::Vector{Vector{NC.SocketEndpoint}}
-    delay_s::Float64
     lock::ReentrantLock
     calls::Int
 end
 
-function _FlappingResolver(responses::Vector{Vector{NC.SocketEndpoint}}; delay_s::Float64 = 0.0)
-    return _FlappingResolver(responses, delay_s, ReentrantLock(), 0)
+function _FlappingResolver(responses::Vector{Vector{NC.SocketEndpoint}})
+    return _FlappingResolver(responses, ReentrantLock(), 0)
 end
 
 function ND.resolve_tcp_addrs(
@@ -106,7 +105,6 @@ function ND.resolve_tcp_addrs(
     try
         resolver.calls += 1
         idx = min(resolver.calls, length(resolver.responses))
-        sleep(resolver.delay_s)
         return copy(resolver.responses[idx])
     finally
         unlock(resolver.lock)
@@ -114,14 +112,14 @@ function ND.resolve_tcp_addrs(
 end
 
 mutable struct _ErrorResolver <: ND.AbstractResolver
-    delay_s::Float64
+    gate::Union{Nothing, Base.Event}
     lock::ReentrantLock
     calls::Int
     err::Exception
 end
 
-function _ErrorResolver(err::Exception; delay_s::Float64 = 0.0)
-    return _ErrorResolver(delay_s, ReentrantLock(), 0, err)
+function _ErrorResolver(err::Exception; gate::Union{Nothing, Base.Event} = nothing)
+    return _ErrorResolver(gate, ReentrantLock(), 0, err)
 end
 
 function ND.resolve_tcp_addrs(
@@ -141,18 +139,24 @@ function ND.resolve_tcp_addrs(
     finally
         unlock(resolver.lock)
     end
-    sleep(resolver.delay_s)
+    resolver.gate === nothing || wait(resolver.gate::Base.Event)
     throw(resolver.err)
 end
 
-function _nd_wait_task_done(task::Task, timeout_s::Float64 = 2.0)
-    return timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
+# Deadlocks surface as a suite hang; the CI job timeout is the final guard.
+function _nd_wait_task_done(task::Task)
+    # Status-only wait: a task that failed is still "done" here, matching the
+    # polling helper this replaced; callers inspect results via fetch.
+    try
+        wait(task)
+    catch
+    end
+    return nothing
 end
 
-function _nd_wait_channel_ready(ch::Channel{Nothing}, timeout_s::Float64 = 2.0)
-    status = timedwait(() -> isready(ch), timeout_s; pollint = 0.001)
-    status == :timed_out || take!(ch)
-    return status
+function _nd_wait_channel_ready(ch::Channel{Nothing})
+    take!(ch)
+    return nothing
 end
 
 function _nd_set_cache_entry_deadlines!(
@@ -500,11 +504,11 @@ end
             @test !ND._use_parallel_race(ND.HostResolver(fallback_delay_ns = -1), :tcp, NC.SocketEndpoint[NC.loopback_addr6(80)])
             @test ND._use_parallel_race(ND.HostResolver(fallback_delay_ns = 1), :tcp, NC.SocketEndpoint[NC.loopback_addr6(80)])
             @test ND._connect_deadline_ns(ND.HostResolver(timeout_ns = typemax(Int64))) == typemax(Int64)
-            @test ND._connect_deadline_ns(ND.HostResolver(timeout_ns = typemin(Int64))) < Int64(time_ns())
+            @test ND._connect_deadline_ns(ND.HostResolver(timeout_ns = typemin(Int64))) < Int64(0)
             @test ND._fallback_deadline_ns(ND.HostResolver(fallback_delay_ns = typemax(Int64))) == typemax(Int64)
 
             scoped_addr = NC.SocketAddrV6(NC.loopback_addr6(1234).ip, 1234; scope_id = 7)
-            scoped_ips = ND._resolve_host_ips(_SlowResolver(0.0, NC.SocketEndpoint[scoped_addr]), "tcp", "ignored.host")
+            scoped_ips = ND._resolve_host_ips(_SlowResolver(NC.SocketEndpoint[scoped_addr]), "tcp", "ignored.host")
             @test scoped_ips == NC.SocketEndpoint[NC.SocketAddrV6(scoped_addr.ip, 0; scope_id = 7)]
         end
         @testset "system resolver parity guards" begin
@@ -558,8 +562,7 @@ end
                 laddr = NC.addr(listener)
                 accept_task = _nd_spawn_accept(listener)
                 client = _nd_connect_timeout(ND.join_host_port("127.0.0.1", Int((laddr::NC.SocketAddrV4).port)), 1_000_000_000)
-                status = _nd_wait_task_done(accept_task, 2.0)
-                @test status != :timed_out
+                _nd_wait_task_done(accept_task)
                 server = fetch(accept_task)
                 server isa Exception && throw(server)
                 payload = UInt8[0x41, 0x42, 0x43, 0x44]
@@ -667,7 +670,7 @@ end
                             SO.IPV6_V6ONLY,
                         ) == 1
                     end
-                    @test _nd_wait_task_done(accept_task, 2.0) != :timed_out
+                    _nd_wait_task_done(accept_task)
                     server = fetch(accept_task)
                     server isa Exception && throw(server)
                     payload = UInt8[0x90, 0x91, 0x92]
@@ -777,7 +780,7 @@ end
                         "127.0.0.1:$port";
                         timeout_ns = 1_000_000_000,
                     )
-                    @test _nd_wait_task_done(accept_task, 2.0) != :timed_out
+                    _nd_wait_task_done(accept_task)
                     server = fetch(accept_task)
                     server isa Exception && throw(server)
                     @test write(client, UInt8[0xa5]) == 1
@@ -805,7 +808,7 @@ end
                 port = Int((NC.addr(listener)::NC.SocketAddrV4).port)
                 accept_task = _nd_spawn_accept(listener)
                 client = NC.connect("tcp4", "[::]:$port"; timeout_ns = 1_000_000_000)
-                @test _nd_wait_task_done(accept_task, 2.0) != :timed_out
+                _nd_wait_task_done(accept_task)
                 server = fetch(accept_task)
                 server isa Exception && throw(server)
                 @test NC.remote_addr(client) == NC.loopback_addr(port)
@@ -831,12 +834,12 @@ end
             end
             timeout_err = nothing
             try
-                @test _nd_wait_channel_ready(resolver_started, 2.0) != :timed_out
-                @test _nd_wait_task_done(connect_task, 5.0) != :timed_out
+                _nd_wait_channel_ready(resolver_started)
+                _nd_wait_task_done(connect_task)
                 timeout_err = istaskdone(connect_task) ? fetch(connect_task) : nothing
             finally
                 put!(resolver_release, nothing)
-                _nd_wait_task_done(connect_task, 2.0)
+                _nd_wait_task_done(connect_task)
             end
             @test timeout_err isa ND.OpError
             if timeout_err isa ND.OpError
@@ -869,7 +872,7 @@ end
             if err_bad_addr isa ND.OpError
                 @test err_bad_addr.err isa ND.AddressError
             end
-            past_deadline = Int64(time_ns()) - Int64(1)
+            past_deadline = Int64(1)
             err_timeout = try
                 NC.connect("tcp", "127.0.0.1:1"; deadline_ns = past_deadline)
                 nothing
@@ -887,11 +890,11 @@ end
             client1 = nothing
             client2 = nothing
             timeout_ns = Int64(5_000_000_000)
-            wait_s = 5.0
             try
                 listener = NC.listen("tcp", "127.0.0.1:0"; backlog = 8)
                 laddr = NC.addr(listener)::NC.SocketAddrV4
-                resolver = _CountingResolver(0.05, NC.SocketEndpoint[NC.loopback_addr(Int(laddr.port))])
+                resolver_gate = Base.Event()
+                resolver = _CountingResolver(NC.SocketEndpoint[NC.loopback_addr(Int(laddr.port))]; gate = resolver_gate)
                 singleflight = ND.SingleflightResolver(resolver)
                 ready = Channel{Nothing}(2)
                 start = Channel{Nothing}(2)
@@ -905,8 +908,14 @@ end
                 take!(ready)
                 put!(start, nothing)
                 put!(start, nothing)
-                @test _nd_wait_task_done(task1, wait_s) != :timed_out
-                @test _nd_wait_task_done(task2, wait_s) != :timed_out
+                # The gate holds the leader's lookup in flight until the other
+                # caller has joined it, making the shared hit deterministic.
+                while (@atomic :acquire singleflight.shared_hits) < 1
+                    yield()
+                end
+                notify(resolver_gate)
+                _nd_wait_task_done(task1)
+                _nd_wait_task_done(task2)
                 client1 = fetch(task1)
                 client2 = fetch(task2)
                 server1 = NC.accept(listener)
@@ -927,7 +936,7 @@ end
             addr_a = NC.loopback_addr(1111)
             addr_b = NC.loopback_addr(2222)
 
-            saturated_parent = _CountingResolver(0.0, NC.SocketEndpoint[addr_a])
+            saturated_parent = _CountingResolver(NC.SocketEndpoint[addr_a])
             saturated_cache = ND.CachingResolver(saturated_parent; ttl_ns = 10, stale_ttl_ns = 10, negative_ttl_ns = 10, max_hosts = 8)
             positive_key = ND._lookup_key("tcp", "positive-overflow.test")
             negative_key = ND._lookup_key("tcp", "negative-overflow.test")
@@ -943,40 +952,44 @@ end
                 unlock(saturated_cache.lock)
             end
 
-            fresh_parent = _CountingResolver(0.0, NC.SocketEndpoint[addr_a])
+            fresh_parent = _CountingResolver(NC.SocketEndpoint[addr_a])
             fresh_cache = ND.CachingResolver(fresh_parent; ttl_ns = 1_000_000_000, stale_ttl_ns = 0, negative_ttl_ns = 0, max_hosts = 8)
             @test ND.resolve_tcp_addrs(fresh_cache, "tcp", "cache.test:80") == NC.SocketEndpoint[NC.SocketAddrV4(addr_a.ip, 80)]
             @test ND.resolve_tcp_addrs(fresh_cache, "tcp", "cache.test:80") == NC.SocketEndpoint[NC.SocketAddrV4(addr_a.ip, 80)]
             @test fresh_parent.calls == 1
             @test (@atomic :acquire fresh_cache.cache_hits) == 1
 
-            stale_parent = _FlappingResolver([NC.SocketEndpoint[addr_a], NC.SocketEndpoint[addr_b]]; delay_s = 0.02)
+            stale_parent = _FlappingResolver([NC.SocketEndpoint[addr_a], NC.SocketEndpoint[addr_b]])
             stale_cache = ND.CachingResolver(stale_parent; ttl_ns = 10_000_000, stale_ttl_ns = 200_000_000, negative_ttl_ns = 0, max_hosts = 8)
             first = ND.resolve_tcp_addrs(stale_cache, "tcp", "stale.test:80")
-            stale_now_ns = Int64(time_ns())
             _nd_set_cache_entry_deadlines!(
                 stale_cache,
                 "tcp",
                 "stale.test";
-                expires_ns = stale_now_ns - Int64(1),
-                stale_expires_ns = stale_now_ns + Int64(200_000_000),
+                # Expired for freshness, far-future for the stale window.
+                expires_ns = Int64(1),
+                stale_expires_ns = typemax(Int64) ÷ 2,
             )
             second = ND.resolve_tcp_addrs(stale_cache, "tcp", "stale.test:80")
             @test first == NC.SocketEndpoint[NC.SocketAddrV4(addr_a.ip, 80)]
             @test second == NC.SocketEndpoint[NC.SocketAddrV4(addr_a.ip, 80)]
             @test (@atomic :acquire stale_cache.stale_hits) == 1
-            @test timedwait(() -> stale_parent.calls >= 2, 2.0; pollint = 0.001) != :timed_out
+            # The stale hit kicks a background refresh; spin until it lands (the
+            # CI job timeout guards a refresh that never happens).
+            while stale_parent.calls < 2
+                yield()
+            end
             third = ND.resolve_tcp_addrs(stale_cache, "tcp", "stale.test:80")
             @test third == NC.SocketEndpoint[NC.SocketAddrV4(addr_b.ip, 80)]
 
-            evict_parent = _CountingResolver(0.0, NC.SocketEndpoint[addr_a])
+            evict_parent = _CountingResolver(NC.SocketEndpoint[addr_a])
             evict_cache = ND.CachingResolver(evict_parent; ttl_ns = 1_000_000_000, stale_ttl_ns = 0, negative_ttl_ns = 0, max_hosts = 1)
             ND.resolve_tcp_addrs(evict_cache, "tcp", "host-one.test:80")
             ND.resolve_tcp_addrs(evict_cache, "tcp", "host-two.test:80")
             ND.resolve_tcp_addrs(evict_cache, "tcp", "host-one.test:80")
             @test evict_parent.calls == 3
 
-            neg_parent = _ErrorResolver(ND.LookupError("lookup failed", "neg.test"); delay_s = 0.0)
+            neg_parent = _ErrorResolver(ND.LookupError("lookup failed", "neg.test"))
             neg_cache = ND.CachingResolver(neg_parent; ttl_ns = 0, stale_ttl_ns = 0, negative_ttl_ns = 50_000_000, max_hosts = 8)
             err1 = try
                 ND.resolve_tcp_addrs(neg_cache, "tcp", "neg.test:80")
@@ -998,7 +1011,7 @@ end
                 neg_cache,
                 "tcp",
                 "neg.test";
-                expires_ns = Int64(time_ns()) - Int64(1),
+                expires_ns = Int64(1),
             )
             err3 = try
                 ND.resolve_tcp_addrs(neg_cache, "tcp", "neg.test:80")
@@ -1010,7 +1023,8 @@ end
             @test neg_parent.calls == 2
         end
         @testset "singleflight and cache refresh error paths" begin
-            err_resolver = _ErrorResolver(ND.LookupError("lookup failed", "singleflight-error.test"); delay_s = 0.02)
+            err_gate = Base.Event()
+            err_resolver = _ErrorResolver(ND.LookupError("lookup failed", "singleflight-error.test"); gate = err_gate)
             singleflight = ND.SingleflightResolver(err_resolver)
             ready = Channel{Nothing}(2)
             start = Channel{Nothing}(2)
@@ -1032,18 +1046,26 @@ end
             take!(ready)
             put!(start, nothing)
             put!(start, nothing)
-            @test _nd_wait_task_done(task1, 2.0) != :timed_out
-            @test _nd_wait_task_done(task2, 2.0) != :timed_out
+            # Hold the leader's failing lookup in flight until the other
+            # caller has joined it, making the shared hit deterministic.
+            while (@atomic :acquire singleflight.shared_hits) < 1
+                yield()
+            end
+            notify(err_gate)
+            _nd_wait_task_done(task1)
+            _nd_wait_task_done(task2)
             @test fetch(task1) isa ND.LookupError
             @test fetch(task2) isa ND.LookupError
             @test err_resolver.calls == 1
             @test (@atomic :acquire singleflight.actual_lookups) == 1
             @test (@atomic :acquire singleflight.shared_hits) == 1
 
-            refresh_parent = _ErrorResolver(ND.LookupError("lookup failed", "refresh.test"); delay_s = 0.0)
+            refresh_parent = _ErrorResolver(ND.LookupError("lookup failed", "refresh.test"))
             refresh_cache = ND.CachingResolver(refresh_parent; ttl_ns = 1_000_000, stale_ttl_ns = 50_000_000, negative_ttl_ns = 50_000_000, max_hosts = 8)
             key = ND._lookup_key("tcp", "refresh.test")
-            old_now_ns = Int64(time_ns()) - Int64(100_000_000)
+            # Any fixed store time works: the entry only has to exist (its
+            # deadlines are all long past on the monotonic clock).
+            old_now_ns = Int64(1)
             lock(refresh_cache.lock)
             try
                 ND._store_cache_entry_locked!(refresh_cache, key, NC.SocketEndpoint[NC.loopback_addr(4040)], nothing, old_now_ns)

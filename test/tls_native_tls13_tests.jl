@@ -4,6 +4,8 @@ using Reseau
 const TLN = Reseau.TLS
 const NCN = Reseau.TCP
 const IPN = Reseau.IOPoll
+const SON = Reseau.SocketOps
+const _TLS13_EWOULDBLOCK = @static isdefined(Base.Libc, :EWOULDBLOCK) ? Int32(getfield(Base.Libc, :EWOULDBLOCK)) : Int32(Base.Libc.EAGAIN)
 
 const _TLS_NATIVE_CERT_PATH = joinpath(@__DIR__, "resources", "unittests.crt")
 const _TLS_NATIVE_KEY_PATH = joinpath(@__DIR__, "resources", "unittests.key")
@@ -22,8 +24,15 @@ function _tls_native_close_quiet!(x)
     return nothing
 end
 
-function _tls_native_wait_task(task::Task, timeout_s::Float64 = 5.0)
-    return IPN.timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
+# Deadlocks surface as a suite hang; the CI job timeout is the final guard.
+function _tls_native_wait_task(task::Task)
+    # Status-only wait: a task that failed is still "done" here, matching the
+    # polling helper this replaced; callers inspect results via fetch.
+    try
+        wait(task)
+    catch
+    end
+    return nothing
 end
 
 function _open_tcp_pair()
@@ -31,8 +40,6 @@ function _open_tcp_pair()
     addr = NCN.addr(listener)::NCN.SocketAddrV4
     accept_task = errormonitor(Threads.@spawn NCN.accept(listener))
     client = NCN.connect(addr)
-    status = _tls_native_wait_task(accept_task, 5.0)
-    status == :timed_out && error("timed out waiting for TCP accept")
     server = fetch(accept_task)
     return listener, client, server
 end
@@ -62,12 +69,17 @@ function _tls13_unexpected_message_error(f)
 end
 
 function _assert_no_pending_tcp_bytes(conn::NCN.Conn)
-    NCN.set_read_deadline!(conn, time_ns() + 50_000_000)
-    try
-        @test_throws NCN.DeadlineExceededError read!(conn, Vector{UInt8}(undef, 1))
-    finally
-        NCN.set_read_deadline!(conn, Int64(0))
+    # The peer's writes happen-before this probe, so any stray byte is already
+    # in the receive buffer (or the peer closed); one non-blocking read is
+    # exact and never waits.
+    buf = Ref{UInt8}(0x00)
+    n = GC.@preserve buf SON.read_once!(conn.fd.pfd.sysfd, Base.unsafe_convert(Ptr{UInt8}, buf), Csize_t(1))
+    if n == Cssize_t(0)
+        return nothing # orderly EOF: no pending bytes
     end
+    @test n == Cssize_t(-1)
+    errno = SON.last_error()
+    @test errno == Int32(Base.Libc.EAGAIN) || errno == _TLS13_EWOULDBLOCK
     return nothing
 end
 
@@ -162,8 +174,6 @@ function _start_tls13_native_server(config::TLN.Config; configure = nothing)
 end
 
 function _finish_tls13_native_server!(task::Task)
-    status = _tls_native_wait_task(task, 5.0)
-    status == :timed_out && error("timed out waiting for TLS native server task")
     try
         wait(task)
     catch
@@ -282,7 +292,7 @@ end
                 end
             end
 
-            @test _tls_native_wait_task(accept_task, 5.0) != :timed_out
+            _tls_native_wait_task(accept_task)
             server_tcp = fetch(accept_task)
             client_header, client_payload = _read_tls_record(server_tcp)
             @test client_header[1] == TLN._TLS_RECORD_TYPE_HANDSHAKE
@@ -312,7 +322,7 @@ end
                 TLN._TLS_ALERT_MISSING_EXTENSION,
             ]
 
-            @test _tls_native_wait_task(client_task::Task, 5.0) != :timed_out
+            _tls_native_wait_task(client_task::Task)
             client_err = fetch(client_task::Task)
             @test client_err isa TLN.TLSError
             if client_err isa TLN.TLSError
@@ -347,7 +357,7 @@ end
                     ex
                 end
             end
-            @test _tls_native_wait_task(accept_task, 5.0) != :timed_out
+            _tls_native_wait_task(accept_task)
             server_tcp = fetch(accept_task)
             client_header, _ = _read_tls_record(server_tcp)
             @test client_header[1] == TLN._TLS_RECORD_TYPE_HANDSHAKE
@@ -369,7 +379,7 @@ end
             @test alert_header[1] == TLN._TLS_RECORD_TYPE_ALERT
             @test alert_payload == UInt8[TLN._TLS_ALERT_LEVEL_FATAL, TLN._TLS_ALERT_DECODE_ERROR]
 
-            @test _tls_native_wait_task(client_task::Task, 5.0) != :timed_out
+            _tls_native_wait_task(client_task::Task)
             client_err = fetch(client_task::Task)
             @test client_err isa TLN.TLSError
             if client_err isa TLN.TLSError
@@ -1082,10 +1092,12 @@ end
                 # handler must block here rather than race.
                 lock(conn.write_lock)
                 handler = errormonitor(Threads.@spawn TLN._tls13_handle_key_update!(conn, client_state, true))
-                @test timedwait(() -> istaskdone(handler), 0.3) == :timed_out
+                # The write lock is held, so the handler cannot have rotated
+                # the cipher; a completed handler here means it skipped the
+                # lock.
+                @test !istaskdone(handler)
                 @test (client_state.write_cipher::TLN._TLS13RecordCipherState).traffic_secret == before_secret
                 unlock(conn.write_lock)
-                @test timedwait(() -> istaskdone(handler), 2.0) == :ok
                 fetch(handler)
                 @test (client_state.write_cipher::TLN._TLS13RecordCipherState).traffic_secret == expected_next_write
                 @test conn.write_permanent_error === nothing
@@ -1410,8 +1422,7 @@ end
             server = fetch(server_task::Task)
             @test TLN.connection_state(client).alpn_protocol == ""
             @test TLN.connection_state(server).alpn_protocol == ""
-            status = _tls_native_wait_task(server_task::Task, 5.0)
-            @test status != :timed_out
+            _tls_native_wait_task(server_task::Task)
         finally
             _tls_native_close_quiet!(server)
             _tls_native_close_quiet!(client)
@@ -1446,8 +1457,7 @@ end
             if err isa TLN.TLSError
                 @test occursin("alert 120", err.message)
             end
-            status = _tls_native_wait_task(server_task::Task, 5.0)
-            @test status != :timed_out
+            _tls_native_wait_task(server_task::Task)
         finally
             _tls_native_close_quiet!(server)
             _tls_native_close_quiet!(client)
@@ -1634,14 +1644,12 @@ end
             @test TLN.connection_state(client3).did_resume
             @test TLN.connection_state(client3).did_hello_retry_request
 
-            status = _tls_native_wait_task(server_task::Task, 5.0)
-            status == :timed_out && error("timed out waiting for TLS session resumption server")
-            wait(server_task::Task)
+                        _tls_native_wait_task(server_task::Task)
         finally
             _tls_native_close_quiet!(client3)
             _tls_native_close_quiet!(client2)
             _tls_native_close_quiet!(client1)
-            if server_task isa Task && _tls_native_wait_task(server_task::Task, 1.0) != :timed_out
+            if server_task isa Task
                 wait(server_task::Task)
             end
             _tls_native_close_quiet!(listener)
@@ -1826,12 +1834,11 @@ end
             catch err
                 @test err isa TLN.TLSError
             end
-            status = _tls_native_wait_task(server_task::Task, 5.0)
-            status == :timed_out && error("timed out waiting for require-any-client-cert failure server")
+            _tls_native_wait_task(server_task::Task)
             @test fetch(server_task::Task) isa TLN.TLSError
         finally
             _tls_native_close_quiet!(client)
-            if server_task isa Task && _tls_native_wait_task(server_task::Task, 1.0) != :timed_out
+            if server_task isa Task
                 wait(server_task::Task)
             end
             _tls_native_close_quiet!(listener)
@@ -1883,13 +1890,11 @@ end
             @test eof(client2)
             @test TLN.connection_state(client2).did_resume
 
-            status = _tls_native_wait_task(server_task::Task, 5.0)
-            status == :timed_out && error("timed out waiting for mutual TLS resumption server")
-            wait(server_task::Task)
+                        _tls_native_wait_task(server_task::Task)
         finally
             _tls_native_close_quiet!(client2)
             _tls_native_close_quiet!(client1)
-            if server_task isa Task && _tls_native_wait_task(server_task::Task, 1.0) != :timed_out
+            if server_task isa Task
                 wait(server_task::Task)
             end
             _tls_native_close_quiet!(listener)
@@ -1938,12 +1943,11 @@ end
             catch err
                 @test err isa TLN.TLSError
             end
-            status = _tls_native_wait_task(server_task::Task, 5.0)
-            status == :timed_out && error("timed out waiting for client-auth failure server")
+            _tls_native_wait_task(server_task::Task)
             @test fetch(server_task::Task) isa TLN.TLSError
         finally
             _tls_native_close_quiet!(client)
-            if server_task isa Task && _tls_native_wait_task(server_task::Task, 1.0) != :timed_out
+            if server_task isa Task
                 wait(server_task::Task)
             end
             _tls_native_close_quiet!(listener)
@@ -2165,7 +2169,7 @@ end
                     ex
                 end
             end
-            @test _tls_native_wait_task(accept_task, 5.0) != :timed_out
+            _tls_native_wait_task(accept_task)
             server_tcp = fetch(accept_task)
             header, _ = _read_tls_record(server_tcp)
             if header[1] == TLN._TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC
@@ -2184,23 +2188,16 @@ end
             write(server_tcp, alert_header)
             write(server_tcp, alert_payload)
 
-            @test _tls_native_wait_task(client_task::Task, 5.0) != :timed_out
+            _tls_native_wait_task(client_task::Task)
             client_err = fetch(client_task::Task)
             @test client_err isa TLN.TLSError
             if client_err isa TLN.TLSError
                 @test occursin("received fatal TLS 1.3 alert", client_err.message)
             end
 
-            NCN.set_read_deadline!(server_tcp, time_ns() + 100_000_000)
-            extra = try
-                read!(server_tcp, Vector{UInt8}(undef, 1))
-                :bytes
-            catch ex
-                ex
-            finally
-                NCN.set_read_deadline!(server_tcp, Int64(0))
-            end
-            @test extra isa EOFError || extra isa NCN.DeadlineExceededError
+            # The failed client task already completed, so anything it sent
+            # is buffered (or its close delivered EOF); probe without waiting.
+            _assert_no_pending_tcp_bytes(server_tcp)
         finally
             _tls_native_close_quiet!(server_tcp)
             _tls_native_close_quiet!(listener)
@@ -2253,9 +2250,7 @@ end
                 write(server, payload)
                 close(server)
             end
-            status = _tls_native_wait_task(writer_task::Task, 5.0)
-            status == :timed_out && error("timed out waiting for TLS native close_notify writer")
-            wait(writer_task::Task)
+                        _tls_native_wait_task(writer_task::Task)
             @test read(client, 4) == UInt8[0xde, 0xad, 0xbe, 0xef]
             @test eof(client)
         finally

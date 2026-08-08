@@ -222,7 +222,7 @@ end
             laddr = NC.addr(listener)::NC.SocketAddrV4
             accept_task = errormonitor(Threads.@spawn NC.accept(listener))
             client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
-            @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+            _tls_wait_task_done(accept_task)
             server_tcp = fetch(accept_task)
             @test_throws TL.ConfigError TL.client(client_tcp, TL.Config(verify_peer = true))
             @test_throws TL.ConfigError TL.client(client_tcp, TL.Config(verify_peer = false, verify_hostname = true))

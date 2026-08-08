@@ -22,6 +22,8 @@ function _include_with_progress(path::AbstractString)
 end
 
 test_files = [
+    "test_policy_tests.jl",
+    "timing_semantics_tests.jl",
     "iopoll_runtime_tests.jl",
     "internal_poll_tests.jl",
     "socket_ops_tests.jl",

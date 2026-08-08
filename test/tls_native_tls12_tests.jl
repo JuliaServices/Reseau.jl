@@ -24,8 +24,15 @@ function _tls12_native_close_quiet!(x)
     return nothing
 end
 
-function _tls12_native_wait_task(task::Task, timeout_s::Float64 = 5.0)
-    return IP12N.timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
+# Deadlocks surface as a suite hang; the CI job timeout is the final guard.
+function _tls12_native_wait_task(task::Task)
+    # Status-only wait: a task that failed is still "done" here, matching the
+    # polling helper this replaced; callers inspect results via fetch.
+    try
+        wait(task)
+    catch
+    end
+    return nothing
 end
 
 function _tls12_native_client_config(;
@@ -89,7 +96,7 @@ function _tls12_run_public_roundtrip(server_config::TL12N.Config, client_config:
         client_state = TL12N.connection_state(client)
         read(client, 2) == UInt8[0x6f, 0x6b] || error("unexpected TLS 1.2 server bytes")
         write(client, UInt8[0x61, 0x63]) == 2 || error("unexpected TLS 1.2 client ack write")
-        _tls12_native_wait_task(task, 5.0) != :timed_out || error("timed out waiting for TLS 1.2 server task")
+        _tls12_native_wait_task(task)
         return client_state, fetch(task)::TL12N.ConnectionState
     finally
         _tls12_native_close_quiet!(client)
@@ -149,7 +156,7 @@ function _tls12_run_roundtrip_with_ems(
         client_state = TL12N.connection_state(client)
         read(client, 2) == UInt8[0x6f, 0x6b] || error("unexpected TLS 1.2 server bytes")
         write(client, UInt8[0x61, 0x63]) == 2 || error("unexpected TLS 1.2 client ack write")
-        _tls12_native_wait_task(task, 5.0) != :timed_out || error("timed out waiting for TLS 1.2 server task")
+        _tls12_native_wait_task(task)
         return client_state, fetch(task)::TL12N.ConnectionState, negotiated_ems
     finally
         _tls12_native_close_quiet!(client)
@@ -185,8 +192,6 @@ function _tls12_open_tcp_pair()
     addr = NC12N.addr(listener)::NC12N.SocketAddrV4
     accept_task = errormonitor(Threads.@spawn NC12N.accept(listener))
     client = NC12N.connect(addr)
-    status = _tls12_native_wait_task(accept_task, 5.0)
-    status == :timed_out && error("timed out waiting for TCP accept")
     server = fetch(accept_task)
     return listener, client, server
 end
@@ -806,7 +811,7 @@ end
             write(client, UInt8[0x70, 0x69, 0x6e, 0x67])
             @test read(client, 4) == UInt8[0x70, 0x6f, 0x6e, 0x67]
 
-            @test _tls12_native_wait_task(task, 5.0) != :timed_out
+            _tls12_native_wait_task(task)
             wait(task)
         finally
             _tls12_native_close_quiet!(client)
@@ -861,7 +866,7 @@ end
                 ex
             end
             @test client_err isa EOFError
-            @test _tls12_native_wait_task(server_task, 5.0) != :timed_out
+            _tls12_native_wait_task(server_task)
             server_err = try
                 wait(server_task)
                 nothing
@@ -929,7 +934,7 @@ end
             TL12N.handshake!(client)
             @test TL12N.connection_state(client).version == "TLSv1.2"
             @test read(client, 2) == UInt8[0x6f, 0x6b]
-            @test _tls12_native_wait_task(task, 5.0) != :timed_out
+            _tls12_native_wait_task(task)
             wait(task)
         finally
             _tls12_native_close_quiet!(client)
@@ -974,7 +979,7 @@ end
             write(client, UInt8[0x68, 0x65, 0x6c, 0x6c, 0x6f])
             @test read(client, 5) == UInt8[0x77, 0x6f, 0x72, 0x6c, 0x64]
 
-            @test _tls12_native_wait_task(task, 5.0) != :timed_out
+            _tls12_native_wait_task(task)
             wait(task)
         finally
             _tls12_native_close_quiet!(client)
@@ -1094,7 +1099,7 @@ end
             if err isa TL12N.TLSError
                 @test occursin("legacy Common Name", err.message)
             end
-            _tls12_native_wait_task(server_task, 5.0) != :timed_out || error("timed out waiting for TLS 1.2 server task")
+            _tls12_native_wait_task(server_task)
             server_err = try
                 wait(server_task)
                 nothing
