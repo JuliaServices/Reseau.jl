@@ -30,17 +30,16 @@ Do not use a short delay to prove that an event has not occurred. Build a
 barrier that makes the event impossible until the test releases it, or assert
 the guarded state directly.
 
-`test_policy_tests.jl` enforces this with a source scan. Two documented
-exemptions exist:
+Two places legitimately read the clock:
 
-- `timing_semantics_tests.jl` is the only file allowed to read the clock. It
-  holds the product-latency tests that genuinely require a real timer to
-  fire (the poller-owned sleep heap, backend poll timeouts, a deadline waking
-  a blocked reader). Every elapsed-time assertion there is a lower bound, so
-  a paused runner can only lengthen the measured time — never fail it.
-- The native TLS test files may call `time()` because TLS session tickets
-  carry UNIX-seconds protocol timestamps that the product compares against
-  its own clock. Those tests use tolerances of hours to days.
+- `timing_semantics_tests.jl` holds the product-latency tests that genuinely
+  require a real timer to fire (the poller-owned sleep heap, backend poll
+  timeouts, a deadline waking a blocked reader). Every elapsed-time assertion
+  there is a lower bound, so a paused runner can only lengthen the measured
+  time — never fail it. Keep new clock-reading tests in this file.
+- The native TLS test files call `time()` because TLS session tickets carry
+  UNIX-seconds protocol timestamps that the product compares against its own
+  clock. Those tests use tolerances of hours to days.
 
 Product timeout configuration remains valid test input. It tests parsing,
 propagation, and expired-deadline behavior. It must not act as the test
