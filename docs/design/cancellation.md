@@ -81,13 +81,18 @@ Go-mirroring mandate, macOS-first phase gates.
   level-triggered; `cancel=nothing` shields. Exception: APIs that can report
   progress return partial results instead of throwing (§7.3) — completion-wins at
   the logical-call level.
-- **G2** *(narrowed; the narrowing is part of the public docs)* Severity is honored
-  **at delivery time**: entry checks, parks, and claims observe the then-current
-  severity, including initial delivery at ABANDON_*. **v1 does not provide post-SAFE
-  escalation of in-progress teardown** (a task inside a shielded drain or child join
-  cannot observe a later rung via public API — codex-confirmed impossibility). The
-  full ladder and the Windows cancellation phase are **release-gated on upstream
-  ask 1** (§11).
+- **G2** Severity is honored **at delivery time and during teardown**. Working
+  assumption (adopted 2026-08-10, after Keno located ask 1 on #62663): **a public
+  severity-floor wait — e.g. `wait(tok; min_severity=...)` — ships with or
+  alongside the escalation ladder.** On that basis, every *abandonable* teardown
+  wait (child joins, watcher re-arms, DNS/HE ownership transfer) is
+  escalation-aware: the hub watcher re-arms at floor `delivered + 1` and fans
+  escalation wakes to above-floor teardown arms (§3, §5.1, §6.3). Memory-safety
+  drains remain uninterruptible by design regardless of severity (§7.6b —
+  caller-owned memory cannot be abandoned). **Documented fallback**: if 1.14 ships
+  without the public floor, we revert to the delivery-time-only narrowed contract
+  (no post-SAFE escalation of in-progress teardown); confirmed either way at the
+  1.14 branch-cut re-review.
 - **G3** Post-cancellation states are defined per op by the transition specification
   (§5–§7): multi-phase op states, published active arms, exact-arm wake tickets.
 - **G4** Ungoverned ops: one branch per entry/park; no ambient lookup on nonblocking
@@ -101,10 +106,11 @@ Go-mirroring mandate, macOS-first phase gates.
   confirming the minimum token-API names are package-usable in 1.14** (§11 ask 3).
 
 **Non-goals (v1)**: interruptible `getaddrinfo`; per-connection source sugar;
-token-based deadlines (§8); resumable mid-record TLS reads; post-SAFE teardown
-escalation (gated); **any IOCP detach** (§7.6b — drain-always at every severity;
-`REAPER_OWNED` bounce-buffer designs are reserved for the gated Windows phase);
-duplicate-hub-free guarantees beyond egal keying (§5.1).
+token-based deadlines (§8); resumable mid-record TLS reads; **any IOCP detach**
+(§7.6b — drain-always at every severity; `REAPER_OWNED` bounce-buffer designs are
+reserved for the Windows phase); duplicate-hub-free guarantees beyond egal keying
+(§5.1). (Post-SAFE teardown escalation is now IN scope under G2's working
+assumption; it returns to this list only under G2's documented fallback.)
 
 ---
 
@@ -112,9 +118,9 @@ duplicate-hub-free guarantees beyond egal keying (§5.1).
 
 | Severity | v1 contract |
 |---|---|
-| `SAFE` | Interrupt the governed park via exact-arm claim; completion-wins where a result exists; POSIX: local cleanup, throw. Windows: `CancelIoEx` + inline shielded drain — **honestly unbounded** (kernel-prompt in practice; no escalation escape in v1 — the gap that gates the Windows phase). Never wait on the peer. |
+| `SAFE` | Interrupt the governed park via exact-arm claim; completion-wins where a result exists; POSIX: local cleanup, throw. Windows: `CancelIoEx` + inline shielded drain — **honestly unbounded** (kernel-prompt in practice; the drain itself is uninterruptible even under escalation, §7.6b — caller-memory safety). Never wait on the peer. |
 | `ABANDON_EXTERNAL`, initial delivery | Honored: entry/park/claim reads then-current severity; DNS futures (§7.11) and dial-race children (§7.12) are ownership-transferred to their owner/reaper; **all IOCP requests still drain** (§7.6b — v1 has no detach); peer-facing niceties skipped. |
-| `ABANDON_EXTERNAL` after SAFE teardown began | **Not observable in v1** (public-API impossibility). Documented; gated on upstream ask 1. |
+| `ABANDON_EXTERNAL` after SAFE teardown began | **Observable, under G2's working assumption** (public `min_severity` floor): the hub watcher re-arms at floor `delivered + 1` (§5.1) and fans escalation wakes to above-floor teardown arms (§6.3); abandonable teardown waits — child joins (§7.12), DNS/HE transfer — then execute their ABANDON contract mid-teardown. Memory-safety drains excepted (§7.6b). Under G2's fallback (no public floor in 1.14): not observable, as originally narrowed. |
 | `ABANDON_ALL` | #62663-conditional. Reseau's obligation is shared-state survivability (§10); frozen-task fd/fdlock leaks are the documented Base trade. **Raw-pointer freeze-safety artifact** (Windows-phase gate): prove the dynamic extent of kernel-owned caller memory contains no Base cancellation points and no Base-visible registrations, so a frozen task cannot strand kernel-owned caller memory. |
 
 ---
@@ -251,12 +257,17 @@ STARTING | RUNNING → FAILED → RETIRING → DEAD
   start-gate barriers.
 - **Watcher loop**: `try wait(tok; cancel=stop_tok) catch ...` — catches only the
   stop-token `CancellationRequest`; everything else propagates through the `FAILED`
-  settlement + `errormonitor`. On observed-token cancellation: re-enter table→hub and
-  **re-check hub state** — never overwrite `RETIRING` (stop-vs-token race) — mark
-  `OBSERVED_CANCELLED` (a *watcher-terminal phase*, not hub-terminal: the hub still
-  retires via last-unlink), deliver (§6.3), exit. No persistent watcher for a
-  cancelled token: future ops fail their entry/park recheck level-triggered; late
-  registrants self-claim.
+  settlement + `errormonitor`. On observed-token cancellation at severity `s`:
+  re-enter table→hub and **re-check hub state** — never overwrite `RETIRING`
+  (stop-vs-token race) — mark `OBSERVED_CANCELLED` (a *watcher-side phase*, not
+  hub-terminal: the hub still retires via last-unlink), deliver to registrations
+  with floor ≤ `s` (§6.3), then: **if above-floor registrations remain** (teardown
+  arms re-parked at `delivered + 1`, §6.3) **and `s < ABANDON_ALL`, re-arm via the
+  assumed public floor — `wait(tok; min_severity=s+0x01, cancel=stop_tok)` — and
+  repeat for the escalation** (G2's working assumption; under the fallback this
+  re-arm does not exist and the watcher exits here); otherwise exit. Late
+  registrants at or below the delivered severity self-claim via their entry/park
+  recheck; no watcher round is ever needed for them.
 
 ### 5.2 Tokens, not sources
 
@@ -296,10 +307,14 @@ today's two-reason word (zero added cost).
 
 ### 6.3 Delivery and claim semantics
 
-Watcher delivery: snapshot under the hub lock as immutable `(arm, epoch)` tickets, in
-batches (initial budget 128 wakes per lock hold; mandatory `yield()` between batches;
-the continuation is hub state that retirement/shutdown cancels); per ticket: (a)
-op-state CAS → `TOKEN_CLAIMED` — the **semantic claim**; (b) exact-arm wake. A lost
+Registrations carry a severity **floor** (default SAFE; a teardown wait re-parked
+after acknowledging severity `s` registers at floor `s + 0x01`, so only an
+escalation wakes it — mirroring Base's internal discipline). Watcher delivery:
+snapshot under the hub lock as immutable `(arm, epoch)` tickets **for
+registrations with floor ≤ the delivered severity**, in batches (initial budget
+128 wakes per lock hold; mandatory `yield()` between batches; the continuation is
+hub state that retirement/shutdown cancels); per ticket: (a) op-state CAS →
+`TOKEN_CLAIMED` — the **semantic claim**; (b) exact-arm wake. A lost
 (a) skips (b). The wake CAS **may validly lose** to another committed wake for the
 same arm (e.g. a READY already latched); that wake makes the task inspect the claimed
 op state — same outcome. A wake CAS that finds `nothing` with no committed owner for
@@ -443,7 +458,9 @@ states use dedicated exception types carrying the cause — never a stored
     source, close any late winning connection, stop the timer, join children with
     `cancel=nothing` — **may be unbounded under the child drain contract**
     (consistent with §3); initial-ABANDON delivery transfers handles to the reaper
-    instead of joining; post-SAFE escalation of the join is gated (G2). Same
+    instead of joining; under G2's working assumption the join is escalation-aware
+    (it re-parks at floor `delivered + 1`; an ABANDON escalation interrupts it and
+    transfers the handles to the reaper), and under G2's fallback it is not. Same
     protocol for `_resolve_with_deadline`'s resolver + timer tasks. Cache refresh
     runs under a service-owned scope (Phase 0).
 13. **`close`, `IOPoll.shutdown!`**: not cancellable (class 3/4 shields). Close
@@ -476,11 +493,15 @@ future Base helper.
 - Julia < 1.14: kwargs accepted (`nothing`/default only); bridge compiles away;
   bit-identical, allocation-identical (benchmarked).
 - Cancellation feature floor: Julia 1.14.0.
-- The Windows-phase / full-ladder gate (G2, §3) tracks §11 ask 1. Per Keno
-  (2026-08-10) that capability belongs to the escalation-ladder PR #62663; the gate
-  is specifically a *publicly reachable* severity floor (e.g. `wait(tok;
-  min_severity=...)`), which #62663's current diff does not yet expose — see the
-  status note under §11 ask 1.
+- The Windows phase and full-ladder support now proceed under **G2's working
+  assumption** (a public severity floor ships with/alongside #62663 — per Keno,
+  2026-08-10, ask 1 "is on the escalation ladder PR"). The remaining hard
+  prerequisites for the Windows phase are the freeze-safety artifact (§3) and
+  branch-cut verification that the floor API landed as assumed; if it did not, G2's
+  documented fallback applies (delivery-time-only severity; no post-SAFE
+  escalation) and the escalation-aware pieces (§5.1 watcher re-arm, §6.3 floors,
+  §7.12 join interruption) are disabled behind their version gate — see the status
+  note under §11 ask 1.
 
 ## 10. Verification
 
@@ -573,7 +594,13 @@ any "full escalation ladder" claim behind this ask.
 > min_severity=...)`). **The one remaining follow-up question:** will #62663 (or a
 > follow-up) expose the floor publicly — e.g. `wait(tok; min_severity=...)` — or is
 > there another intended package-visible way to say "wake me only on escalation"?
-> Our §9 gate now tracks exactly that question, not the PR merge itself.
+>
+> **Design stance (adopted 2026-08-10, per Jacob):** we now proceed under the
+> **working assumption that the public floor API ships**. G2, §3, §5.1, §6.3, and
+> §7.12 plan escalation-aware teardown on that basis; the previously narrowed
+> contract is retained throughout as the documented, version-gated fallback. The
+> remaining action on this ask is confirmation of the exact spelling when #62663
+> lands, verified at the 1.14 branch-cut re-review.
 
 ### Ask 2 — A cancellation callback: "run this function when the token cancels."
 (Doesn't block anything; deletes our riskiest code and helps every event-loop
@@ -664,8 +691,9 @@ Sequencing: we build in parallel with these conversations (the cross-review
 concluded that's safe); ask 1 is the only one where the *answer* changes what we
 can ship (Windows, full ladder), and ask 3 is the only one gating the first
 release itself. As of 2026-08-10: ask 2 is answered (task + wait is the intended
-way — see its status note), ask 1 has a location (#62663) but the public-exposure
-question is still open, and asks 3–5 have not been raised yet.
+way — see its status note); ask 1 has a location (#62663) and we now design under
+the working assumption the public floor ships (confirmation of the exact spelling
+remains open); asks 3–5 have not been raised yet — ask 3 is the next one to raise.
 
 ## 12. Risks
 
@@ -675,7 +703,8 @@ question is still open, and asks 3–5 have not been raised yet.
 | Hub/arm protocol bugs | Lock-serialized cold path; startup pin + FAILED settlement; exact-arm tickets; checked-in transition spec; deterministic + model tests; named regressions. |
 | Watcher/hub leaks | No-resurrection generations; stop-source retirement; startup reference; churn baselines. |
 | Storm fan-out | Batch budget + yield + cancellable continuation; both benchmark shapes; claimed-epoch dedup. |
-| Wedged-kernel drains (Windows) | Honest §3 contract; Windows phase gated on upstream ask 1 + freeze-safety artifact. |
+| Wedged-kernel drains (Windows) | Honest §3 contract (drains are uninterruptible by design — caller-memory safety); freeze-safety artifact is the Windows-phase prerequisite. |
+| Assumed public floor API doesn't ship in 1.14 | G2's documented fallback (delivery-time-only severity); escalation-aware pieces version-gated off; verified at branch cut. |
 | Partial-progress surprises | §7.3 split contract; partial-count returns for reporting APIs; poison states with dedicated exceptions; matrix cells + fault injection. |
 | Token-egality reliance | Upstream ask 4; duplicate-hub tolerance. |
 | Downstream `catch InterruptException` | Docs callout; HTTP.jl notes. |
@@ -715,3 +744,12 @@ Round 6 (codex): all round-5 corrections verified RESOLVED; full interleaving an
 consistency audit clean; three editorial nits (applied: gate-ordering wording,
 outcome-latch mechanism note, matrix-in-artifact note). **VERDICT: AGREE** — signed
 off as the design basis for implementation.
+Post-agreement updates (2026-08-10): recorded Keno's answers on asks 1–2 (ask 2:
+task + wait is the intended way — hub is permanent architecture; ask 1: lives in
+#62663, public exposure unconfirmed); then, per Jacob, adopted the **working
+assumption that a public `min_severity` floor ships** — G2/§3/§5.1/§6.3/§7.12 now
+plan escalation-aware teardown with the previous narrowed contract as the
+documented, version-gated fallback. These updates postdate the codex sign-off; the
+fallback path is exactly the codex-agreed v7 contract, and the assumption path
+re-enables the floor-based teardown discipline codex endorsed in round 2 (its
+option 1) — to be re-verified at the 1.14 branch-cut review.
