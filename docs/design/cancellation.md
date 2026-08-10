@@ -160,6 +160,11 @@ Plus: 1.14-nightly CI harness (suite + cancelled-scope runs of every public op).
 
 ## 5. Phase 1 — delivery: token hubs
 
+(The task-that-blocks-in-`wait(tok)` pattern this section builds on was confirmed
+by Keno, 2026-08-10, as the *intended* integration route for foreign event loops —
+"task + wait is the intended way"; see §11 ask 2. This machinery is permanent
+architecture, not a stopgap awaiting a callback API.)
+
 ### 5.1 Hub table and lifecycle
 
 Global `IdDict{CancellationToken, Hub}` (egal-keyed; token egality ≡ source identity,
@@ -471,6 +476,11 @@ future Base helper.
 - Julia < 1.14: kwargs accepted (`nothing`/default only); bridge compiles away;
   bit-identical, allocation-identical (benchmarked).
 - Cancellation feature floor: Julia 1.14.0.
+- The Windows-phase / full-ladder gate (G2, §3) tracks §11 ask 1. Per Keno
+  (2026-08-10) that capability belongs to the escalation-ladder PR #62663; the gate
+  is specifically a *publicly reachable* severity floor (e.g. `wait(tok;
+  min_severity=...)`), which #62663's current diff does not yet expose — see the
+  status note under §11 ask 1.
 
 ## 10. Verification
 
@@ -554,9 +564,31 @@ the moment cancellation is *first* delivered, but a second ^C cannot accelerate 
 in-progress cleanup. We've documented that limitation and put our Windows phase and
 any "full escalation ladder" claim behind this ask.
 
+> **Status (Keno, 2026-08-10): "Ask 1 is on the escalation ladder PR."** Verified
+> against the #62663 diff as of that date: the *machinery* is indeed all there —
+> per-slot severity floors, a delivered-severity bitmask (`_mark_delivered!`, which
+> `wait(tok)` now feeds), and the watcher-freeze exemption — but `wait(tok)` has
+> **no public floor/`min_severity` parameter yet**; floors are still reachable only
+> through internal types (`WatcherWait(src, floor)`, the internal `wait(c, tok;
+> min_severity=...)`). **The one remaining follow-up question:** will #62663 (or a
+> follow-up) expose the floor publicly — e.g. `wait(tok; min_severity=...)` — or is
+> there another intended package-visible way to say "wake me only on escalation"?
+> Our §9 gate now tracks exactly that question, not the PR merge itself.
+
 ### Ask 2 — A cancellation callback: "run this function when the token cancels."
 (Doesn't block anything; deletes our riskiest code and helps every event-loop
 library after us.)
+
+> **Status (Keno, 2026-08-10): ANSWERED — "task + wait is the intended way."** No
+> callback API is planned; spawning a task that blocks in `wait(tok)` is the
+> blessed integration pattern for foreign event loops. Consequence for this design:
+> the §5 hub/watcher machinery is the *intended* architecture, not a stopgap — we
+> keep it permanently and stop planning for a collapse-to-adapter. The #62663 diff
+> also now documents the property we depend on ("the watcher is never frozen at
+> ABANDON_ALL"), which is worth asking to have stated in the manual, not just a
+> comment. The `IOPoll.Cancel` module boundary stays anyway — it's good hygiene —
+> but its purpose is now isolation, not a planned swap. The original request text
+> below is retained for context.
 
 Reseau has its own event loop and its own park primitive — a raw `wait()` +
 `schedule()` pair, which Base deliberately does not make a cancellation point. So
@@ -631,7 +663,9 @@ blocked in.
 Sequencing: we build in parallel with these conversations (the cross-review
 concluded that's safe); ask 1 is the only one where the *answer* changes what we
 can ship (Windows, full ladder), and ask 3 is the only one gating the first
-release itself.
+release itself. As of 2026-08-10: ask 2 is answered (task + wait is the intended
+way — see its status note), ask 1 has a location (#62663) but the public-exposure
+question is still open, and asks 3–5 have not been raised yet.
 
 ## 12. Risks
 
