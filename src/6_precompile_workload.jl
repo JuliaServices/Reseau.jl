@@ -14,6 +14,53 @@ end
 
 const _PC_EWOULDBLOCK = @static isdefined(Base.Libc, :EWOULDBLOCK) ? Int32(getfield(Base.Libc, :EWOULDBLOCK)) : Int32(Base.Libc.EAGAIN)
 
+# Every blocking step in this workload must carry an explicit deadline:
+# precompile runs on end-user machines where security software can silently
+# break loopback networking or event delivery, and an unbounded wait here
+# hangs `Pkg.add` itself. The budget bounds each individual step, not the
+# whole workload, and is deliberately generous: during precompilation a
+# step's first execution includes its own JIT compilation, and a spurious
+# timeout aborts precompilation outright.
+const _PC_OP_TIMEOUT_NS = Int64(30_000_000_000)
+
+@inline _pc_deadline_ns()::Int64 = IP._saturating_add_ns(Int64(time_ns()), _PC_OP_TIMEOUT_NS)
+
+@inline function _pc_check_deadline(deadline_ns::Int64, what::String)
+    Int64(time_ns()) < deadline_ns || throw(ArgumentError("timed out $(what)"))
+    return nothing
+end
+
+# Retryable errnos for nonblocking socket loops (SocketOps normalizes the WSA
+# equivalents to these).
+@inline function _pc_retry_errno(errno::Int32)::Bool
+    return errno == Int32(Base.Libc.EAGAIN) ||
+           errno == _PC_EWOULDBLOCK ||
+           errno == Int32(Base.Libc.EINTR)
+end
+
+# Complete a nonblocking connect by re-invoking `connect` until `EISCONN`.
+# Polling instead of parking on the poller keeps this helper usable before the
+# runtime poller exists, and the deadline turns broken event delivery into an
+# error instead of a hang; the sleep keeps the wait off the CPU. Windows can
+# report a still-pending connect as `WSAEINVAL`, so that maps into the pending
+# set there.
+function _pc_finish_connect!(fd::SO.SocketFD, addr::SO.SockAddrIn)::Nothing
+    deadline_ns = _pc_deadline_ns()
+    while true
+        errno = SO.connect_socket(fd, addr)
+        (errno == Int32(0) || errno == Int32(Base.Libc.EISCONN)) && return nothing
+        if _pc_retry_errno(errno) ||
+           errno == Int32(Base.Libc.EINPROGRESS) ||
+           errno == Int32(Base.Libc.EALREADY) ||
+           (Sys.iswindows() && errno == Int32(Base.Libc.EINVAL))
+            _pc_check_deadline(deadline_ns, "connecting")
+            sleep(0.001)
+            continue
+        end
+        throw(SystemError("connect", Int(errno)))
+    end
+end
+
 function _pc_stream_pair()::Tuple{SO.SocketFD, SO.SocketFD}
     listener = SO.INVALID_SOCKET
     client = SO.INVALID_SOCKET
@@ -26,13 +73,7 @@ function _pc_stream_pair()::Tuple{SO.SocketFD, SO.SocketFD}
         bound = SO.get_socket_name_in(listener)
         port = Int(SO.sockaddr_in_port(bound))
         client = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
-        SO.set_nonblocking!(client, false)
-        try
-            errno = SO.connect_socket(client, SO.sockaddr_in_loopback(port))
-            errno == Int32(0) || errno == Int32(Base.Libc.EISCONN) || throw(SystemError("connect", Int(errno)))
-        finally
-            SO.set_nonblocking!(client, true)
-        end
+        _pc_finish_connect!(client, SO.sockaddr_in_loopback(port))
         accepted = _pc_accept_with_retry!(listener)
         stream_client = client
         stream_server = accepted
@@ -54,20 +95,20 @@ end
 
 function _pc_write_byte(fd::SO.SocketFD, b::UInt8)
     buf = Ref{UInt8}(b)
-    for _ in 1:5000
+    deadline_ns = _pc_deadline_ns()
+    while true
         n = GC.@preserve buf SO.write_once!(fd, Base.unsafe_convert(Ptr{UInt8}, buf), Csize_t(1))
         n == Cssize_t(1) && return nothing
         errno = SO.last_error()
-        errno == Int32(Base.Libc.EAGAIN) && (yield(); continue)
-        errno == _PC_EWOULDBLOCK && (yield(); continue)
-        errno == Int32(Base.Libc.EINTR) && continue
-        throw(SystemError("write", Int(errno)))
+        _pc_retry_errno(errno) || throw(SystemError("write", Int(errno)))
+        _pc_check_deadline(deadline_ns, "writing byte")
+        sleep(0.001)
     end
-    throw(ArgumentError("timed out writing byte"))
 end
 
 function _pc_write_all!(fd::SO.SocketFD, data::Vector{UInt8})::Nothing
     offset = 0
+    deadline_ns = _pc_deadline_ns()
     while offset < length(data)
         n = GC.@preserve data SO.write_once!(fd, pointer(data, offset + 1), Csize_t(length(data) - offset))
         if n > 0
@@ -75,16 +116,16 @@ function _pc_write_all!(fd::SO.SocketFD, data::Vector{UInt8})::Nothing
             continue
         end
         errno = SO.last_error()
-        errno == Int32(Base.Libc.EAGAIN) && (yield(); continue)
-        errno == _PC_EWOULDBLOCK && (yield(); continue)
-        errno == Int32(Base.Libc.EINTR) && continue
-        throw(SystemError("write", Int(errno)))
+        _pc_retry_errno(errno) || throw(SystemError("write", Int(errno)))
+        _pc_check_deadline(deadline_ns, "writing payload")
+        sleep(0.001)
     end
     return nothing
 end
 
 function _pc_read_exact_fd!(fd::SO.SocketFD, data::Vector{UInt8})::Nothing
     offset = 0
+    deadline_ns = _pc_deadline_ns()
     while offset < length(data)
         n = GC.@preserve data SO.read_once!(fd, pointer(data, offset + 1), Csize_t(length(data) - offset))
         if n > 0
@@ -93,10 +134,9 @@ function _pc_read_exact_fd!(fd::SO.SocketFD, data::Vector{UInt8})::Nothing
         end
         n == 0 && throw(EOFError())
         errno = SO.last_error()
-        errno == Int32(Base.Libc.EAGAIN) && (yield(); continue)
-        errno == _PC_EWOULDBLOCK && (yield(); continue)
-        errno == Int32(Base.Libc.EINTR) && continue
-        throw(SystemError("read", Int(errno)))
+        _pc_retry_errno(errno) || throw(SystemError("read", Int(errno)))
+        _pc_check_deadline(deadline_ns, "reading payload")
+        sleep(0.001)
     end
     return nothing
 end
@@ -106,31 +146,22 @@ function _pc_read_exact!(conn::NC.Conn, buf::Vector{UInt8})::Int
     return length(buf)
 end
 
-function _pc_wait_connect_ready!(fd::SO.SocketFD)
-    registration = IP.register!(fd; mode = IP.PollMode.WRITE)
-    try
-        IP.arm_waiter!(registration, IP.PollMode.WRITE)
-        IP.pollwait!(registration.write_waiter)
-    finally
-        IP.deregister!(fd)
-    end
-    return nothing
-end
-
 function _pc_accept_with_retry!(listener::SO.SocketFD)::SO.SocketFD
-    for _ in 1:5000
+    deadline_ns = _pc_deadline_ns()
+    while true
         accepted, _, errno = SO.try_accept_socket(listener)
         SO.is_valid_socket(accepted) && return accepted
-        errno == Int32(Base.Libc.EAGAIN) && (yield(); continue)
-        errno == _PC_EWOULDBLOCK && (yield(); continue)
-        errno == Int32(Base.Libc.EINTR) && continue
-        throw(SystemError("accept", Int(errno)))
+        _pc_retry_errno(errno) || throw(SystemError("accept", Int(errno)))
+        _pc_check_deadline(deadline_ns, "waiting for accepted socket")
+        sleep(0.001)
     end
-    throw(ArgumentError("timed out waiting for accepted socket"))
 end
 
-function _pc_wait_task_done(task::Task, timeout_s::Float64 = 2.0)::Nothing
-    status = IP.timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
+# `Base.timedwait`, deliberately: the package's own `IP.timedwait` sleeps on
+# the poller's timer heap, so it inherits any poller wedge this workload is
+# trying to bound its way out of.
+function _pc_wait_task_done(task::Task, timeout_s::Float64 = Float64(_PC_OP_TIMEOUT_NS) / 1.0e9)::Nothing
+    status = Base.timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
     status == :timed_out && throw(ArgumentError("precompile helper task timed out"))
     wait(task)
     return nothing
@@ -171,7 +202,8 @@ function _pc_run_eventloops_workload!()
         errno == Int32(0) || throw(SystemError("event loop arm read waiter", Int(errno)))
         _pc_write_byte(fd1, 0x31)
         ready = false
-        for _ in 1:20
+        poll_deadline_ns = _pc_deadline_ns()
+        while Int64(time_ns()) < poll_deadline_ns
             errno = IP._backend_poll_once!(state, Int64(50_000_000))
             errno == Int32(0) || throw(SystemError("event loop poll once", Int(errno)))
             if (@atomic :acquire registration.read_waiter.state) === IP._POLLWAKE_READY
@@ -210,6 +242,7 @@ function _pc_run_internal_poll_workload!()
         end
         IP.set_read_deadline!(ipfd, Int64(0))
         _pc_write_byte(fd1, 0x66)
+        IP.set_read_deadline!(ipfd, _pc_deadline_ns())
         n = IP.read!(ipfd, Vector{UInt8}(undef, 1))
         n == 1 || error("internal poll workload expected one-byte read")
     finally
@@ -233,15 +266,9 @@ function _pc_run_socket_ops_workload!()
         bound = SO.get_socket_name_in(listener)
         port = Int(SO.sockaddr_in_port(bound))
         client = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
-        errno = SO.connect_socket(client, SO.sockaddr_in_loopback(port))
-        if errno != Int32(0) && errno != Int32(Base.Libc.EISCONN)
-            if errno != Int32(Base.Libc.EINPROGRESS) && errno != Int32(Base.Libc.EALREADY) && errno != Int32(Base.Libc.EINTR)
-                throw(SystemError("connect", Int(errno)))
-            end
-            _pc_wait_connect_ready!(client)
-            so_error = SO.get_socket_error(client)
-            so_error == Int32(0) || throw(SystemError("connect(SO_ERROR)", Int(so_error)))
-        end
+        _pc_finish_connect!(client, SO.sockaddr_in_loopback(port))
+        so_error = SO.get_socket_error(client)
+        so_error == Int32(0) || throw(SystemError("connect(SO_ERROR)", Int(so_error)))
         accepted = _pc_accept_with_retry!(listener)
         payload = UInt8[0x31, 0x32]
         recv_buf = Vector{UInt8}(undef, 2)
@@ -264,8 +291,18 @@ function _pc_run_tcp_workload!()
     try
         listener = NC.listen(NC.loopback_addr(0); backlog = 16)
         laddr = NC.addr(listener)
-        client = NC.connect(NC.loopback_addr(Int((laddr::NC.SocketAddrV4).port)))
+        # The direct-address `NC.connect(addr)` has no deadline parameter, so
+        # dial through the timeout-capable public overload; the deadline-free
+        # entrypoints are still compiled by `_pc_compile_unbounded_dials!`.
+        client = NC.connect(
+            "tcp",
+            ND.join_host_port("127.0.0.1", Int((laddr::NC.SocketAddrV4).port));
+            timeout_ns = _PC_OP_TIMEOUT_NS,
+        )
+        NC.set_deadline!(listener, _pc_deadline_ns())
         server = NC.accept(listener)
+        NC.set_deadline!(client, _pc_deadline_ns())
+        NC.set_deadline!(server, _pc_deadline_ns())
         payload = UInt8[0x41, 0x42, 0x43]
         written = write(client, payload)
         written == length(payload) || throw(ArgumentError("tcp workload expected 3-byte write"))
@@ -297,8 +334,15 @@ function _pc_run_host_resolvers_workload!()
     try
         listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 16)
         laddr = NC.addr(listener)
-        client = ND.connect("tcp", ND.join_host_port("127.0.0.1", Int((laddr::NC.SocketAddrV4).port)))
+        client = ND.connect(
+            "tcp",
+            ND.join_host_port("127.0.0.1", Int((laddr::NC.SocketAddrV4).port));
+            timeout_ns = _PC_OP_TIMEOUT_NS,
+        )
+        NC.set_deadline!(listener, _pc_deadline_ns())
         server = NC.accept(listener)
+        NC.set_deadline!(client, _pc_deadline_ns())
+        NC.set_deadline!(server, _pc_deadline_ns())
         payload = UInt8[0x51, 0x52]
         written = write(client, payload)
         written == length(payload) || throw(ArgumentError("host resolver workload expected 2-byte write"))
@@ -542,11 +586,13 @@ function _pc_run_tls_roundtrip_states!(
     server_task = nothing
     try
         listener = TL.listen(NC.loopback_addr(0), server_config; backlog = 8)
+        TL.set_deadline!(listener, _pc_deadline_ns())
         laddr = TL.addr(listener)::NC.SocketAddrV4
         server_task = @async begin
             conn = TL.accept(listener::TL.Listener)
             try
                 TL.handshake!(conn)
+                TL.set_deadline!(conn, _pc_deadline_ns())
                 state = TL.connection_state(conn)
                 write(conn, UInt8[0x41]) == 1 || throw(ArgumentError("TLS precompile workload expected 1-byte server write"))
                 read(conn, 1) == UInt8[0x51] || throw(ArgumentError("TLS precompile workload expected 1-byte client ack"))
@@ -555,16 +601,33 @@ function _pc_run_tls_roundtrip_states!(
                 _pc_close_nothrow(conn)
             end
         end
-        client = TL.connect(NC.loopback_addr(Int(laddr.port)), client_config)
+        # The direct-address `TL.connect(addr, config)` dials with no deadline,
+        # so dial through the timeout-capable public overload, which also caps
+        # the eager handshake with the same deadline.
+        client = TL.connect(
+            "tcp",
+            ND.join_host_port("127.0.0.1", Int(laddr.port)),
+            client_config;
+            timeout_ns = _PC_OP_TIMEOUT_NS,
+        )
+        TL.set_deadline!(client, _pc_deadline_ns())
         read(client, 1) == UInt8[0x41] || throw(ArgumentError("TLS precompile workload expected server byte"))
         write(client, UInt8[0x51]) == 1 || throw(ArgumentError("TLS precompile workload expected client ack write"))
         eof(client) || throw(ArgumentError("TLS precompile workload expected connection EOF"))
         client_state = TL.connection_state(client)
-        _pc_wait_task_done(server_task::Task, 2.0)
+        _pc_wait_task_done(server_task::Task)
         return _PCTLSRoundtripStates(client_state, fetch(server_task::Task)::TL.ConnectionState)
     finally
         _pc_close_nothrow(client)
         _pc_close_nothrow(listener)
+        # A client-side throw must not orphan the server task past the
+        # workload: the closes above unblock it, then join it bounded.
+        if server_task !== nothing
+            try
+                _pc_wait_task_done(server_task::Task)
+            catch
+            end
+        end
         IP.shutdown!()
     end
 end
@@ -768,10 +831,22 @@ function _pc_run_selected_workloads!()::Nothing
     return nothing
 end
 
+# Compile, without executing, the deadline-free public dial entrypoints the
+# workloads deliberately avoid running: executing them would reintroduce an
+# unbounded wait, but their first-call latency still matters to users.
+function _pc_compile_unbounded_dials!()::Nothing
+    precompile(NC.connect, (NC.SocketAddrV4,))
+    precompile(NC.connect, (NC.SocketAddrV4, Nothing))
+    precompile(NC.connect, (String, String))
+    precompile(TL.connect, (NC.SocketAddrV4, TL.Config))
+    return nothing
+end
+
 function _pc_run_precompile_workloads!()::Nothing
     IP.__init__()
     @assert isassigned(IP.POLLER)
     _pc_run_selected_workloads!()
+    _pc_compile_unbounded_dials!()
     return nothing
 end
 
