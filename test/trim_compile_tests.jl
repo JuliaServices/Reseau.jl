@@ -74,6 +74,20 @@ function _trim_compiler_available()::Bool
     end
 end
 
+# JuliaC's macOS bundling step invokes `codesign` by PATH lookup, so a
+# non-Apple shim (e.g. sigtool's from conda-forge/Nix toolchains) earlier on
+# PATH fails the bundle signing with an unsupported-arguments error (#144).
+# Returns the shadowing path, or `nothing` when signing can work.
+function _trim_codesign_conflict()::Union{Nothing, String}
+    @static if Sys.isapple()
+        cs = Sys.which("codesign")
+        (cs === nothing || cs == "/usr/bin/codesign") && return nothing
+        return cs
+    else
+        return nothing
+    end
+end
+
 function _trim_output_path(dir::String, output_name::String)::String
     path = joinpath(dir, output_name)
     isfile(path) && return path
@@ -140,6 +154,9 @@ end
         @test true
     elseif !_trim_compiler_available()
         @warn "Reseau trim compile tests are being skipped." reason = "no C compiler found" action = "install gcc/clang or set JULIA_CC to run trim compilation tests"
+        @test true
+    elseif (_codesign_conflict = _trim_codesign_conflict()) !== nothing
+        @warn "Reseau trim compile tests are being skipped." reason = "a non-Apple `codesign` shadows /usr/bin/codesign on PATH and JuliaC's bundle signing would fail" codesign = _codesign_conflict action = "reorder PATH so /usr/bin/codesign wins, then rerun the trim tests"
         @test true
     else
         project_path = normpath(joinpath(@__DIR__, ".."))
