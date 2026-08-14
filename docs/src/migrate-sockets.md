@@ -142,6 +142,23 @@ Half-close remains explicit:
 - `closewrite(conn)`
 - `TCP.closeread(conn)`
 
+## UDP
+
+The `UDPSocket` flow maps onto `Reseau.UDP`:
+
+| `Sockets` | Reseau |
+| --- | --- |
+| `s = UDPSocket(); bind(s, ip, port)` | `conn = UDP.listen(addr)` |
+| `send(s, ip, port, msg)` | `UDP.sendto(conn, msg, addr)` |
+| `recv(s)` | `UDP.recv(conn)` |
+| `recvfrom(s)` returning `(addr, data)` | `UDP.recvfrom(conn)` returning `(data, addr)` |
+| timeout wrapper tasks | `UDP.set_read_deadline!(conn, deadline_ns)` |
+
+Two behavioral differences to plan for: `recvfrom` returns `(data, addr)` in
+the opposite order with a fused `SocketAddr`, and closing a socket wakes
+pending receives with `NetClosingError` rather than `EOFError` (consistent
+with `TCP`). Multicast options are not yet available.
+
 ## Porting Checklist
 
 1. Replace `Sockets.connect(host, port)` with `TCP.connect("host:port")` when you want hostname resolution.

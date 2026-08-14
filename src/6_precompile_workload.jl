@@ -6,6 +6,7 @@ const IP = IOPoll
 const SO = SocketOps
 const NC = TCP
 const ND = HostResolvers
+const NU = UDP
 const TL = TLS
 
 @inline function _pc_runtime_supported()::Bool
@@ -252,6 +253,36 @@ function _pc_run_socket_ops_workload!()
         SO.is_valid_socket(client) && SO.close_socket_nothrow(client)
         SO.is_valid_socket(listener) && SO.close_socket_nothrow(listener)
         IP.shutdown!()
+    end
+    return nothing
+end
+
+function _pc_run_udp_workload!()
+    _pc_runtime_supported() || return nothing
+    receiver = nothing
+    sender = nothing
+    try
+        receiver = NU.listen(NU.loopback_addr(0))
+        raddr = NU.local_addr(receiver)
+        sender = NU.connect(raddr::NU.SocketAddrV4)
+        payload = UInt8[0x44, 0x45, 0x46]
+        NU.send(sender, payload)
+        buf = Vector{UInt8}(undef, 8)
+        n, from = NU.recvfrom!(receiver, buf)
+        n == length(payload) || throw(ArgumentError("udp workload expected a 3-byte datagram"))
+        from === nothing && throw(ArgumentError("udp workload expected a peer address"))
+        NU.sendto(receiver, payload, from)
+        reply = NU.recv(sender)
+        reply == payload || throw(ArgumentError("udp workload reply mismatch"))
+    finally
+        try
+            sender === nothing || close(sender)
+        catch
+        end
+        try
+            receiver === nothing || close(receiver)
+        catch
+        end
     end
     return nothing
 end
@@ -762,6 +793,7 @@ function _pc_run_selected_workloads!()::Nothing
     _pc_workload_enabled("eventloops") && _pc_run_eventloops_workload!()
     _pc_workload_enabled("internal_poll") && _pc_run_internal_poll_workload!()
     _pc_workload_enabled("socket_ops") && _pc_run_socket_ops_workload!()
+    _pc_workload_enabled("udp") && _pc_run_udp_workload!()
     _pc_workload_enabled("tcp") && _pc_run_tcp_workload!()
     _pc_workload_enabled("host_resolvers") && _pc_run_host_resolvers_workload!()
     _pc_workload_enabled("tls") && _pc_run_tls_workload!()

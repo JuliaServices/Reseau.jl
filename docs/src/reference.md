@@ -74,6 +74,40 @@ remote_addr
 addr
 ```
 
+## UDP
+
+```@docs
+Reseau.UDP
+```
+
+### Connections and Datagram I/O
+
+```@docs
+UDP.Conn
+UDP.listen
+UDP.connect
+UDP.send
+UDP.sendto
+UDP.recv
+UDP.recv!
+UDP.recvfrom
+UDP.recvfrom!
+UDP.TruncatedDatagramError
+```
+
+### Deadlines, Socket Options, and Address Inspection
+
+```@docs
+UDP.DeadlineExceededError
+UDP.set_deadline!
+UDP.set_read_deadline!
+UDP.set_write_deadline!
+UDP.set_broadcast!
+UDP.set_ttl!
+UDP.local_addr
+UDP.remote_addr
+```
+
 ## TLS
 
 ```@meta

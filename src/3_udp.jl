@@ -120,15 +120,25 @@ Windows, which has no equivalent option. IPv6 sockets are opened dual-stack
 where the platform allows it, matching `TCP`.
 """
 function listen(local_addr::SocketAddr; reuseaddr::Bool = false, reuseport::Bool = false)::Conn
+    return _listen_impl(local_addr; reuseaddr = reuseaddr, reuseport = reuseport, v6only = false, net = :udp)
+end
+
+function _listen_impl(
+        local_addr::SocketAddr;
+        reuseaddr::Bool,
+        reuseport::Bool,
+        v6only::Bool,
+        net::Symbol,
+    )::Conn
     @static if Sys.iswindows()
         reuseport && throw(ArgumentError("reuseport is not supported on Windows"))
     end
     family = _addr_family(local_addr)
-    fd = open_net_fd!(; family = family, sotype = SocketOps.SOCK_DGRAM, net = :udp)
+    fd = open_net_fd!(; family = family, sotype = SocketOps.SOCK_DGRAM, net = net)
     registered = false
     ok = false
     try
-        family == SocketOps.AF_INET6 && _set_ipv6_only!(fd, false)
+        family == SocketOps.AF_INET6 && _set_ipv6_only!(fd, v6only)
         if reuseaddr
             SocketOps.set_sockopt_int(fd.pfd.sysfd, SocketOps.SOL_SOCKET, SocketOps.SO_REUSEADDR, 1)
         end
@@ -167,15 +177,24 @@ function connect(
         remote_addr::SocketAddr;
         local_addr::Union{Nothing, SocketAddr} = nothing,
     )::Conn
+    return _connect_impl(remote_addr; local_addr = local_addr, v6only = false, net = :udp)
+end
+
+function _connect_impl(
+        remote_addr::SocketAddr;
+        local_addr::Union{Nothing, SocketAddr},
+        v6only::Bool,
+        net::Symbol,
+    )::Conn
     family = _addr_family(remote_addr)
     if local_addr !== nothing && _addr_family(local_addr) != family
         throw(ArgumentError("local and remote address families must match"))
     end
-    fd = open_net_fd!(; family = family, sotype = SocketOps.SOCK_DGRAM, net = :udp)
+    fd = open_net_fd!(; family = family, sotype = SocketOps.SOCK_DGRAM, net = net)
     registered = false
     ok = false
     try
-        family == SocketOps.AF_INET6 && _set_ipv6_only!(fd, false)
+        family == SocketOps.AF_INET6 && _set_ipv6_only!(fd, v6only)
         if local_addr !== nothing
             SocketOps.bind_socket(fd.pfd.sysfd, _to_sockaddr(local_addr))
         end
