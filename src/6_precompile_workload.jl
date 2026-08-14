@@ -290,8 +290,10 @@ function _pc_run_udp_workload!()
     sender = nothing
     try
         receiver = NU.listen(NU.loopback_addr(0))
+        NU.set_deadline!(receiver, _pc_deadline_ns())
         raddr = NU.local_addr(receiver)
         sender = NU.connect(raddr::NU.SocketAddrV4)
+        NU.set_deadline!(sender, _pc_deadline_ns())
         payload = UInt8[0x44, 0x45, 0x46]
         NU.send(sender, payload)
         buf = Vector{UInt8}(undef, 8)
