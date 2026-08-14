@@ -953,3 +953,214 @@ function _write_ptr!(fd::FD, p::Ptr{UInt8}, nbytes::Int, root=nothing)::Int
         _fd_write_unlock!(fd)
     end
 end
+
+############
+# Datagram (UDP) I/O
+############
+
+# Max UDP payload is 65,507 bytes, so a 64 KiB scratch always holds a whole
+# datagram. The Windows receive path relies on this to detect truncation by
+# size comparison instead of WSAEMSGSIZE handling.
+const _UDP_MAX_DATAGRAM = 64 * 1024
+
+const _DatagramDest = Union{
+    Nothing,
+    Base.RefValue{SocketOps.SockAddrIn},
+    Base.RefValue{SocketOps.SockAddrIn6},
+}
+
+"""
+    sendto_ptr!(fd, p, nbytes, root, dest, destlen) -> Int
+
+Send one datagram of `nbytes` starting at `p`. `dest === nothing` sends on the
+socket's connected peer; otherwise `dest` is a `Ref` to a platform sockaddr of
+`destlen` bytes. Unlike the stream write path there is no partial-write loop:
+the kernel transmits a datagram whole or not at all, and a zero-byte send is a
+valid empty datagram rather than EOF.
+
+`root`, when supplied, keeps the WSASend/WSASendTo source buffer reachable for
+the overlapped op's full lifetime on Windows; pointer-only callers fall back to
+a private copy.
+"""
+function sendto_ptr!(
+        fd::FD,
+        p::Ptr{UInt8},
+        nbytes::Int,
+        root,
+        dest::_DatagramDest,
+        destlen::Int,
+    )::Int
+    nbytes <= _UDP_MAX_DATAGRAM || throw(ArgumentError("datagram payload exceeds 64 KiB"))
+    _fd_write_lock!(fd)
+    try
+        @static if Sys.iswindows()
+            preparewrite(fd.pd, fd.is_file)
+            registration = _poll_registration(fd.pd)
+            raw_pointer = root === nothing
+            io_root = raw_pointer ? Vector{UInt8}(undef, nbytes) : root
+            io_ptr = p
+            if raw_pointer
+                GC.@preserve io_root unsafe_copyto!(pointer(io_root::Vector{UInt8}), p, nbytes)
+                io_ptr = pointer(io_root::Vector{UInt8})
+            end
+            bytes = UInt32(0)
+            result = Int32(0)
+            GC.@preserve io_root begin
+                if dest === nothing
+                    while true
+                        errno = _iocp_submit_write!(registration, io_ptr, UInt32(nbytes), io_root)
+                        errno == Int32(0) && break
+                        if errno == Int32(Base.Libc.EALREADY)
+                            waitwrite(fd.pd, fd.is_file)
+                            continue
+                        end
+                        throw(SystemError("send", Int(errno)))
+                    end
+                else
+                    addrbytes = Vector{UInt8}(undef, destlen)
+                    GC.@preserve dest unsafe_copyto!(
+                        pointer(addrbytes),
+                        Ptr{UInt8}(Base.unsafe_convert(Ptr{Cvoid}, dest)),
+                        destlen,
+                    )
+                    request = IocpSendToRequest(addrbytes)
+                    while true
+                        errno = _iocp_submit_sendto!(registration, io_ptr, UInt32(nbytes), io_root, request)
+                        errno == Int32(0) && break
+                        if errno == Int32(Base.Libc.EALREADY)
+                            waitwrite(fd.pd, fd.is_file)
+                            continue
+                        end
+                        throw(SystemError("sendto", Int(errno)))
+                    end
+                end
+                try
+                    _wait_iocp_completion!(registration, fd.pd, PollMode.WRITE, fd.is_file)
+                catch err
+                    _drain_canceled_iocp_op!(registration, PollMode.WRITE)
+                    rethrow(err)
+                end
+                bytes, result = _iocp_finish_write!(registration)
+            end
+            result == Int32(0) || throw(SystemError(dest === nothing ? "send" : "sendto", Int(result)))
+            return Int(bytes)
+        end
+        preparewrite(fd.pd, fd.is_file)
+        while true
+            n = if dest === nothing
+                SocketOps.send_to!(fd.sysfd, p, Csize_t(nbytes))
+            else
+                GC.@preserve dest SocketOps.send_to!(
+                    fd.sysfd,
+                    p,
+                    Csize_t(nbytes),
+                    Cint(0),
+                    Base.unsafe_convert(Ptr{Cvoid}, dest),
+                    SocketOps.SockLen(destlen),
+                )
+            end
+            n >= 0 && return Int(n)
+            errno = SocketOps.last_error()
+            if errno == Int32(Base.Libc.EAGAIN) && pollable(fd.pd)
+                waitwrite(fd.pd, fd.is_file)
+                continue
+            end
+            throw(SystemError(dest === nothing ? "send" : "sendto", Int(errno)))
+        end
+    finally
+        _fd_write_unlock!(fd)
+    end
+end
+
+"""
+    recvfrom_ptr!(fd, p, nbytes, root) -> (nread, peer, truncated)
+
+Receive one datagram into `p`, returning the number of bytes delivered to the
+caller, the peer address (`nothing` when the kernel reports none), and whether
+the datagram was longer than `nbytes` and therefore truncated. A zero-byte
+return is a valid empty datagram, never EOF.
+
+On POSIX platforms this is a `recvmsg` loop so truncation can be read from
+`MSG_TRUNC`; on Windows the datagram lands in a whole-datagram scratch first
+and truncation is detected by size comparison. `root`, when supplied, keeps
+the destination reachable while a blocking wait is parked.
+"""
+function recvfrom_ptr!(
+        fd::FD,
+        p::Ptr{UInt8},
+        nbytes::Int,
+        root,
+    )::Tuple{Int, SocketOps.AcceptPeer, Bool}
+    _fd_read_lock!(fd)
+    try
+        @static if Sys.iswindows()
+            prepareread(fd.pd, fd.is_file, false)
+            registration = _poll_registration(fd.pd)
+            bounce = Vector{UInt8}(undef, _UDP_MAX_DATAGRAM)
+            request = IocpRecvFromRequest(Vector{UInt8}(undef, 128), Ref(Cint(128)))
+            bytes = UInt32(0)
+            result = Int32(0)
+            GC.@preserve bounce begin
+                while true
+                    errno = _iocp_submit_recvfrom!(
+                        registration,
+                        pointer(bounce),
+                        UInt32(length(bounce)),
+                        bounce,
+                        request,
+                    )
+                    errno == Int32(0) && break
+                    if errno == Int32(Base.Libc.EALREADY)
+                        waitread(fd.pd, fd.is_file)
+                        continue
+                    end
+                    throw(SystemError("recvfrom", Int(errno)))
+                end
+                try
+                    _wait_iocp_completion!(registration, fd.pd, PollMode.READ, fd.is_file)
+                catch err
+                    _drain_canceled_iocp_op!(registration, PollMode.READ)
+                    rethrow(err)
+                end
+                bytes, result = _iocp_finish_read!(registration)
+            end
+            result == Int32(0) || throw(SystemError("recvfrom", Int(result)))
+            n = Int(bytes)
+            ncopy = min(n, nbytes)
+            if ncopy > 0
+                GC.@preserve bounce unsafe_copyto!(p, pointer(bounce), ncopy)
+            end
+            addrbuf = request.addrbuf
+            peer = GC.@preserve addrbuf SocketOps.decode_sockaddr(
+                pointer(addrbuf),
+                Int(request.addrlen[]),
+            )
+            return ncopy, peer, n > nbytes
+        end
+        prepareread(fd.pd, fd.is_file, false)
+        namebuf = Ref{NTuple{128, UInt8}}()
+        iov = Ref(SocketOps.IOVec(Ptr{Cvoid}(p), Csize_t(nbytes)))
+        GC.@preserve namebuf iov root begin
+            name_ptr = Base.unsafe_convert(Ptr{Cvoid}, namebuf)
+            iov_ptr = Base.unsafe_convert(Ptr{SocketOps.IOVec}, iov)
+            while true
+                msg = Ref(SocketOps.MsgHdr(name_ptr, SocketOps.SockLen(128), iov_ptr, 1, C_NULL, 0, Cint(0)))
+                n = SocketOps.recv_msg!(fd.sysfd, msg)
+                if n >= 0
+                    hdr = msg[]
+                    peer = SocketOps.decode_sockaddr(Ptr{UInt8}(name_ptr), Int(hdr.msg_namelen))
+                    truncated = (hdr.msg_flags & SocketOps.MSG_TRUNC) != Cint(0)
+                    return Int(n), peer, truncated
+                end
+                errno = SocketOps.last_error()
+                if errno == Int32(Base.Libc.EAGAIN) && pollable(fd.pd)
+                    waitread(fd.pd, fd.is_file)
+                    continue
+                end
+                throw(SystemError("recvmsg", Int(errno)))
+            end
+        end
+    finally
+        _fd_read_unlock!(fd)
+    end
+end

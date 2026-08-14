@@ -309,6 +309,36 @@ function _load_extension_ptr!(sock::SocketFD, guid::Guid)::Ptr{Cvoid}
     return out_ref[]
 end
 
+const _SIO_UDP_CONNRESET = UInt32(0x9800000C)
+
+"""
+    set_udp_connreset!(sock, enabled)
+
+Toggle delivery of `WSAECONNRESET` on a UDP socket. Windows reports ICMP
+port-unreachable from *any* prior send as a reset on subsequent receives;
+unconnected sockets disable this so one dead peer cannot poison a shared
+socket, while connected sockets keep it so refused sends surface as errors.
+"""
+function set_udp_connreset!(sock::SocketFD, enabled::Bool)::Nothing
+    in_ref = Ref{UInt32}(enabled ? UInt32(1) : UInt32(0))
+    bytes_ref = Ref{UInt32}(UInt32(0))
+    rc = GC.@preserve in_ref bytes_ref begin
+        @gcsafe_ccall _WS2_32.WSAIoctl(
+            _socket_value(sock)::UInt,
+            _SIO_UDP_CONNRESET::UInt32,
+            in_ref::Ref{UInt32},
+            UInt32(sizeof(UInt32))::UInt32,
+            C_NULL::Ptr{Cvoid},
+            UInt32(0)::UInt32,
+            bytes_ref::Ref{UInt32},
+            C_NULL::Ptr{Cvoid},
+            C_NULL::Ptr{Cvoid},
+        )::Cint
+    end
+    rc == 0 || _throw_errno("WSAIoctl(SIO_UDP_CONNRESET)", _map_wsa_errno(_wsa_get_last_error()))
+    return nothing
+end
+
 function _load_sendrecvmsg_ptrs!()::Tuple{Ptr{Cvoid}, Ptr{Cvoid}}
     send_ptr = _wsasendmsg_ptr[]
     recv_ptr = _wsarecvmsg_ptr[]

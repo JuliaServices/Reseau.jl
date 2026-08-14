@@ -51,6 +51,17 @@ const SO_ERROR = @static Sys.islinux() ? Cint(0x0004) : Cint(0x1007)
 const SO_REUSEADDR = @static Sys.islinux() ? Cint(0x0002) : Cint(0x0004)
 const SO_KEEPALIVE = @static Sys.islinux() ? Cint(0x0009) : Cint(0x0008)
 const TCP_NODELAY = Cint(0x01)
+const IPPROTO_IP = Cint(0)
+const IPPROTO_UDP = Cint(17)
+const SO_BROADCAST = @static Sys.islinux() ? Cint(0x0006) : Cint(0x0020)
+# No SO_REUSEPORT exists on Windows; the UDP layer rejects the option there.
+const SO_REUSEPORT = @static Sys.islinux() ? Cint(15) : Cint(0x0200)
+const IP_TTL = @static Sys.islinux() ? Cint(2) : Cint(4)
+const IPV6_UNICAST_HOPS = @static Sys.islinux() ? Cint(16) : Cint(4)
+# Windows reports datagram truncation through WSAEMSGSIZE rather than a
+# recvmsg flag, so the constant is only meaningful on POSIX platforms.
+const MSG_TRUNC = @static Sys.iswindows() ? Cint(0) :
+    Sys.islinux() ? Cint(0x20) : Cint(0x10)
 
 @static if Sys.isbsd()
     """
@@ -150,6 +161,31 @@ else
 end
 
 const AcceptPeer = Union{Nothing, SockAddrIn, SockAddrIn6}
+
+"""
+    decode_sockaddr(ptr, len) -> AcceptPeer
+
+Decode a raw sockaddr buffer of `len` bytes into `SockAddrIn`/`SockAddrIn6`,
+or `nothing` when the family is unknown or the buffer is too short. The caller
+must keep the memory behind `ptr` rooted for the duration of the call.
+"""
+function decode_sockaddr(ptr::Ptr{UInt8}, len::Integer)::AcceptPeer
+    n = Int(len)
+    n < 2 && return nothing
+    family = @static if Sys.isbsd()
+        # BSD sockaddrs lead with a length byte; the family is the second byte.
+        Cint(unsafe_load(ptr, 2))
+    else
+        Cint(unsafe_load(Ptr{UInt16}(Ptr{Cvoid}(ptr))))
+    end
+    if family == AF_INET && n >= sizeof(SockAddrIn)
+        return unsafe_load(Ptr{SockAddrIn}(Ptr{Cvoid}(ptr)))
+    end
+    if family == AF_INET6 && n >= sizeof(SockAddrIn6)
+        return unsafe_load(Ptr{SockAddrIn6}(Ptr{Cvoid}(ptr)))
+    end
+    return nothing
+end
 
 @inline function _is_little_endian()::Bool
     return Base.ENDIAN_BOM == 0x04030201
