@@ -1032,6 +1032,30 @@ end
         close(listener)
     end
 
+    @testset "listen reuseaddr semantics" begin
+        listener = TCP.listen(TCP.loopback_addr(0); reuseaddr = true)
+        got = Reseau.SocketOps.get_sockopt_int(
+            listener.fd.pfd.sysfd,
+            Reseau.SocketOps.SOL_SOCKET,
+            Reseau.SocketOps.SO_REUSEADDR,
+        )
+        @static if Sys.iswindows()
+            # reuseaddr is a deliberate no-op on Windows: SO_REUSEADDR there
+            # means "bind over an active listener", not TIME_WAIT rebinding.
+            @test got == 0
+        else
+            @test got != 0
+        end
+        close(listener)
+        bare = TCP.listen(TCP.loopback_addr(0); reuseaddr = false)
+        @test Reseau.SocketOps.get_sockopt_int(
+            bare.fd.pfd.sysfd,
+            Reseau.SocketOps.SOL_SOCKET,
+            Reseau.SocketOps.SO_REUSEADDR,
+        ) == 0
+        close(bare)
+    end
+
     @testset "listenany" begin
         taken = TCP.listen(TCP.loopback_addr(0))
         hint_port = Int((TCP.addr(taken)::TCP.SocketAddrV4).port)

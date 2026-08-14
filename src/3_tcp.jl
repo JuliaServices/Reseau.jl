@@ -493,6 +493,12 @@ Create a TCP listener from a bound local address.
 
 This is the direct-address equivalent of the `listen(network, address; ...)`
 overloads on the same `TCP.listen` generic.
+
+`reuseaddr` sets `SO_REUSEADDR` so a restarting server can rebind a port whose
+previous listener is still in TIME_WAIT. On Windows it is a deliberate no-op:
+Windows allows the TIME_WAIT rebind without the option, and `SO_REUSEADDR`
+there instead permits binding over an *active* listener (silently starving it
+of connections). Go and libuv make the same choice.
 """
 function _listen_socketaddr_impl(
         local_addr::SocketAddr,
@@ -504,7 +510,16 @@ function _listen_socketaddr_impl(
     fd = open_tcp_fd!(; family = family, net = network)
     try
         family == SocketOps.AF_INET6 && _set_ipv6_only!(fd, network === :tcp6)
-        reuseaddr && SocketOps.set_sockopt_int(fd.pfd.sysfd, SocketOps.SOL_SOCKET, SocketOps.SO_REUSEADDR, 1)
+        @static if !Sys.iswindows()
+            # POSIX SO_REUSEADDR permits rebinding a port stuck in TIME_WAIT.
+            # Windows gives the same TIME_WAIT rebinding without the option,
+            # and setting it there instead means "bind over an active
+            # listener" — a hijack that silently starves the original of
+            # connections. Go and libuv likewise never set SO_REUSEADDR on
+            # Windows TCP listeners, so `reuseaddr` is a deliberate no-op
+            # there.
+            reuseaddr && SocketOps.set_sockopt_int(fd.pfd.sysfd, SocketOps.SOL_SOCKET, SocketOps.SO_REUSEADDR, 1)
+        end
         SocketOps.bind_socket(fd.pfd.sysfd, _to_sockaddr(local_addr))
         SocketOps.listen_socket(fd.pfd.sysfd, backlog)
         IOPoll.register!(fd.pfd)
@@ -544,18 +559,15 @@ Ports that are in use (`EADDRINUSE`) or forbidden (`EACCES`) are skipped by
 incrementing the port; running out of ports rethrows the last error. A hint
 port of `0` binds an ephemeral port directly.
 
-On Windows the probe always binds exclusively (`reuseaddr` is ignored there):
-Windows treats `SO_REUSEADDR` as permission to bind over an existing listener
-instead of failing with `EADDRINUSE`, which would defeat the availability
-probe — the hijacked listener never receives connections. Sockets (via libuv)
-and Go likewise never set `SO_REUSEADDR` on Windows TCP listeners.
+`reuseaddr` follows [`listen`](@ref) semantics, including its Windows no-op:
+exclusive Windows binds are exactly what keeps `EADDRINUSE` (and therefore
+this availability probe) reliable there.
 """
 function listenany(hint::SocketAddr; backlog::Integer = 128, reuseaddr::Bool = true)::Tuple{UInt16, Listener}
-    probe_reuseaddr = @static Sys.iswindows() ? false : reuseaddr
     addr = hint
     while true
         listener = try
-            listen(addr; backlog = backlog, reuseaddr = probe_reuseaddr)
+            listen(addr; backlog = backlog, reuseaddr = reuseaddr)
         catch err
             ex = err::Exception
             (ex isa SystemError && _is_port_taken_errno(ex.errnum)) || rethrow(ex)
