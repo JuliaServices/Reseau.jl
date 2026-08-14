@@ -543,12 +543,19 @@ returning the bound port and the listener (the `Sockets.listenany` idiom).
 Ports that are in use (`EADDRINUSE`) or forbidden (`EACCES`) are skipped by
 incrementing the port; running out of ports rethrows the last error. A hint
 port of `0` binds an ephemeral port directly.
+
+On Windows the probe always binds exclusively (`reuseaddr` is ignored there):
+Windows treats `SO_REUSEADDR` as permission to bind over an existing listener
+instead of failing with `EADDRINUSE`, which would defeat the availability
+probe — the hijacked listener never receives connections. Sockets (via libuv)
+and Go likewise never set `SO_REUSEADDR` on Windows TCP listeners.
 """
 function listenany(hint::SocketAddr; backlog::Integer = 128, reuseaddr::Bool = true)::Tuple{UInt16, Listener}
+    probe_reuseaddr = @static Sys.iswindows() ? false : reuseaddr
     addr = hint
     while true
         listener = try
-            listen(addr; backlog = backlog, reuseaddr = reuseaddr)
+            listen(addr; backlog = backlog, reuseaddr = probe_reuseaddr)
         catch err
             ex = err::Exception
             (ex isa SystemError && _is_port_taken_errno(ex.errnum)) || rethrow(ex)
