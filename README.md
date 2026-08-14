@@ -9,6 +9,7 @@ hostname-aware dialing, and TLS in one package.
 Reseau provides:
 
 - TCP connections and listeners
+- UDP datagram sockets, connected and unconnected
 - hostname-aware dialing and listening through the `TCP` and `TLS` entrypoints
 - TLS clients and listeners
 - integrated readiness, deadline, and timer handling across macOS, Linux, and Windows
@@ -26,6 +27,7 @@ Pkg.add("Reseau")
 The supported public entry points are the exported `TCP` and `TLS` modules:
 
 - `TCP` for TCP connections, listeners, deadlines, and string-address dialing
+- `UDP` for datagram sockets with the same deadline and readiness model
 - `TLS` for TLS clients and listeners
 
 ## Quick Start

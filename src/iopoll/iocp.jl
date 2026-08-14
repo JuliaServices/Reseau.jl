@@ -107,7 +107,25 @@ mutable struct IocpAcceptRequest
     addrbuf::Vector{UInt8}
 end
 
-const IocpRequest = Union{Nothing, IocpConnectRequest, IocpAcceptRequest}
+# WSARecvFrom writes the peer sockaddr and its length at completion time, so
+# both out-buffers must stay reachable for the op's whole lifetime; rooting
+# them here mirrors how CONNECT/ACCEPT root their address buffers.
+mutable struct IocpRecvFromRequest
+    addrbuf::Vector{UInt8}
+    addrlen::Base.RefValue{Cint}
+end
+
+mutable struct IocpSendToRequest
+    addrbuf::Vector{UInt8}
+end
+
+const IocpRequest = Union{
+    Nothing,
+    IocpConnectRequest,
+    IocpAcceptRequest,
+    IocpRecvFromRequest,
+    IocpSendToRequest,
+}
 
 mutable struct IocpOp
     storage::Base.RefValue{Overlapped}
@@ -365,7 +383,8 @@ function _submit_iocp_op!(
     )::Int32
     _, ok = @atomicreplace(op.active, false => true)
     ok || return Int32(Base.Libc.EALREADY)
-    if (kind == IocpOpKind.READ || kind == IocpOpKind.WRITE) && buffer === nothing
+    if (kind == IocpOpKind.READ || kind == IocpOpKind.WRITE ||
+            kind == IocpOpKind.RECVFROM || kind == IocpOpKind.SENDTO) && buffer === nothing
         # An existing operation must win with EALREADY before validating the
         # next request. The read/write wrappers clear a newly failed
         # submission, so returning EINVAL for an already-active op would reset
@@ -438,6 +457,47 @@ function _submit_iocp_op!(
                 C_NULL::Ptr{Cvoid},
             )::Cint
         end
+    elseif op.kind == IocpOpKind.RECVFROM
+        request = op.request
+        request isa IocpRecvFromRequest || throw(ArgumentError("missing RecvFrom request"))
+        wsabuf = Ref(WSABUF(nbytes, ptr))
+        bytes = Ref{UInt32}(UInt32(0))
+        flags = Ref{UInt32}(UInt32(0))
+        addrbuf = request.addrbuf
+        addrlen = request.addrlen
+        addrlen[] = Cint(length(addrbuf))
+        rc = GC.@preserve op wsabuf bytes flags addrbuf addrlen begin
+            @gcsafe_ccall _WS2_32.WSARecvFrom(
+                _socket_value(reg.fd)::UInt,
+                wsabuf::Ref{WSABUF},
+                UInt32(1)::UInt32,
+                bytes::Ref{UInt32},
+                flags::Ref{UInt32},
+                pointer(addrbuf)::Ptr{UInt8},
+                Base.unsafe_convert(Ptr{Cint}, addrlen)::Ptr{Cint},
+                _op_ptr(op)::Ptr{Cvoid},
+                C_NULL::Ptr{Cvoid},
+            )::Cint
+        end
+    elseif op.kind == IocpOpKind.SENDTO
+        request = op.request
+        request isa IocpSendToRequest || throw(ArgumentError("missing SendTo request"))
+        wsabuf = Ref(WSABUF(nbytes, ptr))
+        bytes = Ref{UInt32}(UInt32(0))
+        addrbuf = request.addrbuf
+        rc = GC.@preserve op wsabuf bytes addrbuf begin
+            @gcsafe_ccall _WS2_32.WSASendTo(
+                _socket_value(reg.fd)::UInt,
+                wsabuf::Ref{WSABUF},
+                UInt32(1)::UInt32,
+                bytes::Ref{UInt32},
+                UInt32(0)::UInt32,
+                pointer(addrbuf)::Ptr{UInt8},
+                Cint(length(addrbuf))::Cint,
+                _op_ptr(op)::Ptr{Cvoid},
+                C_NULL::Ptr{Cvoid},
+            )::Cint
+        end
     elseif op.kind == IocpOpKind.CONNECT
         request = op.request
         request isa IocpConnectRequest || throw(ArgumentError("missing ConnectEx request"))
@@ -500,7 +560,10 @@ function _submit_iocp_op!(
         _notify_registration!(registration, op.mode)
         return Int32(0)
     end
-    if op.kind == IocpOpKind.READ || op.kind == IocpOpKind.WRITE
+    if op.kind == IocpOpKind.READ || op.kind == IocpOpKind.WRITE ||
+            op.kind == IocpOpKind.RECVFROM || op.kind == IocpOpKind.SENDTO
+        # WSARecv/WSASend/WSARecvFrom/WSASendTo return 0 on synchronous
+        # success, unlike the ConnectEx/AcceptEx BOOL convention handled below.
         if rc == 0
             reg.wait_on_success && return Int32(0)
             @atomic :release op.active = false
@@ -664,6 +727,58 @@ end
 
 function _iocp_finish_write!(registration::Registration)::Tuple{UInt32, Int32}
     return _finish_iocp_mode_with_bytes!(registration, PollMode.WRITE)
+end
+
+function _iocp_submit_recvfrom!(
+        registration::Registration,
+        ptr::Ptr{UInt8},
+        nbytes::UInt32,
+        root,
+        request::IocpRecvFromRequest,
+    )::Int32
+    isassigned(POLLER) || return Int32(Base.Libc.ENOSYS)
+    state = POLLER[]
+    (@atomic :acquire state.running) || return Int32(Base.Libc.EBADF)
+    errno = Int32(0)
+    lock(state.lock)
+    try
+        reg = _lookup_iocp_registration(state, registration)
+        reg === nothing && return Int32(Base.Libc.EBADF)
+        op = reg.read_op
+        errno = _submit_iocp_op!(registration, reg, op; ptr, nbytes, kind=IocpOpKind.RECVFROM, request=request, buffer=root)
+        if errno != Int32(0) && errno != Int32(Base.Libc.EALREADY)
+            _clear_iocp_op!(op)
+        end
+    finally
+        unlock(state.lock)
+    end
+    return errno
+end
+
+function _iocp_submit_sendto!(
+        registration::Registration,
+        ptr::Ptr{UInt8},
+        nbytes::UInt32,
+        root,
+        request::IocpSendToRequest,
+    )::Int32
+    isassigned(POLLER) || return Int32(Base.Libc.ENOSYS)
+    state = POLLER[]
+    (@atomic :acquire state.running) || return Int32(Base.Libc.EBADF)
+    errno = Int32(0)
+    lock(state.lock)
+    try
+        reg = _lookup_iocp_registration(state, registration)
+        reg === nothing && return Int32(Base.Libc.EBADF)
+        op = reg.write_op
+        errno = _submit_iocp_op!(registration, reg, op; ptr, nbytes, kind=IocpOpKind.SENDTO, request=request, buffer=root)
+        if errno != Int32(0) && errno != Int32(Base.Libc.EALREADY)
+            _clear_iocp_op!(op)
+        end
+    finally
+        unlock(state.lock)
+    end
+    return errno
 end
 
 function _iocp_submit_connect!(registration::Registration, addrbuf::Vector{UInt8}, addrlen::Int32)::Int32

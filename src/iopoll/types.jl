@@ -39,6 +39,8 @@ Base.@enum T::UInt8 begin
     ACCEPT = 0x04
     READ = 0x05
     WRITE = 0x06
+    RECVFROM = 0x07
+    SENDTO = 0x08
 end
 end
 

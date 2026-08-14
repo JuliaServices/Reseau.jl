@@ -340,6 +340,52 @@ function set_sockopt_int(fd::Cint, level::Cint, optname::Cint, value::Integer)
     end
 end
 
+
+"""
+    set_sockopt_bytes(fd, level, optname, ptr, len)
+
+Write a socket option wider than a `Cint` (e.g. `SO_LINGER`) from a raw byte
+buffer. The caller must keep the memory behind `ptr` rooted for the call.
+"""
+function set_sockopt_bytes(fd::Cint, level::Cint, optname::Cint, ptr::Ptr{Cvoid}, len::Integer)::Nothing
+    while true
+        ret = @ccall setsockopt(
+            fd::Cint,
+            level::Cint,
+            optname::Cint,
+            ptr::Ptr{Cvoid},
+            SockLen(len)::SockLen,
+        )::Cint
+        ret == 0 && return nothing
+        errno = _errno_i32()
+        errno == Int32(Base.Libc.EINTR) && continue
+        _throw_errno("setsockopt", errno)
+    end
+end
+
+"""
+    get_sockopt_bytes!(fd, level, optname, ptr, len) -> Int
+
+Read a socket option into a raw byte buffer, returning the number of bytes the
+kernel wrote. The caller must keep the memory behind `ptr` rooted for the call.
+"""
+function get_sockopt_bytes!(fd::Cint, level::Cint, optname::Cint, ptr::Ptr{Cvoid}, len::Integer)::Int
+    len_ref = Ref{SockLen}(SockLen(len))
+    while true
+        ret = @ccall getsockopt(
+            fd::Cint,
+            level::Cint,
+            optname::Cint,
+            ptr::Ptr{Cvoid},
+            len_ref::Ref{SockLen},
+        )::Cint
+        ret == 0 && return Int(len_ref[])
+        errno = _errno_i32()
+        errno == Int32(Base.Libc.EINTR) && continue
+        _throw_errno("getsockopt", errno)
+    end
+end
+
 """
     get_socket_error(fd) -> Int32
 

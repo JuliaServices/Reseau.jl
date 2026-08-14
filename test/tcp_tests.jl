@@ -1014,3 +1014,276 @@ end
             @test string(scoped) == "[::1%7]:1"
         end
     end
+
+@testset "TCP stdlib-parity additions" begin
+    @testset "platform socket constants and layouts" begin
+        @test Reseau.SocketOps.IPPROTO_TCP == 6
+        @static if Sys.islinux()
+            @test Reseau.SocketOps.SOL_SOCKET == 1
+            @test Reseau.SocketOps.SO_REUSEADDR == 2
+            @test Reseau.SocketOps.SO_KEEPALIVE == 9
+            @test Reseau.SocketOps.SO_LINGER == 0x000d
+            @test Reseau.SocketOps.SO_RCVBUF == 0x0008
+            @test Reseau.SocketOps.SO_SNDBUF == 0x0007
+            @test Reseau.SocketOps.TCP_KEEPIDLE == 4
+            @test Reseau.SocketOps.TCP_KEEPINTVL == 5
+            @test Reseau.SocketOps.TCP_KEEPCNT == 6
+            @test Reseau.SocketOps.TCP_QUICKACK == 12
+        elseif Sys.iswindows()
+            @test Reseau.SocketOps.SOL_SOCKET == 0xffff
+            @test Reseau.SocketOps.SO_REUSEADDR == 4
+            @test Reseau.SocketOps.SO_KEEPALIVE == 8
+            @test Reseau.SocketOps.SO_LINGER == 0x0080
+            @test Reseau.SocketOps.SO_RCVBUF == 0x1002
+            @test Reseau.SocketOps.SO_SNDBUF == 0x1001
+            @test Reseau.SocketOps.TCP_KEEPIDLE == 3
+            @test Reseau.SocketOps.TCP_KEEPINTVL == 17
+            @test Reseau.SocketOps.TCP_KEEPCNT == 16
+        elseif Sys.isapple()
+            @test Reseau.SocketOps.SOL_SOCKET == 0xffff
+            @test Reseau.SocketOps.SO_REUSEADDR == 4
+            @test Reseau.SocketOps.SO_KEEPALIVE == 8
+            @test Reseau.SocketOps.SO_LINGER == 0x0080
+            @test Reseau.SocketOps.SO_RCVBUF == 0x1002
+            @test Reseau.SocketOps.SO_SNDBUF == 0x1001
+            @test Reseau.SocketOps.TCP_KEEPIDLE == 0x10
+            @test Reseau.SocketOps.TCP_KEEPINTVL == 0x101
+            @test Reseau.SocketOps.TCP_KEEPCNT == 0x102
+        elseif Sys.isnetbsd()
+            @test Reseau.SocketOps.TCP_KEEPIDLE == 3
+            @test Reseau.SocketOps.TCP_KEEPINTVL == 5
+            @test Reseau.SocketOps.TCP_KEEPCNT == 6
+        elseif Sys.isopenbsd()
+            @test Reseau.SocketOps.TCP_KEEPIDLE == -1
+            @test Reseau.SocketOps.TCP_KEEPINTVL == -1
+            @test Reseau.SocketOps.TCP_KEEPCNT == -1
+        else
+            # FreeBSD and DragonFly BSD use these values.
+            @test Reseau.SocketOps.SOL_SOCKET == 0xffff
+            @test Reseau.SocketOps.SO_REUSEADDR == 4
+            @test Reseau.SocketOps.SO_KEEPALIVE == 8
+            @test Reseau.SocketOps.SO_LINGER == 0x0080
+            @test Reseau.SocketOps.SO_RCVBUF == 0x1002
+            @test Reseau.SocketOps.SO_SNDBUF == 0x1001
+            @test Reseau.SocketOps.TCP_KEEPIDLE == 0x100
+            @test Reseau.SocketOps.TCP_KEEPINTVL == 0x200
+            @test Reseau.SocketOps.TCP_KEEPCNT == 0x400
+        end
+
+        @static if Sys.iswindows()
+            @test sizeof(Reseau.SocketOps.Linger) == 4
+            @test fieldtype(Reseau.SocketOps.Linger, 1) === UInt16
+            @test fieldtype(Reseau.SocketOps.Linger, 2) === UInt16
+        else
+            @test sizeof(Reseau.SocketOps.Linger) == 8
+            @test fieldtype(Reseau.SocketOps.Linger, 1) === Cint
+            @test fieldtype(Reseau.SocketOps.Linger, 2) === Cint
+        end
+    end
+
+    @testset "single-string listen" begin
+        listener = TCP.listen("127.0.0.1:0"; backlog = 64)
+        addr = TCP.addr(listener)
+        @test addr isa TCP.SocketAddrV4
+        @test addr.port != 0
+        conn = TCP.connect(addr)
+        server = TCP.accept(listener)
+        write(conn, b"shorthand")
+        buf = Vector{UInt8}(undef, 9)
+        read!(server, buf)
+        @test buf == b"shorthand"
+        close(conn)
+        close(server)
+        close(listener)
+    end
+
+    @testset "listen reuseaddr semantics" begin
+        listener = TCP.listen(TCP.loopback_addr(0); reuseaddr = true)
+        got = Reseau.SocketOps.get_sockopt_int(
+            listener.fd.pfd.sysfd,
+            Reseau.SocketOps.SOL_SOCKET,
+            Reseau.SocketOps.SO_REUSEADDR,
+        )
+        @static if Sys.iswindows()
+            # reuseaddr is a deliberate no-op on Windows: SO_REUSEADDR there
+            # means "bind over an active listener", not TIME_WAIT rebinding.
+            @test got == 0
+        else
+            @test got != 0
+        end
+        close(listener)
+        bare = TCP.listen(TCP.loopback_addr(0); reuseaddr = false)
+        @test Reseau.SocketOps.get_sockopt_int(
+            bare.fd.pfd.sysfd,
+            Reseau.SocketOps.SOL_SOCKET,
+            Reseau.SocketOps.SO_REUSEADDR,
+        ) == 0
+        close(bare)
+    end
+
+    @testset "listenany" begin
+        taken = TCP.listen(TCP.loopback_addr(0))
+        hint_port = Int((TCP.addr(taken)::TCP.SocketAddrV4).port)
+        port, listener = TCP.listenany(hint_port)
+        @test port != hint_port
+        @test isopen(listener)
+        conn = TCP.connect(TCP.loopback_addr(Int(port)))
+        server = TCP.accept(listener)
+        close(conn)
+        close(server)
+        close(listener)
+        close(taken)
+
+        eport, elistener = TCP.listenany(0)
+        @test eport != 0
+        close(elistener)
+
+        aport, alistener = TCP.listenany(TCP.loopback_addr(0))
+        @test aport != 0
+        close(alistener)
+    end
+
+    @testset "keepalive tuning" begin
+        listener = TCP.listen(TCP.loopback_addr(0))
+        conn = TCP.connect(TCP.addr(listener))
+        server = TCP.accept(listener)
+        TCP.set_keepalive!(conn, true; idle_secs = 30, interval_secs = 7, count = 3)
+        sysfd = conn.fd.pfd.sysfd
+        @test Reseau.SocketOps.get_sockopt_int(sysfd, Reseau.SocketOps.SOL_SOCKET, Reseau.SocketOps.SO_KEEPALIVE) != 0
+        @test Reseau.SocketOps.get_sockopt_int(sysfd, Reseau.SocketOps.IPPROTO_TCP, Reseau.SocketOps.TCP_KEEPIDLE) == 30
+        @test Reseau.SocketOps.get_sockopt_int(sysfd, Reseau.SocketOps.IPPROTO_TCP, Reseau.SocketOps.TCP_KEEPINTVL) == 7
+        @test Reseau.SocketOps.get_sockopt_int(sysfd, Reseau.SocketOps.IPPROTO_TCP, Reseau.SocketOps.TCP_KEEPCNT) == 3
+        TCP.set_keepalive!(conn, false)
+        @test Reseau.SocketOps.get_sockopt_int(sysfd, Reseau.SocketOps.SOL_SOCKET, Reseau.SocketOps.SO_KEEPALIVE) == 0
+        @test_throws ArgumentError TCP.set_keepalive!(conn; idle_secs = 0)
+        @test_throws ArgumentError TCP.set_keepalive!(conn; interval_secs = -1)
+        @test_throws ArgumentError TCP.set_keepalive!(conn; count = 0)
+        @test_throws ArgumentError TCP.set_keepalive!(conn; count = Int(typemax(Cint)) + 1)
+        @test Reseau.SocketOps.get_sockopt_int(sysfd, Reseau.SocketOps.SOL_SOCKET, Reseau.SocketOps.SO_KEEPALIVE) == 0
+        close(conn)
+        close(server)
+        close(listener)
+    end
+
+    @testset "linger" begin
+        listener = TCP.listen(TCP.loopback_addr(0))
+        conn = TCP.connect(TCP.addr(listener))
+        server = TCP.accept(listener)
+        sysfd = conn.fd.pfd.sysfd
+        read_linger = () -> begin
+            lg = Ref(Reseau.SocketOps.Linger(0, 0))
+            GC.@preserve lg Reseau.SocketOps.get_sockopt_bytes!(
+                sysfd,
+                Reseau.SocketOps.SOL_SOCKET,
+                Reseau.SocketOps.SO_LINGER,
+                Ptr{Cvoid}(Base.unsafe_convert(Ptr{Reseau.SocketOps.Linger}, lg)),
+                sizeof(Reseau.SocketOps.Linger),
+            )
+            lg[]
+        end
+        TCP.set_linger!(conn, 4)
+        lg = read_linger()
+        @test lg.l_onoff != 0
+        @test lg.l_linger == 4
+        TCP.set_linger!(conn, -1)
+        @test read_linger().l_onoff == 0
+        TCP.set_linger!(conn, 0)
+        lg = read_linger()
+        @test lg.l_onoff != 0
+        @test lg.l_linger == 0
+        TCP.set_linger!(conn, -1)
+        @test_throws ArgumentError TCP.set_linger!(conn, 65536)
+        close(conn)
+        close(server)
+        close(listener)
+    end
+
+    @testset "buffer sizes" begin
+        listener = TCP.listen(TCP.loopback_addr(0))
+        conn = TCP.connect(TCP.addr(listener))
+        server = TCP.accept(listener)
+        sysfd = conn.fd.pfd.sysfd
+        TCP.set_read_buffer!(conn, 65536)
+        TCP.set_write_buffer!(conn, 65536)
+        # Kernels may round or (Linux) double the requested size, but never
+        # shrink below the request.
+        @test Reseau.SocketOps.get_sockopt_int(sysfd, Reseau.SocketOps.SOL_SOCKET, Reseau.SocketOps.SO_RCVBUF) >= 65536
+        @test Reseau.SocketOps.get_sockopt_int(sysfd, Reseau.SocketOps.SOL_SOCKET, Reseau.SocketOps.SO_SNDBUF) >= 65536
+        @test_throws ArgumentError TCP.set_read_buffer!(conn, 0)
+        @test_throws ArgumentError TCP.set_write_buffer!(conn, -1)
+        @test_throws ArgumentError TCP.set_read_buffer!(conn, Int(typemax(Cint)) + 1)
+        close(conn)
+        close(server)
+        close(listener)
+    end
+
+    @testset "quickack" begin
+        listener = TCP.listen(TCP.loopback_addr(0))
+        conn = TCP.connect(TCP.addr(listener))
+        server = TCP.accept(listener)
+        TCP.set_quickack!(conn)
+        TCP.set_quickack!(conn, false)
+        @static if Sys.islinux()
+            TCP.set_quickack!(conn, true)
+            @test Reseau.SocketOps.get_sockopt_int(
+                conn.fd.pfd.sysfd,
+                Reseau.SocketOps.IPPROTO_TCP,
+                Reseau.SocketOps.TCP_QUICKACK,
+            ) != 0
+        end
+        close(conn)
+        @test_throws Reseau.IOPoll.NetClosingError TCP.set_quickack!(conn)
+        close(server)
+        close(listener)
+    end
+
+    @testset "rawfd" begin
+        listener = TCP.listen(TCP.loopback_addr(0))
+        conn = TCP.connect(TCP.addr(listener))
+        server = TCP.accept(listener)
+        raw = TCP.rawfd(conn)
+        lraw = TCP.rawfd(listener)
+        @static if Sys.iswindows()
+            @test raw isa Base.WindowsRawSocket
+            @test lraw isa Base.WindowsRawSocket
+        else
+            @test raw isa RawFD
+            @test lraw isa RawFD
+            @test raw != lraw
+        end
+        close(conn)
+        @test_throws Reseau.IOPoll.NetClosingError TCP.rawfd(conn)
+        close(server)
+        close(listener)
+    end
+
+    @testset "finalizer reclaims leaked descriptors" begin
+        listener = TCP.listen(TCP.loopback_addr(0))
+        conn = TCP.connect(TCP.addr(listener))
+        server = TCP.accept(listener)
+
+        # The TCP metadata wrapper may become unreachable while an operation
+        # still retains its poll FD. Finalizing that wrapper must not close the
+        # live descriptor.
+        finalize(conn.fd)
+        yield()
+        @test isopen(conn)
+
+        # Trigger the GC safety net deterministically. The finalizer schedules
+        # the blocking close on a task; spin-yield until it lands (park
+        # detection pattern from test/README.md).
+        finalize(conn.fd.pfd)
+        while isopen(conn)
+            yield()
+        end
+        @test !isopen(conn)
+        close(conn)  # explicit close after finalizer-close stays idempotent
+
+        # A finalizer firing after an explicit close is a no-op.
+        close(server)
+        finalize(server.fd.pfd)
+        @test !isopen(server)
+
+        close(listener)
+    end
+end

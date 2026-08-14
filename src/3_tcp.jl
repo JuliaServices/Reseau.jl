@@ -18,6 +18,11 @@ module TCP
 using ..Reseau: ByteMemory, MutableByteBuffer
 using ..Reseau.IOPoll
 using ..Reseau.SocketOps
+using ..Reseau.NetCommon: SocketAddr, SocketAddrV4, SocketAddrV6, SocketEndpoint, FD,
+    loopback_addr, any_addr, loopback_addr6, any_addr6,
+    _addr_family, _to_sockaddr, _from_sockaddr, _format_ipv6, _new_netfd, open_net_fd!,
+    _set_local_addr!, _set_remote_addr!, _finalize_connected_addrs!,
+    _is_temporary_unconnected, _set_ipv6_only!, _show_endpoint
 
 """
     DeadlineExceededError
@@ -54,204 +59,6 @@ Accept one inbound `Conn` from a `TCP.Listener`.
 """
 function accept end
 
-"""
-    SocketAddr
-
-Abstract network endpoint type for TCP socket addresses.
-"""
-abstract type SocketAddr end
-
-"""
-    SocketAddrV4
-
-IPv4 endpoint snapshot.
-
-The address bytes are stored in presentation order and the port is stored in
-host byte order. Conversion to platform sockaddr structs happens lazily when a
-socket operation actually needs one.
-"""
-struct SocketAddrV4 <: SocketAddr
-    ip::NTuple{4, UInt8}
-    port::UInt16
-    function SocketAddrV4(ip::NTuple{4, UInt8}, port::Integer)
-        (port < 0 || port > 0xffff) && throw(ArgumentError("port must be in [0, 65535]"))
-        return new(ip, UInt16(port))
-    end
-end
-
-"""
-    SocketAddrV6
-
-IPv6 endpoint snapshot.
-
-`scope_id` is used for scoped link-local addresses and is preserved all the way
-down to the platform sockaddr representation so bind/connect can target the same
-interface the caller selected.
-"""
-struct SocketAddrV6 <: SocketAddr
-    ip::NTuple{16, UInt8}
-    port::UInt16
-    scope_id::UInt32
-    function SocketAddrV6(ip::NTuple{16, UInt8}, port::Integer; scope_id::Integer = 0)
-        (port < 0 || port > 0xffff) && throw(ArgumentError("port must be in [0, 65535]"))
-        (scope_id < 0 || scope_id > typemax(UInt32)) && throw(ArgumentError("scope_id must be in [0, 2^32-1]"))
-        return new(ip, UInt16(port), UInt32(scope_id))
-    end
-end
-
-const SocketEndpoint = Union{SocketAddrV4, SocketAddrV6}
-
-function SocketAddrV4(ip::NTuple{4, <:Integer}, port::Integer)
-    return SocketAddrV4((UInt8(ip[1]), UInt8(ip[2]), UInt8(ip[3]), UInt8(ip[4])), port)
-end
-
-function SocketAddrV6(ip::NTuple{16, <:Integer}, port::Integer; scope_id::Integer = 0)
-    return SocketAddrV6((
-            UInt8(ip[1]), UInt8(ip[2]), UInt8(ip[3]), UInt8(ip[4]),
-            UInt8(ip[5]), UInt8(ip[6]), UInt8(ip[7]), UInt8(ip[8]),
-            UInt8(ip[9]), UInt8(ip[10]), UInt8(ip[11]), UInt8(ip[12]),
-            UInt8(ip[13]), UInt8(ip[14]), UInt8(ip[15]), UInt8(ip[16]),
-        ),
-        port;
-        scope_id = scope_id,
-    )
-end
-
-"""
-    loopback_addr(port) -> SocketAddrV4
-
-Convenience constructor for `127.0.0.1:port`.
-"""
-function loopback_addr(port::Integer)::SocketAddrV4
-    return SocketAddrV4((UInt8(127), UInt8(0), UInt8(0), UInt8(1)), port)
-end
-
-"""
-    any_addr(port) -> SocketAddrV4
-
-Convenience constructor for `0.0.0.0:port`, typically used for wildcard binds.
-"""
-function any_addr(port::Integer)::SocketAddrV4
-    return SocketAddrV4((UInt8(0), UInt8(0), UInt8(0), UInt8(0)), port)
-end
-
-"""
-    loopback_addr6(port; scope_id=0) -> SocketAddrV6
-
-Convenience constructor for `[::1]:port`.
-"""
-function loopback_addr6(port::Integer; scope_id::Integer = 0)::SocketAddrV6
-    return SocketAddrV6((
-            UInt8(0), UInt8(0), UInt8(0), UInt8(0),
-            UInt8(0), UInt8(0), UInt8(0), UInt8(0),
-            UInt8(0), UInt8(0), UInt8(0), UInt8(0),
-            UInt8(0), UInt8(0), UInt8(0), UInt8(1),
-        ),
-        port;
-        scope_id = scope_id,
-    )
-end
-
-"""
-    any_addr6(port; scope_id=0) -> SocketAddrV6
-
-Convenience constructor for the IPv6 wildcard bind address `[::]:port`.
-"""
-function any_addr6(port::Integer; scope_id::Integer = 0)::SocketAddrV6
-    return SocketAddrV6((
-            UInt8(0), UInt8(0), UInt8(0), UInt8(0),
-            UInt8(0), UInt8(0), UInt8(0), UInt8(0),
-            UInt8(0), UInt8(0), UInt8(0), UInt8(0),
-            UInt8(0), UInt8(0), UInt8(0), UInt8(0),
-        ),
-        port;
-        scope_id = scope_id,
-    )
-end
-
-function _format_ipv6(ip::NTuple{16, UInt8})::String
-    groups = UInt16[]
-    for i in 1:8
-        hi = UInt16(ip[(2 * i) - 1])
-        lo = UInt16(ip[2 * i])
-        push!(groups, (hi << 8) | lo)
-    end
-    best_start = 0
-    best_len = 0
-    i = 1
-    while i <= length(groups)
-        if groups[i] == 0
-            j = i
-            while j <= length(groups) && groups[j] == 0
-                j += 1
-            end
-            run_len = j - i
-            if run_len > best_len && run_len >= 2
-                best_start = i
-                best_len = run_len
-            end
-            i = j
-        else
-            i += 1
-        end
-    end
-    if best_len >= 2
-        left = [string(groups[idx], base = 16) for idx in 1:(best_start - 1)]
-        right_start = best_start + best_len
-        right = [string(groups[idx], base = 16) for idx in right_start:length(groups)]
-        if isempty(left) && isempty(right)
-            return "::"
-        elseif isempty(left)
-            return "::" * join(right, ":")
-        elseif isempty(right)
-            return join(left, ":") * "::"
-        else
-            return join(left, ":") * "::" * join(right, ":")
-        end
-    end
-    return join((string(group, base = 16) for group in groups), ":")
-end
-
-function Base.show(io::IO, addr::SocketAddrV4)
-    print(io, string(addr))
-    return nothing
-end
-
-function Base.show(io::IO, addr::SocketAddrV6)
-    print(io, string(addr))
-    return nothing
-end
-
-function Base.string(addr::SocketAddrV4)
-    return "$(addr.ip[1]).$(addr.ip[2]).$(addr.ip[3]).$(addr.ip[4]):$(addr.port)"
-end
-
-function Base.string(addr::SocketAddrV6)
-    if addr.scope_id != 0
-        return "[$(_format_ipv6(addr.ip))%$(addr.scope_id)]:$(addr.port)"
-    end
-    return "[$(_format_ipv6(addr.ip))]:$(addr.port)"
-end
-
-"""
-    FD
-
-Internal socket owner built on `IOPoll.FD`.
-
-This is the internal object that owns the actual socket. Public callers usually
-interact with `Conn` or `Listener`, but the transport implementation keeps the
-extra metadata here so it can cache local/remote addresses, remember the socket
-family, and share shutdown/close/deadline behavior with the poll layer.
-"""
-mutable struct FD
-    pfd::IOPoll.FD
-    family::Cint
-    sotype::Cint
-    net::Symbol
-    @atomic is_connected::Bool
-    laddr::Union{Nothing, SocketAddr}
-    raddr::Union{Nothing, SocketAddr}
-end
 
 """
     Conn
@@ -287,29 +94,6 @@ struct ConnectCanceledError <: Exception end
 @inline _connect_wait_register!(::Any, ::FD) = nothing
 @inline _connect_wait_unregister!(::Any, ::FD) = nothing
 
-@inline _addr_family(::SocketAddrV4)::Cint = SocketOps.AF_INET
-@inline _addr_family(::SocketAddrV6)::Cint = SocketOps.AF_INET6
-
-@inline function _to_sockaddr(addr::SocketAddrV4)::SocketOps.SockAddrIn
-    return SocketOps.sockaddr_in(addr.ip, Int(addr.port))
-end
-
-@inline function _to_sockaddr(addr::SocketAddrV6)::SocketOps.SockAddrIn6
-    return SocketOps.sockaddr_in6(addr.ip, Int(addr.port); scope_id = Int(addr.scope_id))
-end
-
-@inline function _from_sockaddr(addr::SocketOps.SockAddrIn)::SocketAddrV4
-    return SocketAddrV4(SocketOps.sockaddr_in_ip(addr), Int(SocketOps.sockaddr_in_port(addr)))
-end
-
-@inline function _from_sockaddr(addr::SocketOps.SockAddrIn6)::SocketAddrV6
-    return SocketAddrV6(
-        SocketOps.sockaddr_in6_ip(addr),
-        Int(SocketOps.sockaddr_in6_port(addr));
-        scope_id = Int(SocketOps.sockaddr_in6_scopeid(addr)),
-    )
-end
-
 @inline function _set_remote_addr_from_accept!(fd::FD, peer_addr::SocketOps.AcceptPeer)
     if peer_addr isa SocketOps.SockAddrIn
         fd.raddr = _from_sockaddr(peer_addr::SocketOps.SockAddrIn)
@@ -329,59 +113,6 @@ end
 
 @inline function _is_accept_retry_errno(errno::Int32)::Bool
     return errno == Int32(Base.Libc.EINTR) || errno == Int32(Base.Libc.ECONNABORTED)
-end
-
-@inline function _is_temporary_unconnected(err::SystemError)::Bool
-    return err.errnum == Int(Base.Libc.ENOTCONN) || err.errnum == Int(Base.Libc.EINVAL)
-end
-
-function _new_netfd(
-        sysfd::SocketOps.SocketFD;
-        family::Cint = SocketOps.AF_INET,
-        sotype::Cint = SocketOps.SOCK_STREAM,
-        net::Symbol = :tcp,
-        is_connected::Bool = false,
-    )::FD
-    pfd = IOPoll.FD(sysfd; is_stream = true, zero_read_is_eof = true, is_file = false)
-    return FD(pfd, family, sotype, net, is_connected, nothing, nothing)
-end
-
-function _set_local_addr!(fd::FD)
-    if fd.family == SocketOps.AF_INET6
-        fd.laddr = _from_sockaddr(SocketOps.get_socket_name_in6(fd.pfd.sysfd))
-        return nothing
-    end
-    fd.laddr = _from_sockaddr(SocketOps.get_socket_name_in(fd.pfd.sysfd))
-    return nothing
-end
-
-function _set_remote_addr!(fd::FD)
-    if fd.family == SocketOps.AF_INET6
-        fd.raddr = _from_sockaddr(SocketOps.get_peer_name_in6(fd.pfd.sysfd))
-        return nothing
-    end
-    fd.raddr = _from_sockaddr(SocketOps.get_peer_name_in(fd.pfd.sysfd))
-    return nothing
-end
-
-function _finalize_connected_addrs!(fd::FD, fallback_remote::SocketAddr)
-    # `getpeername` can lag slightly behind the moment the kernel considers a
-    # non-blocking connect complete. We optimistically refresh both ends, but
-    # fall back to the requested remote address when the peer lookup is only
-    # temporarily unavailable.
-    _set_local_addr!(fd)
-    if fd.raddr === nothing
-        try
-            _set_remote_addr!(fd)
-        catch err
-            if !(err isa SystemError) || !_is_temporary_unconnected(err)
-                rethrow(err)
-            end
-            fd.raddr = fallback_remote
-        end
-    end
-    @atomic :release fd.is_connected = true
-    return nothing
 end
 
 function _apply_default_tcp_opts!(fd::FD)
@@ -506,31 +237,7 @@ function open_tcp_fd!(;
         family::Cint = SocketOps.AF_INET,
         net::Symbol = :tcp,
     )::FD
-    sysfd = SocketOps.open_socket(family, SocketOps.SOCK_STREAM)
-    return _new_netfd(sysfd; family = family, sotype = SocketOps.SOCK_STREAM, net = net, is_connected = false)
-end
-
-@inline function _set_ipv6_only!(fd::FD, enabled::Bool)
-    @static if Sys.isopenbsd() || Sys.isdragonfly()
-        # These kernels enforce IPv6-only sockets and reject attempts to change
-        # IPV6_V6ONLY. This is the same capability exception Go applies.
-        return nothing
-    else
-        try
-            SocketOps.set_sockopt_int(
-                fd.pfd.sysfd,
-                SocketOps.IPPROTO_IPV6,
-                SocketOps.IPV6_V6ONLY,
-                enabled ? 1 : 0,
-            )
-        catch err
-            ex = err::Exception
-            # Go parity: some operating systems never admit this option, so a
-            # setsockopt failure is deliberately ignored.
-            ex isa SystemError || rethrow(ex)
-        end
-        return nothing
-    end
+    return open_net_fd!(; family = family, sotype = SocketOps.SOCK_STREAM, net = net)
 end
 
 @inline function _connect_socketaddr_family(
@@ -786,6 +493,12 @@ Create a TCP listener from a bound local address.
 
 This is the direct-address equivalent of the `listen(network, address; ...)`
 overloads on the same `TCP.listen` generic.
+
+`reuseaddr` sets `SO_REUSEADDR` so a restarting server can rebind a port whose
+previous listener is still in TIME_WAIT. On Windows it is a deliberate no-op:
+Windows allows the TIME_WAIT rebind without the option, and `SO_REUSEADDR`
+there instead permits binding over an *active* listener (silently starving it
+of connections). Go and libuv make the same choice.
 """
 function _listen_socketaddr_impl(
         local_addr::SocketAddr,
@@ -797,7 +510,16 @@ function _listen_socketaddr_impl(
     fd = open_tcp_fd!(; family = family, net = network)
     try
         family == SocketOps.AF_INET6 && _set_ipv6_only!(fd, network === :tcp6)
-        reuseaddr && SocketOps.set_sockopt_int(fd.pfd.sysfd, SocketOps.SOL_SOCKET, SocketOps.SO_REUSEADDR, 1)
+        @static if !Sys.iswindows()
+            # POSIX SO_REUSEADDR permits rebinding a port stuck in TIME_WAIT.
+            # Windows gives the same TIME_WAIT rebinding without the option,
+            # and setting it there instead means "bind over an active
+            # listener" — a hijack that silently starves the original of
+            # connections. Go and libuv likewise never set SO_REUSEADDR on
+            # Windows TCP listeners, so `reuseaddr` is a deliberate no-op
+            # there.
+            reuseaddr && SocketOps.set_sockopt_int(fd.pfd.sysfd, SocketOps.SOL_SOCKET, SocketOps.SO_REUSEADDR, 1)
+        end
         SocketOps.bind_socket(fd.pfd.sysfd, _to_sockaddr(local_addr))
         SocketOps.listen_socket(fd.pfd.sysfd, backlog)
         IOPoll.register!(fd.pfd)
@@ -816,6 +538,53 @@ function listen(local_addr::SocketAddr; backlog::Integer = 128, reuseaddr::Bool 
         backlog = backlog,
         reuseaddr = reuseaddr,
     )
+end
+
+@inline _with_port(addr::SocketAddrV4, port::Integer)::SocketAddrV4 = SocketAddrV4(addr.ip, port)
+@inline function _with_port(addr::SocketAddrV6, port::Integer)::SocketAddrV6
+    return SocketAddrV6(addr.ip, port; scope_id = Int(addr.scope_id))
+end
+
+@inline function _is_port_taken_errno(errnum::Integer)::Bool
+    return errnum == Int(Base.Libc.EADDRINUSE) || errnum == Int(Base.Libc.EACCES)
+end
+
+"""
+    listenany(hint::Integer; backlog=128, reuseaddr=true) -> (UInt16, Listener)
+    listenany(hint::SocketAddr; backlog=128, reuseaddr=true) -> (UInt16, Listener)
+
+Bind a listener on the first available port at or above `hint`'s port,
+returning the bound port and the listener (the `Sockets.listenany` idiom).
+The integer form binds to the IPv4 loopback address.
+
+Ports that are in use (`EADDRINUSE`) or forbidden (`EACCES`) are skipped by
+incrementing the port; running out of ports rethrows the last error. A hint
+port of `0` binds an ephemeral port directly.
+
+`reuseaddr` follows [`listen`](@ref) semantics, including its Windows no-op:
+exclusive Windows binds are exactly what keeps `EADDRINUSE` (and therefore
+this availability probe) reliable there.
+"""
+function listenany(hint::Integer; backlog::Integer = 128, reuseaddr::Bool = true)::Tuple{UInt16, Listener}
+    return listenany(loopback_addr(hint); backlog = backlog, reuseaddr = reuseaddr)
+end
+
+function listenany(hint::SocketAddr; backlog::Integer = 128, reuseaddr::Bool = true)::Tuple{UInt16, Listener}
+    addr = hint
+    while true
+        listener = try
+            listen(addr; backlog = backlog, reuseaddr = reuseaddr)
+        catch err
+            ex = err::Exception
+            (ex isa SystemError && _is_port_taken_errno(ex.errnum)) || rethrow(ex)
+            next_port = Int(addr.port) + 1
+            next_port > 0xffff && rethrow(ex)
+            addr = _with_port(addr, next_port)
+            continue
+        end
+        bound = local_addr(listener)
+        return ((bound::SocketEndpoint).port, listener)
+    end
 end
 
 """
@@ -1347,18 +1116,161 @@ function set_nodelay!(conn::Conn, enabled::Bool = true)
 end
 
 """
-    set_keepalive!(conn, enabled=true)
+    set_keepalive!(conn, enabled=true; idle_secs=nothing, interval_secs=nothing, count=nothing)
 
-Enable or disable `SO_KEEPALIVE` on `conn`.
+Enable or disable `SO_KEEPALIVE` on `conn`, optionally tuning the probe
+schedule (the shape of Go's `KeepAliveConfig`):
+
+- `idle_secs`: idle time before the first probe (`TCP_KEEPIDLE`;
+  `TCP_KEEPALIVE` on Darwin)
+- `interval_secs`: time between unanswered probes (`TCP_KEEPINTVL`)
+- `count`: unanswered probes before the connection is dropped (`TCP_KEEPCNT`)
+
+Tuning values are applied only when provided. Platforms without a given knob
+surface the kernel's `SystemError` (notably OpenBSD, and Windows releases
+before Server 2016 / Windows 10 1709).
 """
-function set_keepalive!(conn::Conn, enabled::Bool = true)
+function set_keepalive!(
+        conn::Conn,
+        enabled::Bool = true;
+        idle_secs::Union{Nothing, Integer} = nothing,
+        interval_secs::Union{Nothing, Integer} = nothing,
+        count::Union{Nothing, Integer} = nothing,
+    )
+    idle = _positive_sockopt_value("idle_secs", idle_secs)
+    interval = _positive_sockopt_value("interval_secs", interval_secs)
+    probes = _positive_sockopt_value("count", count)
     IOPoll.set_sockopt_int!(
         conn.fd.pfd,
         SocketOps.SOL_SOCKET,
         SocketOps.SO_KEEPALIVE,
         enabled ? 1 : 0,
     )
+    if idle !== nothing
+        IOPoll.set_sockopt_int!(conn.fd.pfd, SocketOps.IPPROTO_TCP, SocketOps.TCP_KEEPIDLE, idle)
+    end
+    if interval !== nothing
+        IOPoll.set_sockopt_int!(conn.fd.pfd, SocketOps.IPPROTO_TCP, SocketOps.TCP_KEEPINTVL, interval)
+    end
+    if probes !== nothing
+        IOPoll.set_sockopt_int!(conn.fd.pfd, SocketOps.IPPROTO_TCP, SocketOps.TCP_KEEPCNT, probes)
+    end
     return nothing
+end
+
+@inline _positive_sockopt_value(::AbstractString, ::Nothing)::Nothing = nothing
+
+function _positive_sockopt_value(name::AbstractString, value::Integer)::Cint
+    0 < value <= typemax(Cint) ||
+        throw(ArgumentError("$name must be in [1, $(typemax(Cint))]"))
+    return Cint(value)
+end
+
+"""
+    set_quickack!(conn, enabled=true)
+
+Toggle `TCP_QUICKACK` (Linux). On other platforms this is a silent no-op,
+matching `Sockets.quickack`, so cross-platform callers can set it
+unconditionally. The kernel may clear the flag again after some transfers;
+latency-sensitive callers re-assert it as needed.
+"""
+function set_quickack!(conn::Conn, enabled::Bool = true)
+    @static if Sys.islinux()
+        IOPoll.set_sockopt_int!(
+            conn.fd.pfd,
+            SocketOps.IPPROTO_TCP,
+            SocketOps.TCP_QUICKACK,
+            enabled ? 1 : 0,
+        )
+    else
+        # Match Sockets' no-op while preserving its open-socket check.
+        IOPoll._with_fd_ref(conn.fd.pfd) do _
+            nothing
+        end
+    end
+    return nothing
+end
+
+"""
+    set_linger!(conn, timeout_secs)
+
+Configure `SO_LINGER`, following Go's `SetLinger`: a negative timeout disables
+lingering (`close` returns immediately and the OS flushes in the background —
+the default), `0` discards unsent data on close with a RST, and a positive
+timeout asks the OS to keep sending in the background. On some systems,
+including Linux, a positive timeout may block `close` until data is sent or
+discarded. Remaining data may be discarded after the timeout on some systems.
+Nonnegative timeouts must not exceed 65535 seconds.
+"""
+function set_linger!(conn::Conn, timeout_secs::Integer)
+    lg = if timeout_secs < 0
+        SocketOps.Linger(0, 0)
+    else
+        timeout_secs > 0xffff && throw(ArgumentError("linger timeout must be at most 65535 seconds"))
+        SocketOps.Linger(1, timeout_secs)
+    end
+    IOPoll.set_sockopt_bytes!(conn.fd.pfd, SocketOps.SOL_SOCKET, SocketOps.SO_LINGER, Ref(lg))
+    return nothing
+end
+
+"""
+    set_read_buffer!(conn, nbytes)
+
+Set the kernel receive buffer size (`SO_RCVBUF`). The kernel may round the
+value, enforce minimums, or (on Linux) double it to leave bookkeeping room.
+"""
+function set_read_buffer!(conn::Conn, nbytes::Integer)
+    size = _positive_sockopt_value("buffer size", nbytes)
+    IOPoll.set_sockopt_int!(conn.fd.pfd, SocketOps.SOL_SOCKET, SocketOps.SO_RCVBUF, size)
+    return nothing
+end
+
+"""
+    set_write_buffer!(conn, nbytes)
+
+Set the kernel send buffer size (`SO_SNDBUF`). The kernel may round the
+value, enforce minimums, or (on Linux) double it to leave bookkeeping room.
+"""
+function set_write_buffer!(conn::Conn, nbytes::Integer)
+    size = _positive_sockopt_value("buffer size", nbytes)
+    IOPoll.set_sockopt_int!(conn.fd.pfd, SocketOps.SOL_SOCKET, SocketOps.SO_SNDBUF, size)
+    return nothing
+end
+
+"""
+    rawfd(conn) -> RawFD or Base.WindowsRawSocket
+
+Return the OS-level socket descriptor backing `conn` (a `RawFD` on POSIX, a
+`Base.WindowsRawSocket` on Windows) for FFI and interop.
+
+Reseau retains ownership: the descriptor is non-blocking and registered with
+the internal poller; callers must not close it, change its flags, or use it
+after `close(conn)`. The result is a borrowed snapshot. Keep `conn` reachable,
+for example with `GC.@preserve`, and prevent a concurrent `close(conn)` for the
+full external operation. Throws `NetClosingError` if the socket is already
+closing.
+"""
+function rawfd(conn::Conn)
+    return _rawfd(conn.fd)
+end
+
+"""
+    rawfd(listener) -> RawFD or Base.WindowsRawSocket
+
+Listener variant of [`rawfd`](@ref). The same ownership rules apply.
+"""
+function rawfd(listener::Listener)
+    return _rawfd(listener.fd)
+end
+
+function _rawfd(fd::FD)
+    return IOPoll._with_fd_ref(fd.pfd) do sysfd
+        @static if Sys.iswindows()
+            return Base.WindowsRawSocket(Ptr{Cvoid}(sysfd))
+        else
+            return RawFD(sysfd)
+        end
+    end
 end
 
 """
@@ -1397,15 +1309,6 @@ Return the listener's bound local endpoint, if known.
 """
 function addr(listener::Listener)::Union{Nothing, SocketAddr}
     return listener.fd.laddr
-end
-
-@inline function _show_endpoint(io::IO, endpoint::Union{Nothing, SocketAddr})
-    if endpoint === nothing
-        print(io, "?")
-    else
-        show(io, endpoint)
-    end
-    return nothing
 end
 
 @inline _show_state(conn::Conn) = IOPoll._fdlock_closing(conn.fd.pfd.fdlock) ? "closed" : "open"

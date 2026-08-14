@@ -15,6 +15,7 @@ makedocs(
     pages = [
         "Home" => "index.md",
         "TCP" => "tcp.md",
+        "UDP" => "udp.md",
         "TLS" => "tls.md",
         "Name Resolution" => "resolution.md",
         "Sockets Migration Guide" => "migrate-sockets.md",

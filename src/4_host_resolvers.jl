@@ -23,6 +23,7 @@ using ..Reseau.IOPoll
 
 using ..Reseau.TCP
 import ..Reseau.TCP: connect, listen
+import ..Reseau.UDP
 
 """
     AddressError
@@ -1124,6 +1125,9 @@ end
     n == "tcp" && return :tcp
     n == "tcp4" && return :tcp4
     n == "tcp6" && return :tcp6
+    n == "udp" && return :udp
+    n == "udp4" && return :udp4
+    n == "udp6" && return :udp6
     throw(UnknownNetworkError(n))
 end
 
@@ -1209,24 +1213,24 @@ function _apply_policy_and_network(
         kind::Symbol,
         policy::ResolverPolicy,
     )
-    out = if kind == :tcp4 || (!policy.allow_ipv6 && policy.allow_ipv4)
+    out = if kind == :tcp4 || kind == :udp4 || (!policy.allow_ipv6 && policy.allow_ipv4)
         TCP.SocketAddrV4[]
-    elseif kind == :tcp6 || (!policy.allow_ipv4 && policy.allow_ipv6)
+    elseif kind == :tcp6 || kind == :udp6 || (!policy.allow_ipv4 && policy.allow_ipv6)
         TCP.SocketAddrV6[]
     else
         TCP.SocketEndpoint[]
     end
     for addr in addrs
-        if kind == :tcp4 && !(addr isa TCP.SocketAddrV4)
+        if (kind == :tcp4 || kind == :udp4) && !(addr isa TCP.SocketAddrV4)
             continue
         end
-        if kind == :tcp6 && !(addr isa TCP.SocketAddrV6)
+        if (kind == :tcp6 || kind == :udp6) && !(addr isa TCP.SocketAddrV6)
             continue
         end
         _policy_accepts(policy, addr) || continue
         push!(out, addr)
     end
-    if policy.prefer_ipv6 && kind == :tcp
+    if policy.prefer_ipv6 && (kind == :tcp || kind == :udp)
         sort!(out; by = a -> a isa TCP.SocketAddrV6 ? 0 : 1)
     end
     return out
@@ -1545,7 +1549,7 @@ lookup_port(resolver::CachingResolver, network::AbstractString, service::Abstrac
     lookup_port((resolver::CachingResolver).parent, network, service)
 
 @inline function _wildcard_addrs(kind::Symbol, op::Symbol)::Vector{TCP.SocketEndpoint}
-    if kind == :tcp && op == :listen
+    if (kind == :tcp || kind == :udp) && op == :listen
         @static if Sys.isopenbsd() || Sys.isdragonfly()
             # These kernels do not support IPv4-mapped IPv6 listeners, so a
             # generic wildcard must prefer IPv4 just as Go's capability probe
@@ -2378,7 +2382,9 @@ function connect(
         throw(_wrap_op_error("connect", network, d.local_addr, nothing, DialTimeoutError(String(address))))
     end
     kind = try
-        _network_kind(network)
+        k = _network_kind(network)
+        (k === :tcp || k === :tcp4 || k === :tcp6) || throw(UnknownNetworkError(String(network)))
+        k
     catch err
         throw(_wrap_op_error("connect", network, d.local_addr, nothing, _as_exception(err)))
     end
@@ -2447,7 +2453,9 @@ function listen(
         reuseaddr::Bool = true,
     )::TCP.Listener
     kind = try
-        _network_kind(network)
+        k = _network_kind(network)
+        (k === :tcp || k === :tcp4 || k === :tcp6) || throw(UnknownNetworkError(String(network)))
+        k
     catch err
         throw(_wrap_op_error("listen", network, nothing, nothing, _as_exception(err)))
     end
@@ -2491,4 +2499,140 @@ function listen(
     )::TCP.Listener
     return listen(HostResolver(), network, address; backlog = backlog, reuseaddr = reuseaddr)
 end
+
+"""
+    listen(address; backlog=128, reuseaddr=true) -> TCP.Listener
+
+Shorthand for `listen("tcp", address; ...)`, mirroring `connect(address)`.
+An empty host (`":9000"`) listens on the wildcard address.
+"""
+function listen(
+        address::AbstractString;
+        backlog::Integer = 128,
+        reuseaddr::Bool = true,
+    )::TCP.Listener
+    return listen("tcp", address; backlog = backlog, reuseaddr = reuseaddr)
+end
+##########################
+# UDP string-address entrypoints
+##########################
+
+@inline function _udp_network_kind(network::AbstractString, op::String)::Symbol
+    kind = try
+        _network_kind(network)
+    catch err
+        throw(_wrap_op_error(op, network, nothing, nothing, _as_exception(err)))
+    end
+    if !(kind === :udp || kind === :udp4 || kind === :udp6)
+        throw(_wrap_op_error(op, network, nothing, nothing, UnknownNetworkError(String(network))))
+    end
+    return kind
+end
+
+"""
+    UDP.connect(network, address; resolver=DEFAULT_RESOLVER, policy=ResolverPolicy(), local_addr=nothing) -> UDP.Conn
+
+Resolve `address` (`"host:port"`, with named services supported) and return a
+connected UDP socket to the first candidate that accepts the local connect.
+
+`network` must be `"udp"`, `"udp4"`, or `"udp6"`; `"udp6"` binds IPv6-only.
+Unlike TCP dialing there is no Happy-Eyeballs race or dial timeout: connecting
+a UDP socket is a local, immediate operation, so only name resolution can
+block. Failures are wrapped in `HostResolvers.OpError`.
+"""
+function UDP.connect(
+        network::AbstractString,
+        address::AbstractString;
+        resolver::AbstractResolver = DEFAULT_RESOLVER,
+        policy::ResolverPolicy = ResolverPolicy(),
+        local_addr::Union{Nothing, TCP.SocketAddr} = nothing,
+    )::UDP.Conn
+    kind = _udp_network_kind(network, "connect")
+    addrs = try
+        resolve_tcp_addrs(resolver, network, address; op = :connect, policy = policy)
+    catch err
+        throw(_wrap_op_error("connect", network, local_addr, nothing, _as_exception(err)))
+    end
+    first_err::Union{Nothing, Exception} = nothing
+    for remote_addr in addrs
+        try
+            return UDP.connect(
+                remote_addr;
+                local_addr = local_addr,
+                v6only = kind === :udp6,
+                net = kind,
+            )
+        catch err
+            first_err === nothing && (first_err = _as_exception(err))
+        end
+    end
+    if first_err === nothing
+        first_err = LookupError("no suitable address", String(address))
+    end
+    first_err isa OpError && throw(first_err)
+    throw(_wrap_op_error("connect", network, local_addr, nothing, first_err))
+end
+
+"""
+    UDP.connect(address; kwargs...) -> UDP.Conn
+
+Shorthand for `UDP.connect("udp", address; kwargs...)`.
+"""
+function UDP.connect(address::AbstractString; kwargs...)::UDP.Conn
+    return UDP.connect("udp", address; kwargs...)
+end
+
+"""
+    UDP.listen(network, address; resolver=DEFAULT_RESOLVER, policy=ResolverPolicy(), reuseaddr=false, reuseport=false) -> UDP.Conn
+
+Resolve `address` and bind an unconnected UDP socket to the first candidate
+that binds successfully. An empty host (`":9000"`) binds the wildcard address.
+
+`network` must be `"udp"`, `"udp4"`, or `"udp6"`; `"udp6"` binds IPv6-only.
+Failures are wrapped in `HostResolvers.OpError`.
+"""
+function UDP.listen(
+        network::AbstractString,
+        address::AbstractString;
+        resolver::AbstractResolver = DEFAULT_RESOLVER,
+        policy::ResolverPolicy = ResolverPolicy(),
+        reuseaddr::Bool = false,
+        reuseport::Bool = false,
+    )::UDP.Conn
+    kind = _udp_network_kind(network, "listen")
+    addrs = try
+        resolve_tcp_addrs(resolver, network, address; op = :listen, policy = policy)
+    catch err
+        throw(_wrap_op_error("listen", network, nothing, nothing, _as_exception(err)))
+    end
+    first_err::Union{Nothing, Exception} = nothing
+    for local_addr in addrs
+        try
+            return UDP.listen(
+                local_addr;
+                reuseaddr = reuseaddr,
+                reuseport = reuseport,
+                v6only = kind === :udp6,
+                net = kind,
+            )
+        catch err
+            first_err === nothing && (first_err = _as_exception(err))
+        end
+    end
+    if first_err === nothing
+        first_err = LookupError("no suitable address", String(address))
+    end
+    first_err isa OpError && throw(first_err)
+    throw(_wrap_op_error("listen", network, nothing, nothing, first_err))
+end
+
+"""
+    UDP.listen(address; kwargs...) -> UDP.Conn
+
+Shorthand for `UDP.listen("udp", address; kwargs...)`.
+"""
+function UDP.listen(address::AbstractString; kwargs...)::UDP.Conn
+    return UDP.listen("udp", address; kwargs...)
+end
+
 end

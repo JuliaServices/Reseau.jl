@@ -18,6 +18,7 @@ Depth = 2:2
 ```@docs
 Reseau
 Reseau.TCP
+Reseau.UDP
 Reseau.TLS
 ```
 
@@ -69,9 +70,51 @@ set_write_deadline!
 DeadlineExceededError
 set_nodelay!
 set_keepalive!
+set_quickack!
+set_linger!
+set_read_buffer!
+set_write_buffer!
+listenany
+rawfd
 local_addr
 remote_addr
 addr
+```
+
+## UDP
+
+```@meta
+CurrentModule = Reseau.UDP
+```
+
+### Connections and Datagram I/O
+
+```@docs
+Conn
+listen
+connect
+send
+sendto
+recv
+recv!
+recvfrom
+recvfrom!
+TruncatedDatagramError
+```
+
+### Deadlines, Socket Options, and Address Inspection
+
+```@docs
+UDP.DeadlineExceededError
+set_deadline!
+set_read_deadline!
+set_write_deadline!
+set_broadcast!
+set_ttl!
+set_read_buffer!
+set_write_buffer!
+UDP.local_addr
+UDP.remote_addr
 ```
 
 ## TLS
@@ -141,6 +184,7 @@ CurrentModule = Main
 Reseau.SocketOps
 Reseau.IOPoll
 Reseau.IOPoll.PollMode
+Reseau.NetCommon
 Reseau.HostResolvers
 Reseau.SOCKS
 Reseau.SOCKS.BoundAddr
