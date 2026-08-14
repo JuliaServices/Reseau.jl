@@ -2542,7 +2542,7 @@ function UDP.connect(
     first_err::Union{Nothing, Exception} = nothing
     for remote_addr in addrs
         try
-            return UDP._connect_impl(
+            return UDP.connect(
                 remote_addr;
                 local_addr = local_addr,
                 v6only = kind === :udp6,
@@ -2594,7 +2594,7 @@ function UDP.listen(
     first_err::Union{Nothing, Exception} = nothing
     for local_addr in addrs
         try
-            return UDP._listen_impl(
+            return UDP.listen(
                 local_addr;
                 reuseaddr = reuseaddr,
                 reuseport = reuseport,

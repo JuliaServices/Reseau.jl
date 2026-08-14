@@ -165,18 +165,15 @@ Port `0` binds an ephemeral port; read it back with [`local_addr`](@ref).
 load-balancing of datagrams across sockets bound to the same port on Linux;
 BSD port-sharing semantics on Darwin/BSD) and throws `ArgumentError` on
 Windows, which has no equivalent option. IPv6 sockets are opened dual-stack
-where the platform allows it, matching `TCP`.
+where the platform allows it, matching `TCP`; the string-address entrypoints
+pass `v6only=true` and `net` for `"udp6"` binds.
 """
-function listen(local_addr::SocketAddr; reuseaddr::Bool = false, reuseport::Bool = false)::Conn
-    return _listen_impl(local_addr; reuseaddr = reuseaddr, reuseport = reuseport, v6only = false, net = :udp)
-end
-
-function _listen_impl(
+function listen(
         local_addr::SocketAddr;
-        reuseaddr::Bool,
-        reuseport::Bool,
-        v6only::Bool,
-        net::Symbol,
+        reuseaddr::Bool = false,
+        reuseport::Bool = false,
+        v6only::Bool = false,
+        net::Symbol = :udp,
     )::Conn
     @static if Sys.iswindows()
         reuseport && throw(ArgumentError("reuseport is not supported on Windows"))
@@ -222,20 +219,15 @@ Create a connected UDP socket with `remote_addr` as its fixed peer.
 Connecting a UDP socket is a local operation: no packets are exchanged, the
 kernel simply filters inbound datagrams to the peer and lets ICMP errors from
 prior sends surface on later operations (Go semantics). `local_addr`, when
-given, must share the remote's address family and is bound before connecting.
+given, is bound before connecting; mixed IPv4/IPv6 pairs follow Go's
+`favoriteAddrFamily` rule. The string-address entrypoints pass `v6only=true`
+and `net` for `"udp6"` dials.
 """
 function connect(
         remote_addr::SocketAddr;
         local_addr::Union{Nothing, SocketAddr} = nothing,
-    )::Conn
-    return _connect_impl(remote_addr; local_addr = local_addr, v6only = false, net = :udp)
-end
-
-function _connect_impl(
-        remote_addr::SocketAddr;
-        local_addr::Union{Nothing, SocketAddr},
-        v6only::Bool,
-        net::Symbol,
+        v6only::Bool = false,
+        net::Symbol = :udp,
     )::Conn
     remote_addr = _prepare_dial_remote(remote_addr)
     # Go favoriteAddrFamily parity: the socket is AF_INET only when every

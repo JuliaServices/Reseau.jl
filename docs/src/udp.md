@@ -124,24 +124,6 @@ wild = UDP.listen(":9000")
 four = UDP.listen("udp4", "127.0.0.1:9000")
 ```
 
-## Differences from Go
-
-`Reseau.UDP` follows Go's `net.UDPConn` semantics closely. The deliberate
-deviations, chosen where Julia idiom or cross-platform consistency wins:
-
-| Area | Go | Reseau |
-| --- | --- | --- |
-| Stream interface | `UDPConn` implements `io.Reader`/`io.Writer` | `Conn` is not an `IO`; datagram verbs only |
-| Truncation | Silent prefix on POSIX, error on Windows | Uniform: throws `TruncatedDatagramError` unless `allow_truncate=true` |
-| Mode misuse | Runtime error values (`ErrWriteToConnected`, kernel `EDESTADDRREQ`) | `ArgumentError` at the API boundary |
-| Empty receive buffer | Consumes a datagram on POSIX, returns without I/O on Windows | Consumes (and flags truncation) on every platform |
-| Spurious Windows resets | Not handled (`WSAECONNRESET` leaks to unconnected sockets) | `SIO_UDP_CONNRESET` disabled on unconnected sockets |
-| Error wrapping | Every operation returns `*net.OpError` | Direct-address calls throw raw errors; only string-address entrypoints wrap in `OpError` (house convention) |
-| IPv6 scopes | `Zone` interface name string | Numeric `scope_id` |
-| Convenience | `ListenUDP` accepts a nil address | Use `UDP.listen(":0")` or `any_addr(0)` |
-| Allocating receives | Caller always supplies the buffer | `recv`/`recvfrom` allocate right-sized results (Sockets-stdlib migration affordance) |
-| Raw access | `SyscallConn`/`File` | Not provided |
-
 ## Not yet implemented
 
 Multicast group management (`join_multicast_group`-style APIs), control-message
