@@ -560,7 +560,10 @@ function _submit_iocp_op!(
         _notify_registration!(registration, op.mode)
         return Int32(0)
     end
-    if op.kind == IocpOpKind.READ || op.kind == IocpOpKind.WRITE
+    if op.kind == IocpOpKind.READ || op.kind == IocpOpKind.WRITE ||
+            op.kind == IocpOpKind.RECVFROM || op.kind == IocpOpKind.SENDTO
+        # WSARecv/WSASend/WSARecvFrom/WSASendTo return 0 on synchronous
+        # success, unlike the ConnectEx/AcceptEx BOOL convention handled below.
         if rc == 0
             reg.wait_on_success && return Int32(0)
             @atomic :release op.active = false
