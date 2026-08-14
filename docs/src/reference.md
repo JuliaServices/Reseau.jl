@@ -176,6 +176,7 @@ CurrentModule = Main
 Reseau.SocketOps
 Reseau.IOPoll
 Reseau.IOPoll.PollMode
+Reseau.NetCommon
 Reseau.HostResolvers
 Reseau.SOCKS
 Reseau.SOCKS.BoundAddr
