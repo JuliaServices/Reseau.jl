@@ -1,4 +1,5 @@
 ```@meta
+CurrentModule = Reseau
 Description = "UDP datagram sockets in Reseau.jl: connected and unconnected use, deadlines, and truncation policy."
 ```
 
