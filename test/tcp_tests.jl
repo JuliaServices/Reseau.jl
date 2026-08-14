@@ -1188,10 +1188,18 @@ end
         listener = TCP.listen(TCP.loopback_addr(0))
         conn = TCP.connect(TCP.addr(listener))
         server = TCP.accept(listener)
+
+        # The TCP metadata wrapper may become unreachable while an operation
+        # still retains its poll FD. Finalizing that wrapper must not close the
+        # live descriptor.
+        finalize(conn.fd)
+        yield()
+        @test isopen(conn)
+
         # Trigger the GC safety net deterministically. The finalizer schedules
         # the blocking close on a task; spin-yield until it lands (park
         # detection pattern from test/README.md).
-        finalize(conn.fd)
+        finalize(conn.fd.pfd)
         while isopen(conn)
             yield()
         end
@@ -1200,8 +1208,9 @@ end
 
         # A finalizer firing after an explicit close is a no-op.
         close(server)
-        finalize(server.fd)
+        finalize(server.fd.pfd)
         @test !isopen(server)
+
         close(listener)
     end
 end
