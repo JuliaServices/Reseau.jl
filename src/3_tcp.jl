@@ -525,6 +525,43 @@ function listen(local_addr::SocketAddr; backlog::Integer = 128, reuseaddr::Bool 
     )
 end
 
+@inline _with_port(addr::SocketAddrV4, port::Integer)::SocketAddrV4 = SocketAddrV4(addr.ip, port)
+@inline function _with_port(addr::SocketAddrV6, port::Integer)::SocketAddrV6
+    return SocketAddrV6(addr.ip, port; scope_id = Int(addr.scope_id))
+end
+
+@inline function _is_port_taken_errno(errnum::Integer)::Bool
+    return errnum == Int(Base.Libc.EADDRINUSE) || errnum == Int(Base.Libc.EACCES)
+end
+
+"""
+    listenany(hint::SocketAddr; backlog=128, reuseaddr=true) -> (UInt16, Listener)
+
+Bind a listener on the first available port at or above `hint`'s port,
+returning the bound port and the listener (the `Sockets.listenany` idiom).
+
+Ports that are in use (`EADDRINUSE`) or forbidden (`EACCES`) are skipped by
+incrementing the port; running out of ports rethrows the last error. A hint
+port of `0` binds an ephemeral port directly.
+"""
+function listenany(hint::SocketAddr; backlog::Integer = 128, reuseaddr::Bool = true)::Tuple{UInt16, Listener}
+    addr = hint
+    while true
+        listener = try
+            listen(addr; backlog = backlog, reuseaddr = reuseaddr)
+        catch err
+            ex = err::Exception
+            (ex isa SystemError && _is_port_taken_errno(ex.errnum)) || rethrow(ex)
+            next_port = Int(addr.port) + 1
+            next_port > 0xffff && rethrow(ex)
+            addr = _with_port(addr, next_port)
+            continue
+        end
+        bound = local_addr(listener)
+        return ((bound::SocketEndpoint).port, listener)
+    end
+end
+
 """
     accept(listener)
 
@@ -1054,18 +1091,144 @@ function set_nodelay!(conn::Conn, enabled::Bool = true)
 end
 
 """
-    set_keepalive!(conn, enabled=true)
+    set_keepalive!(conn, enabled=true; idle_secs=nothing, interval_secs=nothing, count=nothing)
 
-Enable or disable `SO_KEEPALIVE` on `conn`.
+Enable or disable `SO_KEEPALIVE` on `conn`, optionally tuning the probe
+schedule (the shape of Go's `KeepAliveConfig`):
+
+- `idle_secs`: idle time before the first probe (`TCP_KEEPIDLE`;
+  `TCP_KEEPALIVE` on Darwin)
+- `interval_secs`: time between unanswered probes (`TCP_KEEPINTVL`)
+- `count`: unanswered probes before the connection is dropped (`TCP_KEEPCNT`)
+
+Tuning values are applied only when provided. Platforms without a given knob
+surface the kernel's `SystemError` (notably OpenBSD, and Windows releases
+before Server 2016 / Windows 10 1709).
 """
-function set_keepalive!(conn::Conn, enabled::Bool = true)
+function set_keepalive!(
+        conn::Conn,
+        enabled::Bool = true;
+        idle_secs::Union{Nothing, Integer} = nothing,
+        interval_secs::Union{Nothing, Integer} = nothing,
+        count::Union{Nothing, Integer} = nothing,
+    )
     IOPoll.set_sockopt_int!(
         conn.fd.pfd,
         SocketOps.SOL_SOCKET,
         SocketOps.SO_KEEPALIVE,
         enabled ? 1 : 0,
     )
+    if idle_secs !== nothing
+        idle_secs > 0 || throw(ArgumentError("idle_secs must be positive"))
+        IOPoll.set_sockopt_int!(conn.fd.pfd, SocketOps.IPPROTO_TCP, SocketOps.TCP_KEEPIDLE, Int(idle_secs))
+    end
+    if interval_secs !== nothing
+        interval_secs > 0 || throw(ArgumentError("interval_secs must be positive"))
+        IOPoll.set_sockopt_int!(conn.fd.pfd, SocketOps.IPPROTO_TCP, SocketOps.TCP_KEEPINTVL, Int(interval_secs))
+    end
+    if count !== nothing
+        count > 0 || throw(ArgumentError("count must be positive"))
+        IOPoll.set_sockopt_int!(conn.fd.pfd, SocketOps.IPPROTO_TCP, SocketOps.TCP_KEEPCNT, Int(count))
+    end
     return nothing
+end
+
+"""
+    set_quickack!(conn, enabled=true)
+
+Toggle `TCP_QUICKACK` (Linux). On other platforms this is a silent no-op,
+matching `Sockets.quickack`, so cross-platform callers can set it
+unconditionally. The kernel may clear the flag again after some transfers;
+latency-sensitive callers re-assert it as needed.
+"""
+function set_quickack!(conn::Conn, enabled::Bool = true)
+    @static if Sys.islinux()
+        IOPoll.set_sockopt_int!(
+            conn.fd.pfd,
+            SocketOps.IPPROTO_TCP,
+            SocketOps.TCP_QUICKACK,
+            enabled ? 1 : 0,
+        )
+    end
+    return nothing
+end
+
+"""
+    set_linger!(conn, timeout_secs)
+
+Configure `SO_LINGER`, following Go's `SetLinger`: a negative timeout disables
+lingering (`close` returns immediately and the OS flushes in the background —
+the default), `0` discards unsent data on close with a RST, and a positive
+timeout blocks `close` until the data is flushed or the timeout expires.
+"""
+function set_linger!(conn::Conn, timeout_secs::Integer)
+    lg = if timeout_secs < 0
+        SocketOps.Linger(0, 0)
+    else
+        timeout_secs > 0xffff && throw(ArgumentError("linger timeout must be at most 65535 seconds"))
+        SocketOps.Linger(1, timeout_secs)
+    end
+    IOPoll.set_sockopt_bytes!(conn.fd.pfd, SocketOps.SOL_SOCKET, SocketOps.SO_LINGER, Ref(lg))
+    return nothing
+end
+
+"""
+    set_read_buffer!(conn, nbytes)
+
+Set the kernel receive buffer size (`SO_RCVBUF`). The kernel may round the
+value, enforce minimums, or (on Linux) double it to leave bookkeeping room.
+"""
+function set_read_buffer!(conn::Conn, nbytes::Integer)
+    nbytes > 0 || throw(ArgumentError("buffer size must be positive"))
+    IOPoll.set_sockopt_int!(conn.fd.pfd, SocketOps.SOL_SOCKET, SocketOps.SO_RCVBUF, Int(nbytes))
+    return nothing
+end
+
+"""
+    set_write_buffer!(conn, nbytes)
+
+Set the kernel send buffer size (`SO_SNDBUF`). The kernel may round the
+value, enforce minimums, or (on Linux) double it to leave bookkeeping room.
+"""
+function set_write_buffer!(conn::Conn, nbytes::Integer)
+    nbytes > 0 || throw(ArgumentError("buffer size must be positive"))
+    IOPoll.set_sockopt_int!(conn.fd.pfd, SocketOps.SOL_SOCKET, SocketOps.SO_SNDBUF, Int(nbytes))
+    return nothing
+end
+
+"""
+    rawfd(conn) -> RawFD or Base.WindowsRawSocket
+
+Return the OS-level socket descriptor backing `conn` (a `RawFD` on POSIX, a
+`Base.WindowsRawSocket` on Windows) for FFI and interop uses such as
+subprocess stdio redirection.
+
+Reseau retains ownership: the descriptor is non-blocking and registered with
+the internal poller; callers must not close it, change its flags, or use it
+after `close(conn)`. Throws `NetClosingError` if the socket is already
+closing.
+"""
+function rawfd(conn::Conn)
+    return _rawfd(conn.fd)
+end
+
+"""
+    rawfd(listener) -> RawFD or Base.WindowsRawSocket
+
+Listener variant of [`rawfd`](@ref). The same ownership rules apply.
+"""
+function rawfd(listener::Listener)
+    return _rawfd(listener.fd)
+end
+
+function _rawfd(fd::FD)
+    IOPoll._fdlock_closing(fd.pfd.fdlock) && throw(IOPoll.NetClosingError())
+    sysfd = fd.pfd.sysfd
+    @static if Sys.iswindows()
+        return Base.WindowsRawSocket(Ptr{Cvoid}(sysfd))
+    else
+        return RawFD(sysfd)
+    end
 end
 
 """

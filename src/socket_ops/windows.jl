@@ -899,6 +899,52 @@ function set_sockopt_int(fd::SocketFD, level::Cint, optname::Cint, value::Intege
     _throw_errno("setsockopt", _map_wsa_errno(_wsa_get_last_error()))
 end
 
+
+"""
+    set_sockopt_bytes(fd, level, optname, ptr, len)
+
+Write a socket option wider than a `Cint` (e.g. `SO_LINGER`) from a raw byte
+buffer. The caller must keep the memory behind `ptr` rooted for the call.
+"""
+function set_sockopt_bytes(fd::SocketFD, level::Cint, optname::Cint, ptr::Ptr{Cvoid}, len::Integer)::Nothing
+    ret = ccall(
+        (:setsockopt, _WS2_32),
+        Cint,
+        (UInt, Cint, Cint, Ptr{UInt8}, Cint),
+        _socket_value(fd),
+        level,
+        optname,
+        Ptr{UInt8}(ptr),
+        Cint(len),
+    )
+    ret == 0 && return nothing
+    _throw_errno("setsockopt", _map_wsa_errno(_wsa_get_last_error()))
+end
+
+"""
+    get_sockopt_bytes!(fd, level, optname, ptr, len) -> Int
+
+Read a socket option into a raw byte buffer, returning the number of bytes the
+OS wrote. The caller must keep the memory behind `ptr` rooted for the call.
+"""
+function get_sockopt_bytes!(fd::SocketFD, level::Cint, optname::Cint, ptr::Ptr{Cvoid}, len::Integer)::Int
+    len_ref = Ref{Cint}(Cint(len))
+    ret = GC.@preserve len_ref begin
+        ccall(
+            (:getsockopt, _WS2_32),
+            Cint,
+            (UInt, Cint, Cint, Ptr{UInt8}, Ref{Cint}),
+            _socket_value(fd),
+            level,
+            optname,
+            Ptr{UInt8}(ptr),
+            len_ref,
+        )
+    end
+    ret == 0 && return Int(len_ref[])
+    _throw_errno("getsockopt", _map_wsa_errno(_wsa_get_last_error()))
+end
+
 """
     get_socket_error(fd) -> Int32
 

@@ -64,6 +64,23 @@ const SO_SNDBUF = @static Sys.islinux() ? Cint(0x0007) : Cint(0x1001)
 # recvmsg flag, so the constant is only meaningful on POSIX platforms.
 const MSG_TRUNC = @static Sys.iswindows() ? Cint(0) :
     Sys.islinux() ? Cint(0x20) : Cint(0x10)
+const SO_LINGER = @static Sys.islinux() ? Cint(0x000D) : Cint(0x0080)
+# Keepalive tuning knobs. Darwin spells idle-before-first-probe TCP_KEEPALIVE;
+# Windows gained the TCP_KEEP* setsockopt names in Server 2016/Windows 10 1709.
+# OpenBSD has no per-socket keepalive tuning; the kernel rejects the option.
+const TCP_KEEPIDLE = @static Sys.iswindows() ? Cint(3) :
+        Sys.islinux() ? Cint(4) :
+        Sys.isapple() ? Cint(0x10) :
+        Cint(0x100)
+const TCP_KEEPINTVL = @static Sys.iswindows() ? Cint(17) :
+        Sys.islinux() ? Cint(5) :
+        Sys.isapple() ? Cint(0x101) :
+        Cint(0x200)
+const TCP_KEEPCNT = @static Sys.iswindows() ? Cint(16) :
+        Sys.islinux() ? Cint(6) :
+        Sys.isapple() ? Cint(0x102) :
+        Cint(0x400)
+const TCP_QUICKACK = Cint(12)  # Linux-only
 
 @static if Sys.isbsd()
     """
@@ -187,6 +204,23 @@ function decode_sockaddr(ptr::Ptr{UInt8}, len::Integer)::AcceptPeer
         return unsafe_load(Ptr{SockAddrIn6}(Ptr{Cvoid}(ptr)))
     end
     return nothing
+
+@static if Sys.iswindows()
+    """
+    Windows-compatible `struct linger` (`u_short` fields).
+    """
+    struct Linger
+        l_onoff::UInt16
+        l_linger::UInt16
+    end
+else
+    """
+    POSIX-compatible `struct linger`.
+    """
+    struct Linger
+        l_onoff::Cint
+        l_linger::Cint
+    end
 end
 
 @inline function _is_little_endian()::Bool
@@ -543,6 +577,14 @@ function set_sockopt_int(fd::SocketFD, level::Cint, optname::Cint, value::Intege
     _ = optname
     _ = value
     _throw_enosys("setsockopt")
+end
+
+function set_sockopt_bytes(fd::SocketFD, level::Cint, optname::Cint, ptr::Ptr{Cvoid}, len::Integer)::Nothing
+    _throw_enosys("set_sockopt_bytes")
+end
+
+function get_sockopt_bytes!(fd::SocketFD, level::Cint, optname::Cint, ptr::Ptr{Cvoid}, len::Integer)::Int
+    _throw_enosys("get_sockopt_bytes!")
 end
 
 function get_socket_error(fd::SocketFD)::Int32

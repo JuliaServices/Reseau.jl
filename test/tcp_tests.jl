@@ -1014,3 +1014,170 @@ end
             @test string(scoped) == "[::1%7]:1"
         end
     end
+
+@testset "TCP stdlib-parity additions" begin
+    @testset "single-string listen" begin
+        listener = TCP.listen("127.0.0.1:0"; backlog = 64)
+        addr = TCP.addr(listener)
+        @test addr isa TCP.SocketAddrV4
+        @test addr.port != 0
+        conn = TCP.connect(addr)
+        server = TCP.accept(listener)
+        write(conn, b"shorthand")
+        buf = Vector{UInt8}(undef, 9)
+        read!(server, buf)
+        @test buf == b"shorthand"
+        close(conn)
+        close(server)
+        close(listener)
+    end
+
+    @testset "listenany" begin
+        taken = TCP.listen(TCP.loopback_addr(0))
+        hint_port = Int((TCP.addr(taken)::TCP.SocketAddrV4).port)
+        port, listener = TCP.listenany(TCP.loopback_addr(hint_port))
+        @test port != hint_port
+        @test isopen(listener)
+        conn = TCP.connect(TCP.loopback_addr(Int(port)))
+        server = TCP.accept(listener)
+        close(conn)
+        close(server)
+        close(listener)
+        close(taken)
+
+        eport, elistener = TCP.listenany(TCP.loopback_addr(0))
+        @test eport != 0
+        close(elistener)
+    end
+
+    @testset "keepalive tuning" begin
+        listener = TCP.listen(TCP.loopback_addr(0))
+        conn = TCP.connect(TCP.addr(listener))
+        server = TCP.accept(listener)
+        TCP.set_keepalive!(conn, true; idle_secs = 30, interval_secs = 7, count = 3)
+        sysfd = conn.fd.pfd.sysfd
+        @test Reseau.SocketOps.get_sockopt_int(sysfd, Reseau.SocketOps.SOL_SOCKET, Reseau.SocketOps.SO_KEEPALIVE) != 0
+        @test Reseau.SocketOps.get_sockopt_int(sysfd, Reseau.SocketOps.IPPROTO_TCP, Reseau.SocketOps.TCP_KEEPIDLE) == 30
+        @test Reseau.SocketOps.get_sockopt_int(sysfd, Reseau.SocketOps.IPPROTO_TCP, Reseau.SocketOps.TCP_KEEPINTVL) == 7
+        @test Reseau.SocketOps.get_sockopt_int(sysfd, Reseau.SocketOps.IPPROTO_TCP, Reseau.SocketOps.TCP_KEEPCNT) == 3
+        TCP.set_keepalive!(conn, false)
+        @test Reseau.SocketOps.get_sockopt_int(sysfd, Reseau.SocketOps.SOL_SOCKET, Reseau.SocketOps.SO_KEEPALIVE) == 0
+        @test_throws ArgumentError TCP.set_keepalive!(conn; idle_secs = 0)
+        @test_throws ArgumentError TCP.set_keepalive!(conn; interval_secs = -1)
+        @test_throws ArgumentError TCP.set_keepalive!(conn; count = 0)
+        close(conn)
+        close(server)
+        close(listener)
+    end
+
+    @testset "linger" begin
+        listener = TCP.listen(TCP.loopback_addr(0))
+        conn = TCP.connect(TCP.addr(listener))
+        server = TCP.accept(listener)
+        sysfd = conn.fd.pfd.sysfd
+        read_linger = () -> begin
+            lg = Ref(Reseau.SocketOps.Linger(0, 0))
+            GC.@preserve lg Reseau.SocketOps.get_sockopt_bytes!(
+                sysfd,
+                Reseau.SocketOps.SOL_SOCKET,
+                Reseau.SocketOps.SO_LINGER,
+                Ptr{Cvoid}(Base.unsafe_convert(Ptr{Reseau.SocketOps.Linger}, lg)),
+                sizeof(Reseau.SocketOps.Linger),
+            )
+            lg[]
+        end
+        TCP.set_linger!(conn, 4)
+        lg = read_linger()
+        @test lg.l_onoff != 0
+        @test lg.l_linger == 4
+        TCP.set_linger!(conn, -1)
+        @test read_linger().l_onoff == 0
+        TCP.set_linger!(conn, 0)
+        lg = read_linger()
+        @test lg.l_onoff != 0
+        @test lg.l_linger == 0
+        TCP.set_linger!(conn, -1)
+        @test_throws ArgumentError TCP.set_linger!(conn, 65536)
+        close(conn)
+        close(server)
+        close(listener)
+    end
+
+    @testset "buffer sizes" begin
+        listener = TCP.listen(TCP.loopback_addr(0))
+        conn = TCP.connect(TCP.addr(listener))
+        server = TCP.accept(listener)
+        sysfd = conn.fd.pfd.sysfd
+        TCP.set_read_buffer!(conn, 65536)
+        TCP.set_write_buffer!(conn, 65536)
+        # Kernels may round or (Linux) double the requested size, but never
+        # shrink below the request.
+        @test Reseau.SocketOps.get_sockopt_int(sysfd, Reseau.SocketOps.SOL_SOCKET, Reseau.SocketOps.SO_RCVBUF) >= 65536
+        @test Reseau.SocketOps.get_sockopt_int(sysfd, Reseau.SocketOps.SOL_SOCKET, Reseau.SocketOps.SO_SNDBUF) >= 65536
+        @test_throws ArgumentError TCP.set_read_buffer!(conn, 0)
+        @test_throws ArgumentError TCP.set_write_buffer!(conn, -1)
+        close(conn)
+        close(server)
+        close(listener)
+    end
+
+    @testset "quickack" begin
+        listener = TCP.listen(TCP.loopback_addr(0))
+        conn = TCP.connect(TCP.addr(listener))
+        server = TCP.accept(listener)
+        TCP.set_quickack!(conn)
+        TCP.set_quickack!(conn, false)
+        @static if Sys.islinux()
+            TCP.set_quickack!(conn, true)
+            @test Reseau.SocketOps.get_sockopt_int(
+                conn.fd.pfd.sysfd,
+                Reseau.SocketOps.IPPROTO_TCP,
+                Reseau.SocketOps.TCP_QUICKACK,
+            ) != 0
+        end
+        close(conn)
+        close(server)
+        close(listener)
+    end
+
+    @testset "rawfd" begin
+        listener = TCP.listen(TCP.loopback_addr(0))
+        conn = TCP.connect(TCP.addr(listener))
+        server = TCP.accept(listener)
+        raw = TCP.rawfd(conn)
+        lraw = TCP.rawfd(listener)
+        @static if Sys.iswindows()
+            @test raw isa Base.WindowsRawSocket
+            @test lraw isa Base.WindowsRawSocket
+        else
+            @test raw isa RawFD
+            @test lraw isa RawFD
+            @test raw != lraw
+        end
+        close(conn)
+        @test_throws Reseau.IOPoll.NetClosingError TCP.rawfd(conn)
+        close(server)
+        close(listener)
+    end
+
+    @testset "finalizer reclaims leaked descriptors" begin
+        listener = TCP.listen(TCP.loopback_addr(0))
+        conn = TCP.connect(TCP.addr(listener))
+        server = TCP.accept(listener)
+        # Trigger the GC safety net deterministically. The finalizer schedules
+        # the blocking close on a task; spin-yield until it lands (park
+        # detection pattern from test/README.md).
+        finalize(conn.fd)
+        while isopen(conn)
+            yield()
+        end
+        @test !isopen(conn)
+        close(conn)  # explicit close after finalizer-close stays idempotent
+
+        # A finalizer firing after an explicit close is a no-op.
+        close(server)
+        finalize(server.fd)
+        @test !isopen(server)
+        close(listener)
+    end
+end

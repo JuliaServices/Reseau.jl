@@ -590,6 +590,32 @@ function set_sockopt_int!(
     return nothing
 end
 
+"""
+    set_sockopt_bytes!(fd, level, optname, ref)
+
+Set a socket option wider than a `Cint` (e.g. `SO_LINGER`) from `ref` while
+preventing concurrent descriptor destruction and reuse.
+"""
+function set_sockopt_bytes!(
+        fd::FD,
+        level::Cint,
+        optname::Cint,
+        ref::Base.RefValue{T},
+    ) where {T}
+    _with_fd_ref(fd) do sysfd
+        GC.@preserve ref begin
+            SocketOps.set_sockopt_bytes(
+                sysfd,
+                level,
+                optname,
+                Ptr{Cvoid}(Base.unsafe_convert(Ptr{T}, ref)),
+                sizeof(T),
+            )
+        end
+    end
+    return nothing
+end
+
 function _fd_read_lock!(fd::FD)
     _fdlock_rwlock!(fd.fdlock, true, true) || throw(_closing_error(fd.is_file))
     return nothing

@@ -2499,6 +2499,20 @@ function listen(
     )::TCP.Listener
     return listen(HostResolver(), network, address; backlog = backlog, reuseaddr = reuseaddr)
 end
+
+"""
+    listen(address; backlog=128, reuseaddr=true) -> TCP.Listener
+
+Shorthand for `listen("tcp", address; ...)`, mirroring `connect(address)`.
+An empty host (`":9000"`) listens on the wildcard address.
+"""
+function listen(
+        address::AbstractString;
+        backlog::Integer = 128,
+        reuseaddr::Bool = true,
+    )::TCP.Listener
+    return listen("tcp", address; backlog = backlog, reuseaddr = reuseaddr)
+end
 ##########################
 # UDP string-address entrypoints
 ##########################

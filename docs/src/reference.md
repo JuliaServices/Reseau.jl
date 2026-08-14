@@ -70,6 +70,12 @@ set_write_deadline!
 DeadlineExceededError
 set_nodelay!
 set_keepalive!
+set_quickack!
+set_linger!
+set_read_buffer!
+set_write_buffer!
+listenany
+rawfd
 local_addr
 remote_addr
 addr
