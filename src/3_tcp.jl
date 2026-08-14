@@ -1200,6 +1200,7 @@ the default), `0` discards unsent data on close with a RST, and a positive
 timeout asks the OS to keep sending in the background. On some systems,
 including Linux, a positive timeout may block `close` until data is sent or
 discarded. Remaining data may be discarded after the timeout on some systems.
+Nonnegative timeouts must not exceed 65535 seconds.
 """
 function set_linger!(conn::Conn, timeout_secs::Integer)
     lg = if timeout_secs < 0
@@ -1245,8 +1246,9 @@ Return the OS-level socket descriptor backing `conn` (a `RawFD` on POSIX, a
 Reseau retains ownership: the descriptor is non-blocking and registered with
 the internal poller; callers must not close it, change its flags, or use it
 after `close(conn)`. The result is a borrowed snapshot. Keep `conn` reachable,
-for example with `GC.@preserve`, for the full external operation. Throws
-`NetClosingError` if the socket is already closing.
+for example with `GC.@preserve`, and prevent a concurrent `close(conn)` for the
+full external operation. Throws `NetClosingError` if the socket is already
+closing.
 """
 function rawfd(conn::Conn)
     return _rawfd(conn.fd)

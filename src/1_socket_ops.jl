@@ -211,6 +211,7 @@ function decode_sockaddr(ptr::Ptr{UInt8}, len::Integer)::AcceptPeer
         return unsafe_load(Ptr{SockAddrIn6}(Ptr{Cvoid}(ptr)))
     end
     return nothing
+end
 
 @static if Sys.iswindows()
     """
