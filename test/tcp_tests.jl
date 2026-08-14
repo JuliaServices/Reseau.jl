@@ -1016,6 +1016,71 @@ end
     end
 
 @testset "TCP stdlib-parity additions" begin
+    @testset "platform socket constants and layouts" begin
+        @test Reseau.SocketOps.IPPROTO_TCP == 6
+        @static if Sys.islinux()
+            @test Reseau.SocketOps.SOL_SOCKET == 1
+            @test Reseau.SocketOps.SO_REUSEADDR == 2
+            @test Reseau.SocketOps.SO_KEEPALIVE == 9
+            @test Reseau.SocketOps.SO_LINGER == 0x000d
+            @test Reseau.SocketOps.SO_RCVBUF == 0x0008
+            @test Reseau.SocketOps.SO_SNDBUF == 0x0007
+            @test Reseau.SocketOps.TCP_KEEPIDLE == 4
+            @test Reseau.SocketOps.TCP_KEEPINTVL == 5
+            @test Reseau.SocketOps.TCP_KEEPCNT == 6
+            @test Reseau.SocketOps.TCP_QUICKACK == 12
+        elseif Sys.iswindows()
+            @test Reseau.SocketOps.SOL_SOCKET == 0xffff
+            @test Reseau.SocketOps.SO_REUSEADDR == 4
+            @test Reseau.SocketOps.SO_KEEPALIVE == 8
+            @test Reseau.SocketOps.SO_LINGER == 0x0080
+            @test Reseau.SocketOps.SO_RCVBUF == 0x1002
+            @test Reseau.SocketOps.SO_SNDBUF == 0x1001
+            @test Reseau.SocketOps.TCP_KEEPIDLE == 3
+            @test Reseau.SocketOps.TCP_KEEPINTVL == 17
+            @test Reseau.SocketOps.TCP_KEEPCNT == 16
+        elseif Sys.isapple()
+            @test Reseau.SocketOps.SOL_SOCKET == 0xffff
+            @test Reseau.SocketOps.SO_REUSEADDR == 4
+            @test Reseau.SocketOps.SO_KEEPALIVE == 8
+            @test Reseau.SocketOps.SO_LINGER == 0x0080
+            @test Reseau.SocketOps.SO_RCVBUF == 0x1002
+            @test Reseau.SocketOps.SO_SNDBUF == 0x1001
+            @test Reseau.SocketOps.TCP_KEEPIDLE == 0x10
+            @test Reseau.SocketOps.TCP_KEEPINTVL == 0x101
+            @test Reseau.SocketOps.TCP_KEEPCNT == 0x102
+        elseif Sys.isnetbsd()
+            @test Reseau.SocketOps.TCP_KEEPIDLE == 3
+            @test Reseau.SocketOps.TCP_KEEPINTVL == 5
+            @test Reseau.SocketOps.TCP_KEEPCNT == 6
+        elseif Sys.isopenbsd()
+            @test Reseau.SocketOps.TCP_KEEPIDLE == -1
+            @test Reseau.SocketOps.TCP_KEEPINTVL == -1
+            @test Reseau.SocketOps.TCP_KEEPCNT == -1
+        else
+            # FreeBSD and DragonFly BSD use these values.
+            @test Reseau.SocketOps.SOL_SOCKET == 0xffff
+            @test Reseau.SocketOps.SO_REUSEADDR == 4
+            @test Reseau.SocketOps.SO_KEEPALIVE == 8
+            @test Reseau.SocketOps.SO_LINGER == 0x0080
+            @test Reseau.SocketOps.SO_RCVBUF == 0x1002
+            @test Reseau.SocketOps.SO_SNDBUF == 0x1001
+            @test Reseau.SocketOps.TCP_KEEPIDLE == 0x100
+            @test Reseau.SocketOps.TCP_KEEPINTVL == 0x200
+            @test Reseau.SocketOps.TCP_KEEPCNT == 0x400
+        end
+
+        @static if Sys.iswindows()
+            @test sizeof(Reseau.SocketOps.Linger) == 4
+            @test fieldtype(Reseau.SocketOps.Linger, 1) === UInt16
+            @test fieldtype(Reseau.SocketOps.Linger, 2) === UInt16
+        else
+            @test sizeof(Reseau.SocketOps.Linger) == 8
+            @test fieldtype(Reseau.SocketOps.Linger, 1) === Cint
+            @test fieldtype(Reseau.SocketOps.Linger, 2) === Cint
+        end
+    end
+
     @testset "single-string listen" begin
         listener = TCP.listen("127.0.0.1:0"; backlog = 64)
         addr = TCP.addr(listener)

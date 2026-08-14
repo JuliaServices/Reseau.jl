@@ -67,18 +67,25 @@ const MSG_TRUNC = @static Sys.iswindows() ? Cint(0) :
 const SO_LINGER = @static Sys.islinux() ? Cint(0x000D) : Cint(0x0080)
 # Keepalive tuning knobs. Darwin spells idle-before-first-probe TCP_KEEPALIVE;
 # Windows gained the TCP_KEEP* setsockopt names in Server 2016/Windows 10 1709.
-# OpenBSD has no per-socket keepalive tuning; the kernel rejects the option.
+# OpenBSD has no per-socket keepalive tuning. Use an invalid option number there
+# so the kernel returns ENOPROTOOPT instead of targeting an unrelated option.
 const TCP_KEEPIDLE = @static Sys.iswindows() ? Cint(3) :
         Sys.islinux() ? Cint(4) :
         Sys.isapple() ? Cint(0x10) :
+        Sys.isnetbsd() ? Cint(3) :
+        Sys.isopenbsd() ? Cint(-1) :
         Cint(0x100)
 const TCP_KEEPINTVL = @static Sys.iswindows() ? Cint(17) :
         Sys.islinux() ? Cint(5) :
         Sys.isapple() ? Cint(0x101) :
+        Sys.isnetbsd() ? Cint(5) :
+        Sys.isopenbsd() ? Cint(-1) :
         Cint(0x200)
 const TCP_KEEPCNT = @static Sys.iswindows() ? Cint(16) :
         Sys.islinux() ? Cint(6) :
         Sys.isapple() ? Cint(0x102) :
+        Sys.isnetbsd() ? Cint(6) :
+        Sys.isopenbsd() ? Cint(-1) :
         Cint(0x400)
 const TCP_QUICKACK = Cint(12)  # Linux-only
 
