@@ -20,7 +20,7 @@ using ..Reseau.IOPoll
 using ..Reseau.SocketOps
 using ..Reseau.NetCommon: SocketAddr, SocketAddrV4, SocketAddrV6, SocketEndpoint, FD,
     loopback_addr, any_addr, loopback_addr6, any_addr6,
-    _addr_family, _to_sockaddr, _from_sockaddr, _new_netfd, open_net_fd!,
+    _addr_family, _to_sockaddr, _from_sockaddr, _format_ipv6, _new_netfd, open_net_fd!,
     _set_local_addr!, _set_remote_addr!, _finalize_connected_addrs!,
     _is_temporary_unconnected, _set_ipv6_only!, _show_endpoint
 
