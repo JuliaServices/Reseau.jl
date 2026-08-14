@@ -1427,4 +1427,34 @@ function Base.show(io::IO, listener::Listener)
     return nothing
 end
 
+"""
+    bufreader(conn::Conn; buffer_size::Integer = 8192)
+
+Return a `BufferIO.AbstractBufReader` that reads from `conn` through an
+internal, growable buffer.
+
+The method is provided by the `ReseauBufferIOExt` package extension and is
+only defined once BufferIO.jl is loaded (BufferIO requires Julia >= 1.11).
+Buffer refills go through the same readiness, deadline, and close machinery as
+direct `Conn` reads, so `DeadlineExceededError`, `NetClosingError`, and
+`SystemError` propagate unchanged. The returned reader is not safe for
+concurrent use from multiple tasks.
+"""
+function bufreader end
+
+"""
+    bufwriter(conn::Conn; buffer_size::Integer = 4096)
+
+Return a `BufferIO.AbstractBufWriter` that coalesces writes into an internal
+buffer before writing them to `conn`.
+
+The method is provided by the `ReseauBufferIOExt` package extension and is
+only defined once BufferIO.jl is loaded (BufferIO requires Julia >= 1.11).
+Buffered bytes reach the socket on `flush`/`BufferIO.shallow_flush`, when the
+buffer must grow, or on `close`; `close(writer)` flushes and then closes
+`conn`. The returned writer is not safe for concurrent use from multiple
+tasks.
+"""
+function bufwriter end
+
 end
