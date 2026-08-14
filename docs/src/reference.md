@@ -105,6 +105,8 @@ set_read_deadline!
 set_write_deadline!
 set_broadcast!
 set_ttl!
+set_read_buffer!
+set_write_buffer!
 UDP.local_addr
 UDP.remote_addr
 ```

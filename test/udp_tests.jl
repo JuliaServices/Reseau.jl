@@ -217,13 +217,33 @@ end
 
     @testset "socket options" begin
         a = UDP.listen(UDP.loopback_addr(0))
-        UDP.set_broadcast!(a, true)
+        # Broadcast defaults on (Go setDefaultSockopts parity).
         @test Reseau.SocketOps.get_sockopt_int(
             a.fd.pfd.sysfd,
             Reseau.SocketOps.SOL_SOCKET,
             Reseau.SocketOps.SO_BROADCAST,
         ) != 0
         UDP.set_broadcast!(a, false)
+        @test Reseau.SocketOps.get_sockopt_int(
+            a.fd.pfd.sysfd,
+            Reseau.SocketOps.SOL_SOCKET,
+            Reseau.SocketOps.SO_BROADCAST,
+        ) == 0
+        UDP.set_broadcast!(a, true)
+        UDP.set_read_buffer!(a, 64 * 1024)
+        @test Reseau.SocketOps.get_sockopt_int(
+            a.fd.pfd.sysfd,
+            Reseau.SocketOps.SOL_SOCKET,
+            Reseau.SocketOps.SO_RCVBUF,
+        ) >= 64 * 1024
+        UDP.set_write_buffer!(a, 64 * 1024)
+        @test Reseau.SocketOps.get_sockopt_int(
+            a.fd.pfd.sysfd,
+            Reseau.SocketOps.SOL_SOCKET,
+            Reseau.SocketOps.SO_SNDBUF,
+        ) >= 64 * 1024
+        @test_throws ArgumentError UDP.set_read_buffer!(a, 0)
+        @test_throws ArgumentError UDP.set_write_buffer!(a, 0)
         UDP.set_ttl!(a, 3)
         @test Reseau.SocketOps.get_sockopt_int(
             a.fd.pfd.sysfd,
@@ -240,6 +260,46 @@ end
         ) == 5
         close(a)
         close(v6)
+    end
+
+    @testset "dual-stack address coercion" begin
+        four = UDP.listen(UDP.loopback_addr(0))
+        four_addr = UDP.local_addr(four)
+
+        # An IPv4 destination on an AF_INET6 socket becomes IPv4-mapped.
+        six = UDP.listen(UDP.any_addr6(0))
+        UDP.sendto(six, "mapped", four_addr)
+        data, _ = UDP.recvfrom(four)
+        @test String(data) == "mapped"
+
+        # An IPv4-mapped IPv6 destination on an AF_INET socket collapses.
+        mapped = UDP.SocketAddrV6(
+            (0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+             0x00, 0x00, 0xff, 0xff, 0x7f, 0x00, 0x00, 0x01),
+            Int(four_addr.port),
+        )
+        sender4 = UDP.listen(UDP.loopback_addr(0))
+        UDP.sendto(sender4, "collapsed", mapped)
+        data, _ = UDP.recvfrom(four)
+        @test String(data) == "collapsed"
+
+        # connect with a v6 local and a v4 remote opens an AF_INET6 socket
+        # and carries the remote as IPv4-mapped (Go favoriteAddrFamily).
+        mixed = UDP.connect(four_addr; local_addr = UDP.any_addr6(0))
+        @test UDP.remote_addr(mixed) isa UDP.SocketAddrV6
+        UDP.send(mixed, "mixed families")
+        data, _ = UDP.recvfrom(four)
+        @test String(data) == "mixed families"
+
+        # A wildcard dial destination means the local system (Go
+        # internetSocket parity; rewritten to loopback where kernels
+        # reject it).
+        wild = UDP.connect(UDP.any_addr(Int(four_addr.port)))
+        UDP.send(wild, "wildcard dial")
+        data, _ = UDP.recvfrom(four)
+        @test String(data) == "wildcard dial"
+
+        foreach(close, (four, six, sender4, mixed, wild))
     end
 
     @testset "string-address entrypoints" begin

@@ -91,6 +91,54 @@ string-address overload added later in the file load order.
 """
 function listen end
 
+@inline _is_wildcard_ip(addr::SocketAddrV4)::Bool = addr.ip == (0x00, 0x00, 0x00, 0x00)
+@inline _is_wildcard_ip(addr::SocketAddrV6)::Bool = all(iszero, addr.ip)
+
+# Go internetSocket parity: kernels that reject wildcard dial destinations
+# (Windows, FreeBSD, OpenBSD) get them rewritten to the same-family loopback.
+# Elsewhere the kernel itself interprets a wildcard destination as localhost.
+@inline function _prepare_dial_remote(remote_addr::SocketAddr)::SocketAddr
+    @static if Sys.iswindows() || Sys.isfreebsd() || Sys.isopenbsd()
+        _is_wildcard_ip(remote_addr) || return remote_addr
+        if remote_addr isa SocketAddrV6
+            return loopback_addr6(remote_addr.port; scope_id = remote_addr.scope_id)
+        end
+        return loopback_addr(remote_addr.port)
+    else
+        return remote_addr
+    end
+end
+
+const _V4_MAPPED_PREFIX = (
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff,
+)
+
+"""
+    _coerce_family(addr, family) -> SocketEndpoint
+
+Convert `addr` to the socket's address family, mirroring Go's `ipToSockaddr`:
+an IPv4 address becomes an IPv4-mapped IPv6 address on an `AF_INET6` socket
+(the IPv4 wildcard maps to the IPv6 wildcard), and an IPv4-mapped IPv6
+address collapses to plain IPv4 on an `AF_INET` socket. Anything else with a
+mismatched family throws `ArgumentError`.
+"""
+@inline function _coerce_family(addr::SocketAddr, family::Cint)::SocketEndpoint
+    _addr_family(addr) == family && return addr::SocketEndpoint
+    if family == SocketOps.AF_INET6 && addr isa SocketAddrV4
+        _is_wildcard_ip(addr) && return any_addr6(addr.port)
+        ip = addr.ip
+        return SocketAddrV6((_V4_MAPPED_PREFIX..., ip[1], ip[2], ip[3], ip[4]), addr.port)
+    end
+    if family == SocketOps.AF_INET && addr isa SocketAddrV6
+        ip = addr.ip
+        if ip[1:12] == _V4_MAPPED_PREFIX && addr.scope_id == 0
+            return SocketAddrV4((ip[13], ip[14], ip[15], ip[16]), addr.port)
+        end
+    end
+    throw(ArgumentError("address family does not match the socket family"))
+end
+
+
 @inline function _is_connected(conn::Conn)::Bool
     return @atomic :acquire conn.fd.is_connected
 end
@@ -139,6 +187,9 @@ function _listen_impl(
     ok = false
     try
         family == SocketOps.AF_INET6 && _set_ipv6_only!(fd, v6only)
+        # Go parity (setDefaultSockopts): datagram sockets allow broadcast out
+        # of the box. Unlike the v6only option above, a failure is surfaced.
+        SocketOps.set_sockopt_int(fd.pfd.sysfd, SocketOps.SOL_SOCKET, SocketOps.SO_BROADCAST, 1)
         if reuseaddr
             SocketOps.set_sockopt_int(fd.pfd.sysfd, SocketOps.SOL_SOCKET, SocketOps.SO_REUSEADDR, 1)
         end
@@ -186,25 +237,38 @@ function _connect_impl(
         v6only::Bool,
         net::Symbol,
     )::Conn
-    family = _addr_family(remote_addr)
-    if local_addr !== nothing && _addr_family(local_addr) != family
-        throw(ArgumentError("local and remote address families must match"))
+    remote_addr = _prepare_dial_remote(remote_addr)
+    # Go favoriteAddrFamily parity: the socket is AF_INET only when every
+    # given address is IPv4; otherwise it is AF_INET6 and IPv4 addresses are
+    # carried as IPv4-mapped IPv6.
+    family = if local_addr === nothing
+        _addr_family(remote_addr)
+    elseif _addr_family(local_addr) == SocketOps.AF_INET &&
+            _addr_family(remote_addr) == SocketOps.AF_INET
+        SocketOps.AF_INET
+    else
+        SocketOps.AF_INET6
     end
+    remote_endpoint = _coerce_family(remote_addr, family)
+    local_endpoint = local_addr === nothing ? nothing : _coerce_family(local_addr, family)
     fd = open_net_fd!(; family = family, sotype = SocketOps.SOCK_DGRAM, net = net)
     registered = false
     ok = false
     try
         family == SocketOps.AF_INET6 && _set_ipv6_only!(fd, v6only)
-        if local_addr !== nothing
-            SocketOps.bind_socket(fd.pfd.sysfd, _to_sockaddr(local_addr))
+        # Go parity (setDefaultSockopts): datagram sockets allow broadcast out
+        # of the box. Unlike the v6only option above, a failure is surfaced.
+        SocketOps.set_sockopt_int(fd.pfd.sysfd, SocketOps.SOL_SOCKET, SocketOps.SO_BROADCAST, 1)
+        if local_endpoint !== nothing
+            SocketOps.bind_socket(fd.pfd.sysfd, _to_sockaddr(local_endpoint))
         end
-        errno = SocketOps.connect_socket(fd.pfd.sysfd, _to_sockaddr(remote_addr))
+        errno = SocketOps.connect_socket(fd.pfd.sysfd, _to_sockaddr(remote_endpoint))
         if errno != Int32(0) && errno != Int32(Base.Libc.EISCONN)
             throw(SystemError("connect", Int(errno)))
         end
         IOPoll.register!(fd.pfd)
         registered = true
-        _finalize_connected_addrs!(fd, remote_addr)
+        _finalize_connected_addrs!(fd, remote_endpoint)
         ok = true
         return Conn(fd)
     finally
@@ -274,10 +338,8 @@ socket's.
 """
 function sendto(conn::Conn, data, addr::SocketAddr)::Nothing
     _is_connected(conn) && throw(ArgumentError("sendto on a connected UDP socket; use send(conn, data)"))
-    if _addr_family(addr) != conn.fd.family
-        throw(ArgumentError("destination address family does not match the socket family"))
-    end
-    _send_payload!(conn, data, addr)
+    dest = _coerce_family(addr, conn.fd.family)
+    _send_payload!(conn, data, dest)
     return nothing
 end
 
@@ -370,10 +432,37 @@ end
 """
     set_broadcast!(conn::Conn, enabled=true)
 
-Toggle `SO_BROADCAST`, allowing sends to broadcast addresses.
+Toggle `SO_BROADCAST`. Broadcast is **enabled by default** on every UDP
+socket (Go parity); use `set_broadcast!(conn, false)` to disable it.
 """
 function set_broadcast!(conn::Conn, enabled::Bool = true)
     IOPoll.set_sockopt_int!(conn.fd.pfd, SocketOps.SOL_SOCKET, SocketOps.SO_BROADCAST, enabled ? 1 : 0)
+    return nothing
+end
+
+
+"""
+    set_read_buffer!(conn::Conn, nbytes::Integer)
+
+Set the kernel receive buffer size (`SO_RCVBUF`). Kernels may round the
+value (Linux doubles it). Datagrams that arrive while the buffer is full are
+dropped, so servers expecting bursts should raise this.
+"""
+function set_read_buffer!(conn::Conn, nbytes::Integer)
+    nbytes > 0 || throw(ArgumentError("buffer size must be positive"))
+    IOPoll.set_sockopt_int!(conn.fd.pfd, SocketOps.SOL_SOCKET, SocketOps.SO_RCVBUF, Int(nbytes))
+    return nothing
+end
+
+"""
+    set_write_buffer!(conn::Conn, nbytes::Integer)
+
+Set the kernel send buffer size (`SO_SNDBUF`). Kernels may round the value
+(Linux doubles it).
+"""
+function set_write_buffer!(conn::Conn, nbytes::Integer)
+    nbytes > 0 || throw(ArgumentError("buffer size must be positive"))
+    IOPoll.set_sockopt_int!(conn.fd.pfd, SocketOps.SOL_SOCKET, SocketOps.SO_SNDBUF, Int(nbytes))
     return nothing
 end
 

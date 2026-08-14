@@ -80,6 +80,25 @@ semantics). The allocating [`UDP.recv`](@ref UDP.recv) and
 [`UDP.recvfrom`](@ref UDP.recvfrom) default to a `maxsize` that holds any
 datagram, so they never truncate unless a smaller `maxsize` is requested.
 
+## Socket options and dual-stack behavior
+
+Broadcast (`SO_BROADCAST`) is **enabled by default** on every UDP socket,
+matching Go's `setDefaultSockopts`; disable it with
+`UDP.set_broadcast!(conn, false)`. Kernel buffer sizes are set with
+`UDP.set_read_buffer!`/`UDP.set_write_buffer!` (datagrams that arrive while
+the receive buffer is full are dropped), and `UDP.set_ttl!` sets the IPv4 TTL
+or IPv6 hop limit.
+
+AF_INET6 sockets are dual-stack by default (except with the `"udp6"` network
+name), and addresses convert the way Go's `ipToSockaddr` converts them: an
+IPv4 destination on an IPv6 socket is carried as an IPv4-mapped IPv6 address,
+an IPv4-mapped destination on an IPv4 socket collapses to plain IPv4, and
+`connect` picks `AF_INET` only when every given address is IPv4 (Go's
+`favoriteAddrFamily`). A wildcard dial destination means "this host": the
+kernel interprets it directly where supported, and Reseau rewrites it to the
+loopback address on Windows, FreeBSD, and OpenBSD exactly as Go's
+`internetSocket` does.
+
 ## Deadlines
 
 The deadline model is identical to TCP: absolute monotonic timestamps on the
@@ -104,6 +123,24 @@ conn = UDP.connect("localhost:9000")
 wild = UDP.listen(":9000")
 four = UDP.listen("udp4", "127.0.0.1:9000")
 ```
+
+## Differences from Go
+
+`Reseau.UDP` follows Go's `net.UDPConn` semantics closely. The deliberate
+deviations, chosen where Julia idiom or cross-platform consistency wins:
+
+| Area | Go | Reseau |
+| --- | --- | --- |
+| Stream interface | `UDPConn` implements `io.Reader`/`io.Writer` | `Conn` is not an `IO`; datagram verbs only |
+| Truncation | Silent prefix on POSIX, error on Windows | Uniform: throws `TruncatedDatagramError` unless `allow_truncate=true` |
+| Mode misuse | Runtime error values (`ErrWriteToConnected`, kernel `EDESTADDRREQ`) | `ArgumentError` at the API boundary |
+| Empty receive buffer | Consumes a datagram on POSIX, returns without I/O on Windows | Consumes (and flags truncation) on every platform |
+| Spurious Windows resets | Not handled (`WSAECONNRESET` leaks to unconnected sockets) | `SIO_UDP_CONNRESET` disabled on unconnected sockets |
+| Error wrapping | Every operation returns `*net.OpError` | Direct-address calls throw raw errors; only string-address entrypoints wrap in `OpError` (house convention) |
+| IPv6 scopes | `Zone` interface name string | Numeric `scope_id` |
+| Convenience | `ListenUDP` accepts a nil address | Use `UDP.listen(":0")` or `any_addr(0)` |
+| Allocating receives | Caller always supplies the buffer | `recv`/`recvfrom` allocate right-sized results (Sockets-stdlib migration affordance) |
+| Raw access | `SyscallConn`/`File` | Not provided |
 
 ## Not yet implemented
 

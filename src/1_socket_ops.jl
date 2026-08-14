@@ -58,6 +58,8 @@ const SO_BROADCAST = @static Sys.islinux() ? Cint(0x0006) : Cint(0x0020)
 const SO_REUSEPORT = @static Sys.islinux() ? Cint(15) : Cint(0x0200)
 const IP_TTL = @static Sys.islinux() ? Cint(2) : Cint(4)
 const IPV6_UNICAST_HOPS = @static Sys.islinux() ? Cint(16) : Cint(4)
+const SO_RCVBUF = @static Sys.islinux() ? Cint(0x0008) : Cint(0x1002)
+const SO_SNDBUF = @static Sys.islinux() ? Cint(0x0007) : Cint(0x1001)
 # Windows reports datagram truncation through WSAEMSGSIZE rather than a
 # recvmsg flag, so the constant is only meaningful on POSIX platforms.
 const MSG_TRUNC = @static Sys.iswindows() ? Cint(0) :
