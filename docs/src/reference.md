@@ -18,6 +18,7 @@ Depth = 2:2
 ```@docs
 Reseau
 Reseau.TCP
+Reseau.UDP
 Reseau.TLS
 ```
 
@@ -76,34 +77,34 @@ addr
 
 ## UDP
 
-```@docs
-Reseau.UDP
+```@meta
+CurrentModule = Reseau.UDP
 ```
 
 ### Connections and Datagram I/O
 
 ```@docs
-UDP.Conn
-UDP.listen
-UDP.connect
-UDP.send
-UDP.sendto
-UDP.recv
-UDP.recv!
-UDP.recvfrom
-UDP.recvfrom!
-UDP.TruncatedDatagramError
+Conn
+listen
+connect
+send
+sendto
+recv
+recv!
+recvfrom
+recvfrom!
+TruncatedDatagramError
 ```
 
 ### Deadlines, Socket Options, and Address Inspection
 
 ```@docs
 UDP.DeadlineExceededError
-UDP.set_deadline!
-UDP.set_read_deadline!
-UDP.set_write_deadline!
-UDP.set_broadcast!
-UDP.set_ttl!
+set_deadline!
+set_read_deadline!
+set_write_deadline!
+set_broadcast!
+set_ttl!
 UDP.local_addr
 UDP.remote_addr
 ```
