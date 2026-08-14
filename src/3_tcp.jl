@@ -550,10 +550,12 @@ end
 end
 
 """
+    listenany(hint::Integer; backlog=128, reuseaddr=true) -> (UInt16, Listener)
     listenany(hint::SocketAddr; backlog=128, reuseaddr=true) -> (UInt16, Listener)
 
 Bind a listener on the first available port at or above `hint`'s port,
 returning the bound port and the listener (the `Sockets.listenany` idiom).
+The integer form binds to the IPv4 loopback address.
 
 Ports that are in use (`EADDRINUSE`) or forbidden (`EACCES`) are skipped by
 incrementing the port; running out of ports rethrows the last error. A hint
@@ -563,6 +565,10 @@ port of `0` binds an ephemeral port directly.
 exclusive Windows binds are exactly what keeps `EADDRINUSE` (and therefore
 this availability probe) reliable there.
 """
+function listenany(hint::Integer; backlog::Integer = 128, reuseaddr::Bool = true)::Tuple{UInt16, Listener}
+    return listenany(loopback_addr(hint); backlog = backlog, reuseaddr = reuseaddr)
+end
+
 function listenany(hint::SocketAddr; backlog::Integer = 128, reuseaddr::Bool = true)::Tuple{UInt16, Listener}
     addr = hint
     while true
@@ -1131,25 +1137,33 @@ function set_keepalive!(
         interval_secs::Union{Nothing, Integer} = nothing,
         count::Union{Nothing, Integer} = nothing,
     )
+    idle = _positive_sockopt_value("idle_secs", idle_secs)
+    interval = _positive_sockopt_value("interval_secs", interval_secs)
+    probes = _positive_sockopt_value("count", count)
     IOPoll.set_sockopt_int!(
         conn.fd.pfd,
         SocketOps.SOL_SOCKET,
         SocketOps.SO_KEEPALIVE,
         enabled ? 1 : 0,
     )
-    if idle_secs !== nothing
-        idle_secs > 0 || throw(ArgumentError("idle_secs must be positive"))
-        IOPoll.set_sockopt_int!(conn.fd.pfd, SocketOps.IPPROTO_TCP, SocketOps.TCP_KEEPIDLE, Int(idle_secs))
+    if idle !== nothing
+        IOPoll.set_sockopt_int!(conn.fd.pfd, SocketOps.IPPROTO_TCP, SocketOps.TCP_KEEPIDLE, idle)
     end
-    if interval_secs !== nothing
-        interval_secs > 0 || throw(ArgumentError("interval_secs must be positive"))
-        IOPoll.set_sockopt_int!(conn.fd.pfd, SocketOps.IPPROTO_TCP, SocketOps.TCP_KEEPINTVL, Int(interval_secs))
+    if interval !== nothing
+        IOPoll.set_sockopt_int!(conn.fd.pfd, SocketOps.IPPROTO_TCP, SocketOps.TCP_KEEPINTVL, interval)
     end
-    if count !== nothing
-        count > 0 || throw(ArgumentError("count must be positive"))
-        IOPoll.set_sockopt_int!(conn.fd.pfd, SocketOps.IPPROTO_TCP, SocketOps.TCP_KEEPCNT, Int(count))
+    if probes !== nothing
+        IOPoll.set_sockopt_int!(conn.fd.pfd, SocketOps.IPPROTO_TCP, SocketOps.TCP_KEEPCNT, probes)
     end
     return nothing
+end
+
+@inline _positive_sockopt_value(::AbstractString, ::Nothing)::Nothing = nothing
+
+function _positive_sockopt_value(name::AbstractString, value::Integer)::Cint
+    0 < value <= typemax(Cint) ||
+        throw(ArgumentError("$name must be in [1, $(typemax(Cint))]"))
+    return Cint(value)
 end
 
 """
@@ -1168,6 +1182,11 @@ function set_quickack!(conn::Conn, enabled::Bool = true)
             SocketOps.TCP_QUICKACK,
             enabled ? 1 : 0,
         )
+    else
+        # Match Sockets' no-op while preserving its open-socket check.
+        IOPoll._with_fd_ref(conn.fd.pfd) do _
+            nothing
+        end
     end
     return nothing
 end
@@ -1178,7 +1197,9 @@ end
 Configure `SO_LINGER`, following Go's `SetLinger`: a negative timeout disables
 lingering (`close` returns immediately and the OS flushes in the background —
 the default), `0` discards unsent data on close with a RST, and a positive
-timeout blocks `close` until the data is flushed or the timeout expires.
+timeout asks the OS to keep sending in the background. On some systems,
+including Linux, a positive timeout may block `close` until data is sent or
+discarded. Remaining data may be discarded after the timeout on some systems.
 """
 function set_linger!(conn::Conn, timeout_secs::Integer)
     lg = if timeout_secs < 0
@@ -1198,8 +1219,8 @@ Set the kernel receive buffer size (`SO_RCVBUF`). The kernel may round the
 value, enforce minimums, or (on Linux) double it to leave bookkeeping room.
 """
 function set_read_buffer!(conn::Conn, nbytes::Integer)
-    nbytes > 0 || throw(ArgumentError("buffer size must be positive"))
-    IOPoll.set_sockopt_int!(conn.fd.pfd, SocketOps.SOL_SOCKET, SocketOps.SO_RCVBUF, Int(nbytes))
+    size = _positive_sockopt_value("buffer size", nbytes)
+    IOPoll.set_sockopt_int!(conn.fd.pfd, SocketOps.SOL_SOCKET, SocketOps.SO_RCVBUF, size)
     return nothing
 end
 
@@ -1210,8 +1231,8 @@ Set the kernel send buffer size (`SO_SNDBUF`). The kernel may round the
 value, enforce minimums, or (on Linux) double it to leave bookkeeping room.
 """
 function set_write_buffer!(conn::Conn, nbytes::Integer)
-    nbytes > 0 || throw(ArgumentError("buffer size must be positive"))
-    IOPoll.set_sockopt_int!(conn.fd.pfd, SocketOps.SOL_SOCKET, SocketOps.SO_SNDBUF, Int(nbytes))
+    size = _positive_sockopt_value("buffer size", nbytes)
+    IOPoll.set_sockopt_int!(conn.fd.pfd, SocketOps.SOL_SOCKET, SocketOps.SO_SNDBUF, size)
     return nothing
 end
 
@@ -1219,13 +1240,13 @@ end
     rawfd(conn) -> RawFD or Base.WindowsRawSocket
 
 Return the OS-level socket descriptor backing `conn` (a `RawFD` on POSIX, a
-`Base.WindowsRawSocket` on Windows) for FFI and interop uses such as
-subprocess stdio redirection.
+`Base.WindowsRawSocket` on Windows) for FFI and interop.
 
 Reseau retains ownership: the descriptor is non-blocking and registered with
 the internal poller; callers must not close it, change its flags, or use it
-after `close(conn)`. Throws `NetClosingError` if the socket is already
-closing.
+after `close(conn)`. The result is a borrowed snapshot. Keep `conn` reachable,
+for example with `GC.@preserve`, for the full external operation. Throws
+`NetClosingError` if the socket is already closing.
 """
 function rawfd(conn::Conn)
     return _rawfd(conn.fd)
@@ -1241,12 +1262,12 @@ function rawfd(listener::Listener)
 end
 
 function _rawfd(fd::FD)
-    IOPoll._fdlock_closing(fd.pfd.fdlock) && throw(IOPoll.NetClosingError())
-    sysfd = fd.pfd.sysfd
-    @static if Sys.iswindows()
-        return Base.WindowsRawSocket(Ptr{Cvoid}(sysfd))
-    else
-        return RawFD(sysfd)
+    return IOPoll._with_fd_ref(fd.pfd) do sysfd
+        @static if Sys.iswindows()
+            return Base.WindowsRawSocket(Ptr{Cvoid}(sysfd))
+        else
+            return RawFD(sysfd)
+        end
     end
 end
 

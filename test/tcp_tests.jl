@@ -1059,7 +1059,7 @@ end
     @testset "listenany" begin
         taken = TCP.listen(TCP.loopback_addr(0))
         hint_port = Int((TCP.addr(taken)::TCP.SocketAddrV4).port)
-        port, listener = TCP.listenany(TCP.loopback_addr(hint_port))
+        port, listener = TCP.listenany(hint_port)
         @test port != hint_port
         @test isopen(listener)
         conn = TCP.connect(TCP.loopback_addr(Int(port)))
@@ -1069,9 +1069,13 @@ end
         close(listener)
         close(taken)
 
-        eport, elistener = TCP.listenany(TCP.loopback_addr(0))
+        eport, elistener = TCP.listenany(0)
         @test eport != 0
         close(elistener)
+
+        aport, alistener = TCP.listenany(TCP.loopback_addr(0))
+        @test aport != 0
+        close(alistener)
     end
 
     @testset "keepalive tuning" begin
@@ -1089,6 +1093,8 @@ end
         @test_throws ArgumentError TCP.set_keepalive!(conn; idle_secs = 0)
         @test_throws ArgumentError TCP.set_keepalive!(conn; interval_secs = -1)
         @test_throws ArgumentError TCP.set_keepalive!(conn; count = 0)
+        @test_throws ArgumentError TCP.set_keepalive!(conn; count = Int(typemax(Cint)) + 1)
+        @test Reseau.SocketOps.get_sockopt_int(sysfd, Reseau.SocketOps.SOL_SOCKET, Reseau.SocketOps.SO_KEEPALIVE) == 0
         close(conn)
         close(server)
         close(listener)
@@ -1140,6 +1146,7 @@ end
         @test Reseau.SocketOps.get_sockopt_int(sysfd, Reseau.SocketOps.SOL_SOCKET, Reseau.SocketOps.SO_SNDBUF) >= 65536
         @test_throws ArgumentError TCP.set_read_buffer!(conn, 0)
         @test_throws ArgumentError TCP.set_write_buffer!(conn, -1)
+        @test_throws ArgumentError TCP.set_read_buffer!(conn, Int(typemax(Cint)) + 1)
         close(conn)
         close(server)
         close(listener)
@@ -1160,6 +1167,7 @@ end
             ) != 0
         end
         close(conn)
+        @test_throws Reseau.IOPoll.NetClosingError TCP.set_quickack!(conn)
         close(server)
         close(listener)
     end
