@@ -1435,6 +1435,14 @@ function _native_tls_auto_client_handshake!(conn::Conn)::Nothing
     native_state13 = _native_tls13_state(conn)
     io13 = _TLS13HandshakeRecordIO(conn.tcp, native_state13)
     try
+        # The TLS 1.3 continuation signs CertificateVerify from this state, so the local
+        # identity has to be loaded before the peer can pick that version; the TLS 1.2
+        # continuation loads its own from `conn.config`.
+        identity = _tls_local_identity(conn.config; is_server = false)
+        if identity !== nothing
+            state13.client_certificate_chain = copy((identity::_TLSLocalIdentity).certificate_chain)
+            state13.client_private_key = identity.private_key
+        end
         _write_client_hello!(state13, io13)
         raw_server_hello = _read_handshake_bytes!(io13)
         parsed_server_hello = _unmarshal_handshake_message_or_fail(raw_server_hello)

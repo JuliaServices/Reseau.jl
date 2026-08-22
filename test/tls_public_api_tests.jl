@@ -1153,6 +1153,77 @@ end
             @test client_state2.curve == "X25519"
             @test server_state2.curve == "X25519"
         end
+        @testset "mixed-version native client presents its certificate when TLS 1.3 is negotiated" begin
+            function run_once(server_cfg::TL.Config, client_cfg::TL.Config)
+                listener = nothing
+                client = nothing
+                accept_task = nothing
+                try
+                    listener = TL.listen("tcp", "127.0.0.1:0", server_cfg; backlog = 16)
+                    laddr = TL.addr(listener)::NC.SocketAddrV4
+                    accept_task = errormonitor(Threads.@spawn begin
+                        conn = TL.accept(listener)
+                        try
+                            TL.handshake!(conn)
+                            write(conn, UInt8[0x53])
+                            read(conn, 1) == UInt8[0x63] || error("unexpected TLS client ack")
+                            return TL.connection_state(conn)
+                        finally
+                            _tls_close_quiet!(conn)
+                        end
+                    end)
+                    client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                    read(client, 1) == UInt8[0x53] || error("unexpected TLS server byte")
+                    write(client, UInt8[0x63]) == 1 || error("unexpected TLS client ack write")
+                    _tls_wait_task_done(accept_task)
+                    return TL.connection_state(client), fetch(accept_task)::TL.ConnectionState
+                finally
+                    _tls_close_quiet!(client)
+                    _tls_close_quiet!(listener)
+                    IP.shutdown!()
+                end
+            end
+
+            # The client allows both versions (the default), so the mixed-version driver runs.
+            client_cfg = TL.Config(
+                verify_peer = true,
+                verify_hostname = true,
+                server_name = "localhost",
+                ca_file = _TLS_NATIVE_CA_PATH,
+                cert_file = _TLS_NATIVE_CLIENT_CERT_PATH,
+                key_file = _TLS_NATIVE_CLIENT_KEY_PATH,
+                handshake_timeout_ns = 10_000_000_000,
+            )
+            for (label, version_kwargs) in (
+                ("exact TLS 1.3 server", (; min_version = TL.TLS1_3_VERSION, max_version = TL.TLS1_3_VERSION)),
+                ("mixed-version server", (;)),
+            )
+                @testset "$(label)" begin
+                    server_cfg = _tls_server_config(;
+                        handshake_timeout_ns = 10_000_000_000,
+                        cert_file = _TLS_NATIVE_SERVER_CERT_PATH,
+                        key_file = _TLS_NATIVE_SERVER_KEY_PATH,
+                        client_auth = TL.ClientAuthMode.RequireAndVerifyClientCert,
+                        client_ca_file = _TLS_NATIVE_CA_PATH,
+                        version_kwargs...,
+                    )
+                    client_state1, server_state1 = run_once(server_cfg, client_cfg)
+                    @test client_state1.version == "TLSv1.3"
+                    @test server_state1.version == "TLSv1.3"
+                    @test client_state1.using_native_tls13
+                    @test server_state1.using_native_tls13
+                    @test !client_state1.did_resume
+                    @test !server_state1.did_resume
+                    @test client_state1.has_resumable_session
+                    # Resumption keeps working with a client identity loaded into the TLS 1.3 state.
+                    client_state2, server_state2 = run_once(server_cfg, client_cfg)
+                    @test client_state2.version == "TLSv1.3"
+                    @test server_state2.version == "TLSv1.3"
+                    @test client_state2.did_resume
+                    @test server_state2.did_resume
+                end
+            end
+        end
         @testset "mixed-version native server supports TLS 1.2 mTLS and resumption against an exact TLS 1.2 client" begin
             function run_once(server_cfg::TL.Config, client_cfg::TL.Config)
                 listener = nothing
