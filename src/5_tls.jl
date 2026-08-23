@@ -1294,12 +1294,7 @@ function _native_tls13_client_handshake!(conn::Conn)::Nothing
     native_state = _native_tls13_state(conn)
     io = _TLS13HandshakeRecordIO(conn.tcp, native_state)
     try
-        identity = _tls_local_identity(conn.config; is_server = false)
-        if identity !== nothing
-            state.client_certificate_chain = copy((identity::_TLSLocalIdentity).certificate_chain)
-            state.client_private_key = identity.private_key
-        end
-        _client_handshake_tls13!(state, io)
+        _client_handshake_tls13!(state, io, conn.config)
         _finish_native_tls13_client_handshake!(conn, state, cache_key)
     finally
         _securezero_tls13_client_handshake_state!(state)
@@ -1435,14 +1430,6 @@ function _native_tls_auto_client_handshake!(conn::Conn)::Nothing
     native_state13 = _native_tls13_state(conn)
     io13 = _TLS13HandshakeRecordIO(conn.tcp, native_state13)
     try
-        # The TLS 1.3 continuation signs CertificateVerify from this state, so the local
-        # identity has to be loaded before the peer can pick that version; the TLS 1.2
-        # continuation loads its own from `conn.config`.
-        identity = _tls_local_identity(conn.config; is_server = false)
-        if identity !== nothing
-            state13.client_certificate_chain = copy((identity::_TLSLocalIdentity).certificate_chain)
-            state13.client_private_key = identity.private_key
-        end
         _write_client_hello!(state13, io13)
         raw_server_hello = _read_handshake_bytes!(io13)
         parsed_server_hello = _unmarshal_handshake_message_or_fail(raw_server_hello)
@@ -1456,7 +1443,7 @@ function _native_tls_auto_client_handshake!(conn::Conn)::Nothing
         native_state13.version = negotiated_version
         if negotiated_version == TLS1_3_VERSION
             _check_server_hello_or_hrr!(state13)
-            _client_handshake_tls13_after_server_hello!(state13, io13)
+            _client_handshake_tls13_after_server_hello!(state13, io13, conn.config)
             _finish_native_tls13_client_handshake!(conn, state13, cache_key)
             return nothing
         end

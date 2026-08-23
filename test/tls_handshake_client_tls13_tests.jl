@@ -7,6 +7,8 @@ const _TLS_KEY_PATH = joinpath(@__DIR__, "resources", "unittests.key")
 const _TLS13_TEST_CERT_PEM = read(_TLS_CERT_PATH)
 const _TLS13_TEST_KEY_PEM = read(_TLS_KEY_PATH)
 const _TLS13_TEST_CERT_DER = TLHC._tls13_openssl_certificate_der(_TLS13_TEST_CERT_PEM)
+const _TLS13_TEST_NO_IDENTITY_CONFIG = TLHC.Config()
+const _TLS13_TEST_IDENTITY_CONFIG = TLHC.Config(cert_file = _TLS_CERT_PATH, key_file = _TLS_KEY_PATH)
 const _TLS13_TEST_CLIENT_X25519_PRIVATE_KEY = UInt8[
     0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
     0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
@@ -305,7 +307,7 @@ end
 function _compute_tls13_real_certificate_server_flight(
     client_hello::TLHC._ClientHelloMsg;
     hello_retry::Bool = false,
-    certificate_request::Bool = false,
+    certificate_request::Union{Nothing, TLHC._CertificateRequestMsgTLS13} = nothing,
     key_share_provider = _tls13_openssl_key_share_provider(include_p256 = hello_retry),
 )
     TLHC._tls13_prepare_initial_client_hello!(key_share_provider, client_hello)
@@ -347,9 +349,8 @@ function _compute_tls13_real_certificate_server_flight(
     push!(inbound, encrypted_extensions_bytes)
     TLHC._transcript_update!(transcript, encrypted_extensions_bytes)
 
-    cert_req = nothing
-    if certificate_request
-        cert_req = _tls13_server_certificate_request()
+    cert_req = certificate_request
+    if cert_req !== nothing
         cert_req_bytes = TLHC._marshal_handshake_message(cert_req)
         push!(inbound, cert_req_bytes)
         TLHC._transcript_update!(transcript, cert_req_bytes)
@@ -379,7 +380,7 @@ function _compute_tls13_real_certificate_server_flight(
     TLHC._transcript_update!(transcript_for_client, transcript_bytes)
 
     client_certificate_bytes = nothing
-    if certificate_request
+    if cert_req !== nothing
         client_certificate_bytes = TLHC._marshal_certificate_tls13(TLHC._CertificateMsgTLS13())
         TLHC._transcript_update!(transcript_for_client, client_certificate_bytes)
         push!(outbound, client_certificate_bytes)
@@ -513,10 +514,26 @@ end
             @test TLHC._tls_select_signature_algorithm(p256_cert_pkey, offered_ecdsa) == TLHC._TLS_SIGNATURE_ECDSA_SECP256R1_SHA256
             @test TLHC._tls_select_signature_algorithm(p384_cert_pkey, offered_ecdsa) == TLHC._TLS_SIGNATURE_ECDSA_SECP384R1_SHA384
             @test TLHC._tls_select_signature_algorithm(p521_cert_pkey, offered_ecdsa) == TLHC._TLS_SIGNATURE_ECDSA_SECP521R1_SHA512
-            @test_throws ArgumentError TLHC._tls_select_signature_algorithm(
+            # Go's selectSignatureScheme: no usable scheme is a negotiation outcome, not an error.
+            @test TLHC._tls_select_signature_algorithm(
                 p384_cert_pkey,
                 UInt16[TLHC._TLS_SIGNATURE_ECDSA_SECP256R1_SHA256],
-            )
+            ) === nothing
+            rsa_cert_pkey = (TLHC._tls_local_identity(_TLS13_TEST_IDENTITY_CONFIG; is_server = false)::TLHC._TLSLocalIdentity).private_key
+            try
+                # Picked in the peer's preference order, not ours.
+                @test TLHC._tls_select_signature_algorithm(
+                    rsa_cert_pkey,
+                    UInt16[TLHC._TLS_SIGNATURE_RSA_PSS_RSAE_SHA384, TLHC._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256],
+                ) == TLHC._TLS_SIGNATURE_RSA_PSS_RSAE_SHA384
+                # PKCS#1 v1.5 is not a TLS 1.3 signature scheme.
+                @test TLHC._tls_select_signature_algorithm(
+                    rsa_cert_pkey,
+                    UInt16[TLHC._TLS_SIGNATURE_RSA_PKCS1_SHA256, TLHC._TLS_SIGNATURE_ECDSA_SECP256R1_SHA256],
+                ) === nothing
+            finally
+                TLHC._free_evp_pkey!(rsa_cert_pkey)
+            end
 
             signed = collect(UInt8(0x10):UInt8(0x4f))
             signature = TLHC._tls13_openssl_sign_from_pem(TLHC._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256, signed, _TLS13_TEST_KEY_PEM)
@@ -547,7 +564,7 @@ end
 
         state = _tls13_psk_handshake_state(_tls13_psk_client_hello(), psk)
         io = _HandshakeMessageFlightIO(expected.inbound)
-        TLHC._client_handshake_tls13!(state, io)
+        TLHC._client_handshake_tls13!(state, io, _TLS13_TEST_NO_IDENTITY_CONFIG)
 
         @test state.complete
         @test state.using_psk
@@ -581,7 +598,7 @@ end
             psk,
         )
         io = _HandshakeMessageFlightIO(expected.inbound)
-        TLHC._client_handshake_tls13!(state, io)
+        TLHC._client_handshake_tls13!(state, io, _TLS13_TEST_NO_IDENTITY_CONFIG)
 
         @test state.complete
         @test state.using_psk
@@ -601,7 +618,7 @@ end
 
         state = TLHC._TLS13ClientHandshakeState(client_hello, TLHC._TLS13_AES_128_GCM_SHA256_ID, key_share_provider, _tls13_certificate_verifier())
         io = _HandshakeMessageFlightIO(expected.inbound)
-        TLHC._client_handshake_tls13!(state, io)
+        TLHC._client_handshake_tls13!(state, io, _TLS13_TEST_NO_IDENTITY_CONFIG)
 
         @test state.complete
         @test !state.using_psk
@@ -626,12 +643,12 @@ end
         expected = _compute_tls13_real_certificate_server_flight(
             _tls13_cert_client_hello(supported_curves = UInt16[0x001d, 0x0017]);
             hello_retry = true,
-            certificate_request = true,
+            certificate_request = _tls13_server_certificate_request(),
         )
 
         state = TLHC._TLS13ClientHandshakeState(client_hello, TLHC._TLS13_AES_128_GCM_SHA256_ID, key_share_provider, _tls13_certificate_verifier())
         io = _HandshakeMessageFlightIO(expected.inbound)
-        TLHC._client_handshake_tls13!(state, io)
+        TLHC._client_handshake_tls13!(state, io, _TLS13_TEST_NO_IDENTITY_CONFIG)
 
         @test state.complete
         @test !state.using_psk
@@ -642,6 +659,101 @@ end
         @test io.outbound == expected.outbound
         @test length(io.outbound) == 4
         @test state.peer_new_session_tickets == [expected.ticket]
+    end
+
+    @testset "client identity is fetched from the config at CertificateRequest time" begin
+        # Mirrors Go's getClientCertificate/SupportsCertificate: the identity is
+        # looked up only once the server asks for it, and withheld when the
+        # request's signature_algorithms or acceptable CAs cannot use it.
+        own_subject = TLHC._tls_parse_der_certificate_info(_TLS13_TEST_CERT_DER).subject_raw  # self-signed
+        other_ca = TLHC._tls_parse_der_certificate_info(
+            TLHC._tls13_openssl_certificate_der(read(joinpath(@__DIR__, "resources", "native_tls_ca.crt"))),
+        ).subject_raw
+
+        function certificate_request_with(;
+            signature_algorithms::Vector{UInt16} = UInt16[TLHC._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256],
+            authorities::Vector{Vector{UInt8}} = Vector{UInt8}[],
+        )
+            msg = TLHC._CertificateRequestMsgTLS13()
+            msg.supported_signature_algorithms = signature_algorithms
+            msg.supported_signature_algorithms_cert = copy(signature_algorithms)
+            msg.certificate_authorities = authorities
+            return msg
+        end
+
+        function run_client(config, cert_req)
+            expected = _compute_tls13_real_certificate_server_flight(_tls13_cert_client_hello(); certificate_request = cert_req)
+            state = TLHC._TLS13ClientHandshakeState(
+                _tls13_cert_client_hello(),
+                TLHC._TLS13_AES_128_GCM_SHA256_ID,
+                _tls13_openssl_key_share_provider(),
+                _tls13_certificate_verifier(),
+            )
+            io = _HandshakeMessageFlightIO(expected.inbound)
+            try
+                TLHC._client_handshake_tls13!(state, io, config)
+                @test state.complete
+                @test state.have_certificate_request
+                # Snapshot before securezero: the outbound ClientHello aliases state.client_hello_raw.
+                outbound = [copy(raw) for raw in io.outbound]
+                return expected, outbound, copy(state.client_certificate_chain), state.client_signature_algorithm
+            finally
+                TLHC._securezero_tls13_client_handshake_state!(state)
+            end
+        end
+
+        @testset "presented when the request accepts it: $label" for (label, cert_req) in (
+            ("no acceptable CAs named", certificate_request_with()),
+            ("issued by an acceptable CA", certificate_request_with(authorities = [copy(own_subject)])),
+            (
+                "peer preference order",
+                certificate_request_with(
+                    signature_algorithms = UInt16[TLHC._TLS_SIGNATURE_RSA_PSS_RSAE_SHA384, TLHC._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256],
+                ),
+            ),
+        )
+            expected, outbound, chain, signature_algorithm = run_client(_TLS13_TEST_IDENTITY_CONFIG, cert_req)
+            @test chain == [_TLS13_TEST_CERT_DER]
+            @test signature_algorithm == cert_req.supported_signature_algorithms[1]
+            # ClientHello, Certificate, CertificateVerify, Finished.
+            @test length(outbound) == 4
+            certificate = TLHC._unmarshal_certificate_tls13(outbound[2])
+            @test certificate !== nothing
+            certificate === nothing || @test certificate.certificates == [_TLS13_TEST_CERT_DER]
+            verify = TLHC._unmarshal_certificate_verify(outbound[3])
+            @test verify !== nothing
+            if verify !== nothing
+                @test verify.signature_algorithm == signature_algorithm
+                # CertificateVerify signs the transcript through the client Certificate.
+                transcript = TLHC._TranscriptHash(TLHC._HASH_SHA256)
+                TLHC._transcript_update!(transcript, outbound[1])
+                for raw in expected.inbound[1:6]
+                    TLHC._transcript_update!(transcript, raw)
+                end
+                TLHC._transcript_update!(transcript, outbound[2])
+                signed = TLHC._tls13_signed_message(TLHC._TLS13_CLIENT_SIGNATURE_CONTEXT, transcript)
+                pubkey = TLHC._tls_parse_der_certificate_info(_TLS13_TEST_CERT_DER).public_key
+                @test TLHC._tls13_openssl_verify_signature(pubkey, verify.signature_algorithm, signed, verify.signature)
+            end
+        end
+
+        @testset "withheld when the request cannot use it: $label" for (label, cert_req) in (
+            ("no usable signature algorithm", certificate_request_with(signature_algorithms = UInt16[TLHC._TLS_SIGNATURE_ECDSA_SECP256R1_SHA256])),
+            ("not issued by an acceptable CA", certificate_request_with(authorities = [copy(other_ca)])),
+        )
+            expected, outbound, chain, signature_algorithm = run_client(_TLS13_TEST_IDENTITY_CONFIG, cert_req)
+            @test isempty(chain)
+            @test signature_algorithm == UInt16(0)
+            # An empty Certificate and no CertificateVerify: byte-for-byte what a
+            # client without an identity sends.
+            @test outbound == expected.outbound
+        end
+
+        @testset "absent when the config has no identity" begin
+            expected, outbound, chain, _ = run_client(_TLS13_TEST_NO_IDENTITY_CONFIG, certificate_request_with())
+            @test isempty(chain)
+            @test outbound == expected.outbound
+        end
     end
 
     @testset "HelloRetryRequest drops PSK binders when the selected suite hash changes" begin
@@ -915,7 +1027,7 @@ end
         io = _HandshakeMessageFlightIO(inbound)
 
         err = try
-            TLHC._client_handshake_tls13!(state, io)
+            TLHC._client_handshake_tls13!(state, io, _TLS13_TEST_NO_IDENTITY_CONFIG)
             nothing
         catch ex
             ex
@@ -942,7 +1054,7 @@ end
         io = _HandshakeMessageFlightIO(inbound)
 
         err = try
-            TLHC._client_handshake_tls13!(state, io)
+            TLHC._client_handshake_tls13!(state, io, _TLS13_TEST_NO_IDENTITY_CONFIG)
             nothing
         catch ex
             ex
@@ -976,7 +1088,7 @@ end
         )
         io = _HandshakeMessageFlightIO(inbound)
         err = try
-            TLHC._client_handshake_tls13!(state, io)
+            TLHC._client_handshake_tls13!(state, io, _TLS13_TEST_NO_IDENTITY_CONFIG)
             nothing
         catch ex
             ex
@@ -1013,7 +1125,7 @@ end
         )
         io = _HandshakeMessageFlightIO(inbound)
         err = try
-            TLHC._client_handshake_tls13!(state, io)
+            TLHC._client_handshake_tls13!(state, io, _TLS13_TEST_NO_IDENTITY_CONFIG)
             nothing
         catch ex
             ex
@@ -1039,7 +1151,7 @@ end
         io = _HandshakeMessageFlightIO(inbound)
 
         err = try
-            TLHC._client_handshake_tls13!(state, io)
+            TLHC._client_handshake_tls13!(state, io, _TLS13_TEST_NO_IDENTITY_CONFIG)
             nothing
         catch ex
             ex
@@ -1061,7 +1173,7 @@ end
         state = _tls13_psk_handshake_state(_tls13_psk_client_hello(), psk)
 
         err = try
-            TLHC._client_handshake_tls13!(state, io)
+            TLHC._client_handshake_tls13!(state, io, _TLS13_TEST_NO_IDENTITY_CONFIG)
             nothing
         catch ex
             ex

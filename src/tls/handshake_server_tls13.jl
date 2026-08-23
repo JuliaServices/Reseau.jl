@@ -301,7 +301,12 @@ function _tls13_select_server_cipher_suite(client_hello::_ClientHelloMsg)::_TLS1
 end
 
 function _tls13_select_server_signature_algorithm(pkey::Ptr{Cvoid}, client_hello::_ClientHelloMsg)::UInt16
-    return _tls_select_signature_algorithm(pkey, client_hello.supported_signature_algorithms)
+    signature_algorithm = _tls_select_signature_algorithm(pkey, client_hello.supported_signature_algorithms)
+    # Go's pickCertificate: a certificate the client's signature_algorithms
+    # cannot use is a handshake_failure, not an internal error.
+    signature_algorithm === nothing &&
+        _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: peer doesn't support any of the certificate's signature algorithms")
+    return signature_algorithm::UInt16
 end
 
 function _tls13_find_client_key_share(client_hello::_ClientHelloMsg, group::UInt16)::Union{Nothing, _TLSKeyShare}

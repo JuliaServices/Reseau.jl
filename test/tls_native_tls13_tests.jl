@@ -273,6 +273,31 @@ end
         end
     end
 
+    @testset "server fails the handshake when the client cannot use its certificate key" begin
+        # Go's pickCertificate: selectSignatureScheme failing is handshake_failure.
+        server_config = _tls13_native_server_config()
+        state = TLN._TLS13ServerHandshakeState(server_config)
+        try
+            hello = TLN._tls13_client_hello(_tls13_native_client_config())
+            # The server certificate carries an RSA key; only ECDSA is offered.
+            hello.supported_signature_algorithms = UInt16[TLN._TLS_SIGNATURE_ECDSA_SECP256R1_SHA256]
+            TLN._tls13_set_client_hello!(state, TLN._marshal_client_hello(hello))
+            err = try
+                TLN._prepare_server_negotiation!(state, _TLS13ServerFlightIO(Vector{UInt8}[]), server_config)
+                nothing
+            catch ex
+                ex
+            end
+            @test err isa TLN._TLSAlertError
+            if err isa TLN._TLSAlertError
+                @test err.alert == TLN._TLS_ALERT_HANDSHAKE_FAILURE
+                @test !err.from_peer
+            end
+        finally
+            TLN._securezero_tls13_server_handshake_state!(state)
+        end
+    end
+
     @testset "native client sends the selected fatal alert on the wire" begin
         IPN.shutdown!()
         listener = nothing

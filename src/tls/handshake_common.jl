@@ -71,3 +71,22 @@ function _tls_server_session_client_auth_ok(
     end
     return true
 end
+
+# The acceptable-CA half of Go's CertificateRequestInfo.SupportsCertificate: an
+# empty certificate_authorities list accepts any chain, otherwise some certificate
+# in the chain must have been issued by one of the named CAs. Unlike Go, a local
+# certificate our parser cannot read raises instead of silently withholding the
+# identity: that is a misconfiguration, not a negotiation outcome.
+function _tls_chain_signed_by_acceptable_ca(
+    certificate_chain::Vector{Vector{UInt8}},
+    acceptable_cas::Vector{Vector{UInt8}},
+)::Bool
+    isempty(acceptable_cas) && return true
+    for cert_der in certificate_chain
+        issuer_raw = _tls_parse_der_certificate_info(cert_der).issuer_raw
+        for ca in acceptable_cas
+            issuer_raw == ca && return true
+        end
+    end
+    return false
+end

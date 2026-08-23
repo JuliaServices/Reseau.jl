@@ -258,34 +258,38 @@ function _tls13_verify_server_certificate_signature!(verifier::_TLS13OpenSSLCert
     return nothing
 end
 
-function _tls_select_signature_algorithm(pkey::Ptr{Cvoid}, supported_signature_algorithms::AbstractVector{UInt16})::UInt16
+# Mirrors Go's signatureSchemesForPublicKey at TLS 1.3: PKCS#1 v1.5 is gone and
+# each ECDSA scheme is bound to one curve. An unsupported local key type or curve
+# is a configuration error rather than a negotiation outcome, so it raises.
+function _tls13_signature_schemes_for_pkey(pkey::Ptr{Cvoid})::Vector{UInt16}
     pkey_type = _tls13_pkey_type_name(pkey)
     if pkey_type == "RSA"
-        for alg in (
-                _TLS_SIGNATURE_RSA_PSS_RSAE_SHA256,
-                _TLS_SIGNATURE_RSA_PSS_RSAE_SHA384,
-                _TLS_SIGNATURE_RSA_PSS_RSAE_SHA512,
-            )
-            in(alg, supported_signature_algorithms) && return alg
-        end
+        return UInt16[
+            _TLS_SIGNATURE_RSA_PSS_RSAE_SHA256,
+            _TLS_SIGNATURE_RSA_PSS_RSAE_SHA384,
+            _TLS_SIGNATURE_RSA_PSS_RSAE_SHA512,
+        ]
     elseif pkey_type == "EC"
         curve_nid = _tls13_ec_group_curve_nid(pkey)
-        if curve_nid == _init_p256_group_nid!()
-            in(_TLS_SIGNATURE_ECDSA_SECP256R1_SHA256, supported_signature_algorithms) &&
-                return _TLS_SIGNATURE_ECDSA_SECP256R1_SHA256
-        elseif curve_nid == _init_p384_group_nid!()
-            in(_TLS_SIGNATURE_ECDSA_SECP384R1_SHA384, supported_signature_algorithms) &&
-                return _TLS_SIGNATURE_ECDSA_SECP384R1_SHA384
-        elseif curve_nid == _init_p521_group_nid!()
-            in(_TLS_SIGNATURE_ECDSA_SECP521R1_SHA512, supported_signature_algorithms) &&
-                return _TLS_SIGNATURE_ECDSA_SECP521R1_SHA512
-        else
-            throw(ArgumentError("tls: unsupported EC certificate curve $(curve_nid) for TLS 1.3 signature selection"))
-        end
+        curve_nid == _init_p256_group_nid!() && return UInt16[_TLS_SIGNATURE_ECDSA_SECP256R1_SHA256]
+        curve_nid == _init_p384_group_nid!() && return UInt16[_TLS_SIGNATURE_ECDSA_SECP384R1_SHA384]
+        curve_nid == _init_p521_group_nid!() && return UInt16[_TLS_SIGNATURE_ECDSA_SECP521R1_SHA512]
+        throw(ArgumentError("tls: unsupported EC certificate curve $(curve_nid) for TLS 1.3 signature selection"))
     elseif pkey_type == "ED25519"
-        in(_TLS_SIGNATURE_ED25519, supported_signature_algorithms) && return _TLS_SIGNATURE_ED25519
+        return UInt16[_TLS_SIGNATURE_ED25519]
     end
-    throw(ArgumentError("tls: peer does not support a usable TLS 1.3 certificate signature algorithm"))
+    throw(ArgumentError("tls: unsupported TLS 1.3 certificate key type $(pkey_type)"))
+end
+
+# Mirrors Go's selectSignatureScheme: pick in the peer's preference order, as our
+# own order is not configurable. `nothing` means the peer cannot use this key;
+# the server treats that as fatal and the client withholds its certificate.
+function _tls_select_signature_algorithm(pkey::Ptr{Cvoid}, peer_signature_algorithms::AbstractVector{UInt16})::Union{Nothing, UInt16}
+    supported = _tls13_signature_schemes_for_pkey(pkey)
+    for alg in peer_signature_algorithms
+        in(alg, supported) && return alg
+    end
+    return nothing
 end
 
 function _securezero_tls13_key_share_provider!(provider::_TLS13OpenSSLKeyShareProvider)::Nothing
@@ -827,19 +831,36 @@ function _read_server_finished!(state::_TLS13ClientHandshakeState, io)::Nothing
     return nothing
 end
 
-function _send_client_certificate!(state::_TLS13ClientHandshakeState, io)::Nothing
-    state.have_certificate_request || return nothing
-    msg = if isempty(state.client_certificate_chain)
-        _CertificateMsgTLS13()
-    else
-        out = _CertificateMsgTLS13()
-        out.certificates = [copy(cert) for cert in state.client_certificate_chain]
-        state.client_signature_algorithm = _tls_select_signature_algorithm(
-            state.client_private_key,
-            state.certificate_request.supported_signature_algorithms,
-        )
-        out
+# Mirrors Go's getClientCertificate plus CertificateRequestInfo.SupportsCertificate:
+# the local identity is fetched from `config` only once the server has asked for
+# it, and it is withheld (an empty Certificate follows) when the request's
+# signature_algorithms cannot use its key or, when the request names acceptable
+# CAs, no certificate in the chain was issued by one of them.
+function _tls13_prepare_client_identity!(state::_TLS13ClientHandshakeState, config)::Nothing
+    identity = _tls_local_identity(config; is_server = false)
+    identity === nothing && return nothing
+    certificate_chain = copy((identity::_TLSLocalIdentity).certificate_chain)
+    private_key = identity.private_key
+    keep_identity = false
+    try
+        signature_algorithm = _tls_select_signature_algorithm(private_key, state.certificate_request.supported_signature_algorithms)
+        signature_algorithm === nothing && return nothing
+        _tls_chain_signed_by_acceptable_ca(certificate_chain, state.certificate_request.certificate_authorities) || return nothing
+        state.client_certificate_chain = certificate_chain
+        state.client_private_key = private_key
+        state.client_signature_algorithm = signature_algorithm::UInt16
+        keep_identity = true
+        return nothing
+    finally
+        keep_identity || _free_evp_pkey!(private_key)
     end
+end
+
+function _send_client_certificate!(state::_TLS13ClientHandshakeState, io, config)::Nothing
+    state.have_certificate_request || return nothing
+    _tls13_prepare_client_identity!(state, config)
+    msg = _CertificateMsgTLS13()
+    msg.certificates = [copy(cert) for cert in state.client_certificate_chain]
     state.client_certificate = msg
     state.have_client_certificate = true
     raw = _marshal_certificate_tls13(msg)
@@ -891,7 +912,7 @@ function _read_post_handshake_messages!(state::_TLS13ClientHandshakeState, io)::
     return nothing
 end
 
-function _client_handshake_tls13_after_server_hello!(state::_TLS13ClientHandshakeState, io)::Nothing
+function _client_handshake_tls13_after_server_hello!(state::_TLS13ClientHandshakeState, io, config)::Nothing
     _tls_set_negotiated_record_version!(io, TLS1_3_VERSION)
     if state.server_hello.random == _HELLO_RETRY_REQUEST_RANDOM
         _tls13_send_dummy_change_cipher_spec!(io)
@@ -910,7 +931,7 @@ function _client_handshake_tls13_after_server_hello!(state::_TLS13ClientHandshak
     _read_server_certificate!(state, io)
     _read_server_finished!(state, io)
     _tls13_on_server_finished!(io, state)
-    _send_client_certificate!(state, io)
+    _send_client_certificate!(state, io, config)
     _send_client_finished!(state, io)
     _tls13_on_client_finished!(io, state)
     state.complete = true
@@ -918,9 +939,9 @@ function _client_handshake_tls13_after_server_hello!(state::_TLS13ClientHandshak
     return nothing
 end
 
-function _client_handshake_tls13!(state::_TLS13ClientHandshakeState, io)::Nothing
+function _client_handshake_tls13!(state::_TLS13ClientHandshakeState, io, config)::Nothing
     state.complete && throw(ArgumentError("tls13 client handshake already complete"))
     _write_client_hello!(state, io)
     _read_server_hello!(state, io)
-    return _client_handshake_tls13_after_server_hello!(state, io)
+    return _client_handshake_tls13_after_server_hello!(state, io, config)
 end

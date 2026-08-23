@@ -514,6 +514,7 @@ function _tls12_prepare_client_identity!(state::_TLS12ClientHandshakeState, conf
         in(certificate_type, state.certificate_request.certificate_types) || return nothing
         signature_algorithm = _tls12_select_signature_algorithm(private_key, state.certificate_request.supported_signature_algorithms)
         signature_algorithm === nothing && return nothing
+        _tls_chain_signed_by_acceptable_ca(certificate_chain, state.certificate_request.certificate_authorities) || return nothing
         state.client_certificate_chain = certificate_chain
         state.client_private_key = private_key
         state.client_signature_algorithm = signature_algorithm
