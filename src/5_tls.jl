@@ -2511,6 +2511,17 @@ function set_read_deadline!(conn::Conn, deadline_ns::Integer)
 end
 
 """
+    set_direct_wait!(conn, budget_ns)
+
+Set the bounded direct-wait budget on the underlying transport; see
+`TCP.set_direct_wait!`.
+"""
+function set_direct_wait!(conn::Conn, budget_ns::Integer)
+    TCP.set_direct_wait!(conn.tcp, budget_ns)
+    return nothing
+end
+
+"""
     set_write_deadline!(conn, deadline_ns)
 
 Set the write deadline on the underlying transport. See `set_deadline!` for the

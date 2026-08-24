@@ -291,6 +291,7 @@ mutable struct PollState
     @atomic wd_ns::Int64
     @atomic rseq::UInt64
     @atomic wseq::UInt64
+    @atomic direct_wait_ns::Int64
     function PollState(sysfd::SysFD = INVALID_FD, token::UInt64 = UInt64(0))
         return new(
             ReentrantLock(),
@@ -303,6 +304,7 @@ mutable struct PollState
             Int64(0),
             UInt64(0),
             UInt64(0),
+            Int64(0),
         )
     end
 end

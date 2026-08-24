@@ -371,6 +371,77 @@ function preparewrite(pd::PollState, is_file::Bool = false)
     return nothing
 end
 
+# ---- bounded direct wait ----
+# Readiness through the central poller costs two thread wakes: the kernel wakes the poller
+# thread out of its backend wait, and the poller then wakes the parked task's scheduler
+# thread. A blocking client pays exactly one. `set_direct_wait!` lets latency-sensitive
+# request/response callers opt in to a bounded `poll(2)` on the *waiting task's own OS
+# thread* before falling back to parking: readiness inside the budget arrives as a single
+# kernel wake to the right thread, halving quiet-path round-trip latency. The price is that
+# other tasks scheduled on that thread wait up to the budget, so it is off by default and
+# bounded by construction. No-op on Windows (the IOCP backend arms explicit probe
+# operations instead of readiness polls).
+
+struct _CPollFd
+    fd::SysFD
+    events::Cshort
+    revents::Cshort
+end
+
+const _POLLIN = Cshort(0x0001)
+const _POLLOUT = Cshort(0x0004)
+const _NFDS_T = Sys.islinux() ? Culong : Cuint
+
+# One bounded direct poll. `:ready` — readiness (or an error condition the caller's next
+# syscall will surface); `:timeout` — budget elapsed, park instead; `:recheck` — return to
+# the top of the wait loop (EINTR, or an already-expired deadline).
+function _direct_wait!(pd::PollState, mode::PollMode.T, budget_ns::Int64)::Symbol
+    @static if Sys.iswindows()
+        return :timeout
+    else
+        timeout_ns = budget_ns
+        deadline = _mode_has_read(mode) ? (@atomic :acquire pd.rd_ns) : (@atomic :acquire pd.wd_ns)
+        if deadline > 0
+            remaining = deadline - Int64(time_ns())
+            remaining <= 0 && return :recheck
+            timeout_ns = min(timeout_ns, remaining)
+        end
+        timeout_ms = Cint(clamp(cld(timeout_ns, Int64(1_000_000)), Int64(1), Int64(typemax(Cint))))
+        events = _mode_has_read(mode) ? _POLLIN : _POLLOUT
+        pfd = Ref(_CPollFd(pd.sysfd, events, Cshort(0)))
+        n = GC.@preserve pfd begin
+            @gcsafe_ccall poll(pfd::Ptr{_CPollFd}, _NFDS_T(1)::_NFDS_T, timeout_ms::Cint)::Cint
+        end
+        if n < 0
+            errno = Int32(Base.Libc.errno())
+            errno == Int32(Base.Libc.EINTR) && return :recheck
+            # let the parking path surface persistent descriptor problems
+            return :timeout
+        end
+        return n == 0 ? :timeout : :ready
+    end
+end
+
+"""
+    set_direct_wait!(fd, budget_ns)
+
+Set the bounded direct-wait budget for `fd` in nanoseconds; `0` (the default) disables it.
+
+With a positive budget, a task waiting for readiness on `fd` first blocks its own OS
+thread in `poll(2)` for up to the budget (bounded further by any armed deadline) before
+parking on the central poller. Readiness inside the budget is delivered with a single
+kernel wake — about half the quiet-path round-trip latency of the parked path — at the
+cost of other tasks scheduled on that thread waiting up to the budget. Intended for
+latency-sensitive request/response clients; leave disabled for servers multiplexing many
+connections. The timeout has millisecond granularity (budgets round up to 1ms). No effect
+on Windows.
+"""
+function set_direct_wait!(fd::FD, budget_ns::Integer)
+    budget_ns >= 0 || throw(ArgumentError("direct-wait budget must be >= 0"))
+    @atomic :release fd.pd.direct_wait_ns = Int64(budget_ns)
+    return nothing
+end
+
 """
 Block until read readiness, retrying internally if a canceled wake becomes
 stale before the waiter task resumes.
@@ -384,9 +455,16 @@ Throws:
 - `NotPollableError` if the backend reports a permanent readiness error
 """
 function waitread(pd::PollState, is_file::Bool = false)
+    direct_budget = @atomic :acquire pd.direct_wait_ns
     while true
         _convert_poll_error!(_check_error(pd, PollMode.READ), is_file)
         pollable(pd) || throw(ArgumentError("waiting for unsupported file type"))
+        if direct_budget > 0
+            outcome = _direct_wait!(pd, PollMode.READ, direct_budget)
+            outcome == :ready && return nothing
+            outcome == :recheck && continue
+            direct_budget = Int64(0)   # budget spent: park from here on
+        end
         registration = _poll_registration(pd)
         arm_waiter!(registration, PollMode.READ)
         reason = pollwait!(registration.read_waiter)
@@ -404,9 +482,16 @@ stale before the waiter task resumes.
 Returns `nothing`.
 """
 function waitwrite(pd::PollState, is_file::Bool = false)
+    direct_budget = @atomic :acquire pd.direct_wait_ns
     while true
         _convert_poll_error!(_check_error(pd, PollMode.WRITE), is_file)
         pollable(pd) || throw(ArgumentError("waiting for unsupported file type"))
+        if direct_budget > 0
+            outcome = _direct_wait!(pd, PollMode.WRITE, direct_budget)
+            outcome == :ready && return nothing
+            outcome == :recheck && continue
+            direct_budget = Int64(0)   # budget spent: park from here on
+        end
         registration = _poll_registration(pd)
         arm_waiter!(registration, PollMode.WRITE)
         reason = pollwait!(registration.write_waiter)

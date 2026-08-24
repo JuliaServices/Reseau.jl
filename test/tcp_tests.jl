@@ -603,6 +603,53 @@ end
                 IP.shutdown!()
             end
         end
+        @testset "bounded direct wait" begin
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            try
+                listener = NC.listen(NC.loopback_addr(0); backlog = 8)
+                laddr = NC.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(@async NC.accept(listener))
+                client = NC.connect(NC.loopback_addr(Int(laddr.port)))
+                server = fetch(accept_task)
+                @test_throws ArgumentError NC.set_direct_wait!(server, -1)
+                NC.set_direct_wait!(server, Int64(0))
+                @test (@atomic :acquire server.fd.pfd.pd.direct_wait_ns) == 0
+                # data already queued: the direct poll observes readiness immediately
+                NC.set_direct_wait!(server, Int64(50_000_000))
+                @test write(client, UInt8[0x11]) == 1
+                buf = Vector{UInt8}(undef, 1)
+                @test read!(server, buf) === buf
+                @test buf[1] == 0x11
+                # data arrives while blocked inside the direct-poll budget
+                writer = errormonitor(@async (sleep(0.01); write(client, UInt8[0x22])))
+                @test read!(server, buf) === buf
+                @test buf[1] == 0x22
+                wait(writer)
+                # arrival after the budget: falls back to the parked path and still succeeds
+                NC.set_direct_wait!(server, Int64(1_000_000))
+                writer = errormonitor(@async (sleep(0.05); write(client, UInt8[0x33])))
+                @test read!(server, buf) === buf
+                @test buf[1] == 0x33
+                wait(writer)
+                # a read deadline earlier than the budget bounds the direct poll and fires
+                NC.set_direct_wait!(server, Int64(10_000_000_000))
+                NC.set_read_deadline!(server, Int64(time_ns()) + Int64(80_000_000))
+                start_ns = time_ns()
+                @test_throws NC.DeadlineExceededError read!(server, buf)
+                elapsed_ms = (time_ns() - start_ns) ÷ 1_000_000
+                @test 40 <= elapsed_ms <= 5_000
+                NC.set_read_deadline!(server, Int64(0))
+                NC.set_direct_wait!(server, Int64(0))
+            finally
+                _close_quiet!(server)
+                _close_quiet!(client)
+                _close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
         @testset "combined deadline applies to both read and write state" begin
             IP.shutdown!()
             listener = nothing

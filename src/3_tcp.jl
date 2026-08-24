@@ -1085,6 +1085,22 @@ function set_read_deadline!(conn::Conn, deadline_ns::Integer)
 end
 
 """
+    set_direct_wait!(conn, budget_ns)
+
+Set the bounded direct-wait budget for `conn` in nanoseconds; `0` (the default) disables
+it. See `IOPoll.set_direct_wait!`: with a positive budget, a task waiting for readiness
+first blocks its own OS thread in `poll(2)` for up to the budget before parking on the
+central poller, delivering readiness inside the budget with a single kernel wake (about
+half the quiet-path round-trip latency). Other tasks scheduled on that thread wait up to
+the budget, so this is for latency-sensitive request/response clients, not for servers
+multiplexing many connections.
+"""
+function set_direct_wait!(conn::Conn, budget_ns::Integer)
+    IOPoll.set_direct_wait!(conn.fd.pfd, budget_ns)
+    return nothing
+end
+
+"""
     set_write_deadline!(conn, deadline_ns)
 
 Set only the write deadline on `conn`.
