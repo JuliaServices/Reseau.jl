@@ -1405,6 +1405,16 @@ function _store_cache_entry_locked!(
     return nothing
 end
 
+# Named task body (see "trim-compatible task bodies"): background cache refresh.
+struct _CacheRefreshBody{R <: CachingResolver}
+    resolver::R
+    key::Tuple{String, String}
+    network::String
+    host::String
+end
+
+@noinline (t::_CacheRefreshBody)() = return _refresh_cached_host!(t.resolver, t.key, t.network, t.host)
+
 function _refresh_cached_host!(
         resolver::CachingResolver,
         key::Tuple{String, String},
@@ -1479,7 +1489,7 @@ function _resolve_cached_host(
     end
     if stale_result !== nothing
         if refresh_needed
-            @async _refresh_cached_host!(resolver, key, String(network), h)
+            _spawn_task_body(_CacheRefreshBody(resolver, key, String(network), h))
         end
         return stale_result::Vector{TCP.SocketEndpoint}
     end
@@ -1756,15 +1766,46 @@ end
     return IOPoll._saturating_add_ns(Int64(time_ns()), _effective_fallback_delay_ns(d))
 end
 
+# ---- trim-compatible task bodies ----
+# `juliac --trim` does not trace task bodies through `Task`/`@async`: a closure body is
+# never compiled into the trimmed executable, so its task dies at first schedule with a
+# MethodError nothing observes — and a caller parked on a future that only those tasks
+# complete waits forever. Every task the dial path spawns is therefore a named functor
+# whose call method is registered as an entrypoint at the bottom of this module (for the
+# default resolver composition; a custom resolver type used inside a trimmed executable
+# needs its own `Base.Experimental.entrypoint` registrations).
+
+# Never true at run time, but not foldable at compile time: `_spawn_task_body` reads it to
+# keep a dead `body()` call in the compiled code, which is what gives `--trim` a static
+# call edge to a task body (dynamic task scheduling is not traced, and entrypoint
+# registrations made from package top level or `__init__` do not reach the juliac driver).
+const _TRIM_CALL_EDGE = Ref(false)
+
+function _spawn_task_body(body::F)::Task where {F}
+    _TRIM_CALL_EDGE[] && body()
+    task = Task(body)
+    schedule(task)
+    return task
+end
+
+struct _TimerTaskBody{F}
+    timer::IOPoll.TimerState
+    f::F
+end
+
+# `@noinline` on every task-body call method: the static call edge in `_spawn_task_body`
+# must survive as a real call so the standalone specialization the scheduler dispatches to
+# is emitted into a trimmed executable (an inlined edge leaves nothing to dispatch to).
+@noinline function (body::_TimerTaskBody)()
+    IOPoll.waittimer(body.timer) || return nothing
+    body.f()
+    return nothing
+end
+
 function _spawn_timer_task(f::F, deadline_ns::Int64) where {F}
     timer = IOPoll.TimerState(deadline_ns, Int64(0))
     IOPoll.schedule_timer!(timer, deadline_ns) || return nothing, nothing
-    task = @async begin
-        IOPoll.waittimer(timer) || return nothing
-        f()
-        return nothing
-    end
-    return timer, task
+    return timer, _spawn_task_body(_TimerTaskBody(timer, f))
 end
 
 function _close_timer_task!(
@@ -1820,6 +1861,23 @@ function _notify_resolved_connect_addrs_future!(
     return nothing
 end
 
+function _fail_future_locked!(
+        future::_ResolvedConnectAddrsFuture,
+        ex::Exception,
+    )::Nothing
+    lock(future.notify)
+    try
+        future.done && return nothing
+        future.result = nothing
+        future.err = ex
+        future.done = true
+        notify(future.notify)
+    finally
+        unlock(future.notify)
+    end
+    return nothing
+end
+
 function _wait_resolved_connect_addrs_future!(future::_ResolvedConnectAddrsFuture)::ResolvedConnectAddrs
     lock(future.notify)
     try
@@ -1845,42 +1903,63 @@ function _resolve_with_deadline(
     now_ns = Int64(time_ns())
     now_ns >= deadline_ns && throw(DialTimeoutError(String(address)))
     future = _ResolvedConnectAddrsFuture()
-    timer, timer_task = _spawn_timer_task(deadline_ns) do
-        timeout_ex = DialTimeoutError(String(address))
-        lock(future.notify)
-        try
-            if !future.done
-                future.result = nothing
-                future.err = timeout_ex
-                future.done = true
-                notify(future.notify)
-            end
-        finally
-            unlock(future.notify)
-        end
-        return nothing
-    end
-    @async try
-        _notify_resolved_connect_addrs_future!(future, resolve_tcp_addrs(d.resolver, network, address; op = :connect, policy = d.policy))
-    catch err
-        ex = err::Exception
-        lock(future.notify)
-        try
-            if !future.done
-                future.result = nothing
-                future.err = ex
-                future.done = true
-                notify(future.notify)
-            end
-        finally
-            unlock(future.notify)
-        end
-    end
+    timer, timer_task = _spawn_timer_task(_ResolveDeadlineTimeout(future, String(address)), deadline_ns)
+    _spawn_task_body(_ResolveTaskBody(future, d.resolver, String(network), String(address), d.policy))
     try
         return _wait_resolved_connect_addrs_future!(future)
     finally
         _close_timer_task!(timer, timer_task)
     end
+end
+
+struct _ResolveDeadlineTimeout
+    future::_ResolvedConnectAddrsFuture
+    address::String
+end
+
+function (t::_ResolveDeadlineTimeout)()
+    _fail_resolved_connect_addrs_future!(t.future, DialTimeoutError(t.address))
+    return nothing
+end
+
+_fail_resolved_connect_addrs_future!(future::_ResolvedConnectAddrsFuture, ex::DialTimeoutError) = return _fail_future_locked!(future, ex)
+
+struct _ResolveTaskBody{R <: AbstractResolver}
+    future::_ResolvedConnectAddrsFuture
+    resolver::R
+    network::String
+    address::String
+    policy::ResolverPolicy
+end
+
+@noinline function (t::_ResolveTaskBody)()
+    result = nothing
+    failure = nothing
+    try
+        result = resolve_tcp_addrs(t.resolver, t.network, t.address; op = :connect, policy = t.policy)
+    catch err
+        failure = _as_exception(err)
+    end
+    # complete the future inline: field stores accept the abstract exception without the
+    # dynamic call a `--trim` build cannot resolve
+    future = t.future
+    lock(future.notify)
+    try
+        if !future.done
+            if failure === nothing && result isa ResolvedConnectAddrs
+                future.result = result
+                future.err = nothing
+            else
+                future.result = nothing
+                future.err = failure === nothing ? ArgumentError("resolver returned unsupported address container") : failure
+            end
+            future.done = true
+            notify(future.notify)
+        end
+    finally
+        unlock(future.notify)
+    end
+    return nothing
 end
 
 _coerce_connect_addrs_v4(resolved::Vector{TCP.SocketAddrV4}) = resolved
@@ -2082,6 +2161,43 @@ function _resolve_serial(
     return nothing, first_err::Exception
 end
 
+function _emit_race_event!(
+        events::Channel{Union{DNSParallelResult, Symbol}},
+        event::Union{DNSParallelResult, Symbol},
+    )::Nothing
+    try
+        put!(events, event)
+    catch err
+        ex = _as_exception(err)
+        ex isa InvalidStateException || rethrow(err)
+    end
+    return nothing
+end
+
+struct _DialRacerBody{D <: HostResolver, A <: TCP.SocketEndpoint}
+    d::D
+    network::String
+    address::String
+    kind::Symbol
+    addrs::Vector{A}
+    deadline_ns::Int64
+    state::DNSRaceState
+    events::Channel{Union{DNSParallelResult, Symbol}}
+    primary::Bool
+end
+
+@noinline function (r::_DialRacerBody)()
+    conn, err = _resolve_serial(r.d, r.network, r.address, r.kind, r.addrs, r.deadline_ns, r.state)
+    _emit_race_event!(r.events, DNSParallelResult(r.primary, conn, err))
+    return nothing
+end
+
+struct _FallbackTimerBody
+    events::Channel{Union{DNSParallelResult, Symbol}}
+end
+
+(t::_FallbackTimerBody)() = return _emit_race_event!(t.events, :fallback_timer)
+
 function _resolve_parallel(
         d::HostResolver,
         network::AbstractString,
@@ -2093,29 +2209,14 @@ function _resolve_parallel(
     )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}} where {A<:TCP.SocketEndpoint, B<:TCP.SocketEndpoint}
     state = DNSRaceState()
     events = Channel{Union{DNSParallelResult, Symbol}}(4)
-    @inline function _emit_event!(event::Union{DNSParallelResult, Symbol})
-        try
-            put!(events, event)
-        catch err
-            ex = _as_exception(err)
-            ex isa InvalidStateException || rethrow(err)
-        end
-        return nothing
-    end
     function _start_racer(primary::Bool, addrs::AbstractVector{<:TCP.SocketEndpoint})
-        return @async begin
-            conn, err = _resolve_serial(d, network, address, kind, addrs, deadline_ns, state)
-            _emit_event!(DNSParallelResult(primary, conn, err))
-            return nothing
-        end
+        return _spawn_task_body(_DialRacerBody(d, String(network), String(address), kind, convert(Vector{eltype(addrs)}, addrs), deadline_ns, state, events, primary))
     end
     _start_racer(true, primaries)
     # This is the Happy Eyeballs-style stagger: start one address family first,
     # then launch the fallback family if the primary path has not succeeded
     # quickly enough.
-    fallback_timer, fallback_timer_task = _spawn_timer_task(_fallback_deadline_ns(d)) do
-        _emit_event!(:fallback_timer)
-    end
+    fallback_timer, fallback_timer_task = _spawn_timer_task(_FallbackTimerBody(events), _fallback_deadline_ns(d))
     primary_done = false
     fallback_done = false
     fallback_started = false
