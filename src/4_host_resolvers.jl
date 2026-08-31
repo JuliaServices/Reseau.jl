@@ -17,7 +17,7 @@ resolution logic remains factored into its own file.
 """
 module HostResolvers
 
-using ..Reseau: @gcsafe_ccall
+using ..Reseau: @gcsafe_ccall, @gcsafe_win32_ccall, @win32_cconv
 using ..Reseau.SocketOps
 using ..Reseau.IOPoll
 
@@ -441,7 +441,7 @@ function _ccall_getaddrinfo(hostname::String, hints::Ref{_AddrInfo}, result_ptr:
     # on this adopted worker thread cannot stall a stop-the-world GC elsewhere
     # in the process.
     return @static if Sys.iswindows()
-        @gcsafe_ccall "Ws2_32".getaddrinfo(
+        @gcsafe_win32_ccall "Ws2_32".getaddrinfo(
             hostname::Cstring,
             null_service::Cstring,
             hints::Ptr{_AddrInfo},
@@ -711,7 +711,7 @@ end
             size_ref = Ref(size)
             buf = Vector{UInt8}(undef, Int(size_ref[]))
             rc = GC.@preserve buf size_ref begin
-                ccall(
+                @win32_cconv ccall(
                     (:GetAdaptersAddresses, _IPHLPAPI),
                     UInt32,
                     (UInt32, UInt32, Ptr{Cvoid}, Ptr{_WindowsIpAdapterAddresses}, Ref{UInt32}),
@@ -830,7 +830,7 @@ function _native_getaddrinfo(hostname::AbstractString; flags::Cint = Cint(0))::V
     finally
         if future.addr_info_ptr != C_NULL
             @static if Sys.iswindows()
-                ccall((:freeaddrinfo, "Ws2_32"), Cvoid, (Ptr{_AddrInfo},), future.addr_info_ptr)
+                @win32_cconv ccall((:freeaddrinfo, "Ws2_32"), Cvoid, (Ptr{_AddrInfo},), future.addr_info_ptr)
             else
                 ccall(:freeaddrinfo, Cvoid, (Ptr{_AddrInfo},), future.addr_info_ptr)
             end
@@ -906,7 +906,7 @@ function _parse_ipv4_literal(host::AbstractString)::Union{Nothing, NTuple{4, UIn
     h = String(host)
     bytes = Vector{UInt8}(undef, 4)
     rc = GC.@preserve bytes begin
-        @gcsafe_ccall inet_pton(
+        @gcsafe_win32_ccall inet_pton(
             SocketOps.AF_INET::Cint,
             h::Cstring,
             pointer(bytes)::Ptr{UInt8},
@@ -925,7 +925,7 @@ function _parse_ipv6_literal(host::AbstractString)::Union{Nothing, NTuple{16, UI
     occursin('%', h) && return nothing
     bytes = Vector{UInt8}(undef, 16)
     rc = GC.@preserve bytes begin
-        @gcsafe_ccall inet_pton(
+        @gcsafe_win32_ccall inet_pton(
             SocketOps.AF_INET6::Cint,
             h::Cstring,
             pointer(bytes)::Ptr{UInt8},
