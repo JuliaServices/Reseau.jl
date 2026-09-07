@@ -18,7 +18,7 @@ A few conventions are worth keeping in mind when reading the code:
 """
 module SocketOps
 
-using ..Reseau: @gcsafe_ccall
+using ..Reseau: @gcsafe_ccall, @gcsafe_win32_ccall, @win32_cconv
 
 const SockLen = @static Sys.iswindows() ? Cint : UInt32
 const SocketFD = @static Sys.iswindows() ? UInt : Cint

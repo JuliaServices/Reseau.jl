@@ -1,5 +1,6 @@
 using Test
 using Reseau
+using Reseau: @win32_cconv
 
 const IP = Reseau.IOPoll
 const SO = Reseau.SocketOps
@@ -604,7 +605,7 @@ end
                         unlock(state.lock)
                     end
 
-                    posted = ccall(
+                    posted = @win32_cconv ccall(
                         (:PostQueuedCompletionStatus, "Kernel32"),
                         Int32,
                         (Ptr{Cvoid}, UInt32, UInt, Ptr{Cvoid}),
@@ -621,7 +622,7 @@ end
                     # There is deliberately no matching OS request, so
                     # CancelIoEx returns ERROR_NOT_FOUND even though a packet
                     # for this OVERLAPPED is queued.
-                    raw_cancel = ccall(
+                    raw_cancel = @win32_cconv ccall(
                         (:CancelIoEx, "Kernel32"),
                         Int32,
                         (Ptr{Cvoid}, Ptr{Cvoid}),
@@ -648,7 +649,7 @@ end
                     key_ref = Ref{UInt}(UInt(0))
                     ov_ref = Ref{Ptr{Cvoid}}(C_NULL)
                     empty_result = GC.@preserve bytes_ref key_ref ov_ref begin
-                        ccall(
+                        @win32_cconv ccall(
                             (:GetQueuedCompletionStatus, "Kernel32"),
                             Int32,
                             (Ptr{Cvoid}, Ref{UInt32}, Ref{UInt}, Ref{Ptr{Cvoid}}, UInt32),

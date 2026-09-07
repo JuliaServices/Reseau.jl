@@ -48,6 +48,18 @@ jobs:
             os: windows-latest
             arch: x64
             threads: 1
+          # 32-bit Windows (i686-w64-mingw32) is the only supported target where
+          # Win32/Winsock is __stdcall rather than the platform's single default
+          # calling convention, so it is the only configuration that can catch a
+          # Win32 `ccall` that is missing one.
+          - version: 'min'
+            os: windows-latest
+            arch: x86
+            threads: 1
+          - version: '1'
+            os: windows-latest
+            arch: x86
+            threads: 1
           - version: '1'
             os: macOS-latest
             arch: aarch64
