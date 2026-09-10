@@ -203,6 +203,9 @@ end
             end
             schedule(interrupted_task, InterruptException(); error = true)
             @test_throws TaskFailedException fetch(interrupted_task)
+            # The interrupt unwinds through the park's catch, which must put
+            # the caller's stickiness back before rethrowing.
+            @test !interrupted_task.sticky
             @test (@atomic :acquire interrupted_waiter.state) === nothing
             @test !NP.pollnotify!(interrupted_waiter, NP.PollWakeReason.READY)
             @test NP.pollwait!(interrupted_waiter) == NP.PollWakeReason.READY
@@ -254,6 +257,54 @@ end
             end
         end
         _el_log_test_progress("DONE: pollwait wake reason precedence")
+        _el_log_test_progress("START: pollwait parking preserves caller scheduling")
+        @testset "pollwait parking preserves caller scheduling" begin
+            # A migratable waiter adopts stickiness only while parked, so the
+            # poller's wake lands on the thread it parked on. Once woken it has
+            # to be migratable again.
+            waiter = NP.PollWaiter()
+            waiter_task = Threads.@spawn begin
+                before = Threads.threadid()
+                reason = NP.pollwait!(waiter)
+                (reason, before, Threads.threadid())
+            end
+            while !((@atomic :acquire waiter.state) isa Task) && !istaskdone(waiter_task)
+                yield()
+            end
+            # A regression that never adopts stickiness spins here; the CI job
+            # timeout is the guard, as in the lost-wakeup loop above.
+            while !waiter_task.sticky && !istaskdone(waiter_task)
+                yield()
+            end
+            @test waiter_task.sticky
+            @test NP.pollnotify!(waiter, NP.PollWakeReason.READY)
+            reason, before, after = fetch(waiter_task)
+            @test reason == NP.PollWakeReason.READY
+            @test before == after
+            @test !waiter_task.sticky
+
+            # A caller that asked for stickiness keeps it. The park must not
+            # hand back a different scheduling choice than the task started
+            # with, and spawning the sticky task must not leave its parent
+            # sticky either.
+            parent = current_task()
+            parent_sticky = parent.sticky
+            waiter = NP.PollWaiter()
+            sticky_task = @async NP.pollwait!(waiter)
+            parent.sticky = parent_sticky
+            try
+                while !((@atomic :acquire waiter.state) isa Task) && !istaskdone(sticky_task)
+                    yield()
+                end
+                @test sticky_task.sticky
+                @test NP.pollnotify!(waiter, NP.PollWakeReason.READY)
+                @test fetch(sticky_task) == NP.PollWakeReason.READY
+                @test sticky_task.sticky
+            finally
+                parent.sticky = parent_sticky
+            end
+        end
+        _el_log_test_progress("DONE: pollwait parking preserves caller scheduling")
         _el_log_test_progress("START: backend delay semantics")
         @testset "backend delay semantics" begin
             state = NP.Poller()
