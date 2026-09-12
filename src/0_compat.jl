@@ -34,44 +34,14 @@ the built-in form. On older Julia versions it wraps the inner `ccall` with
 """
 macro gcsafe_ccall end
 
-"""
-    @stdcall_ccall ...
-    @gcsafe_stdcall_ccall ...
-
-Call a Win32 API function like `@ccall`, using the `stdcall` calling convention.
-
-Win32 exports (kernel32, ws2_32, mswsock, iphlpapi) and the `WSAIoctl`
-extension function pointers such as `ConnectEx` are `WINAPI`, which is
-`stdcall` on i686; a default-convention call there corrupts the stack on
-return. Julia honors `stdcall` only when targeting i686 and ignores it on every
-other platform, so every Win32 call site can carry the annotation
-unconditionally. `@gcsafe_stdcall_ccall` additionally marks the call GC-safe,
-exactly like [`@gcsafe_ccall`](@ref).
-"""
-macro stdcall_ccall end
-macro gcsafe_stdcall_ccall end
-
 if HAS_CCALL_GCSAFE
-    const _STDCALL_CONVENTION = (:stdcall, UInt16(0))
-
     macro gcsafe_ccall(expr)
         exprs = Any[:(gc_safe = true), expr]
         return Base.ccall_macro_lower((:ccall), Base.ccall_macro_parse(exprs)...)
     end
-
-    macro stdcall_ccall(expr)
-        return Base.ccall_macro_lower(_STDCALL_CONVENTION, Base.ccall_macro_parse(Any[expr])...)
-    end
-
-    macro gcsafe_stdcall_ccall(expr)
-        exprs = Any[:(gc_safe = true), expr]
-        return Base.ccall_macro_lower(_STDCALL_CONVENTION, Base.ccall_macro_parse(exprs)...)
-    end
 else
-    function _gcsafe_ccall_macro_lower(convention, func, rettype, types, args, nreq)
+    function _gcsafe_ccall_macro_lower(func, rettype, types, args, nreq)
         _ = nreq
-        # Escaped so macro hygiene keeps the bare convention symbol `ccall` lowering expects.
-        cconv = convention === nothing ? () : (esc(convention),)
 
         cconvert_exprs = Any[]
         cconvert_args = Any[]
@@ -94,7 +64,7 @@ else
 
             gc_state = @ccall(jl_gc_safe_enter()::Int8)
             ret = ccall(
-                $(esc(func)), $(cconv...), $(esc(rettype)), $(Expr(:tuple, map(esc, types)...)),
+                $(esc(func)), $(esc(rettype)), $(Expr(:tuple, map(esc, types)...)),
                 $(unsafe_convert_args...)
             )
             @ccall(jl_gc_safe_leave(gc_state::Int8)::Cvoid)
@@ -109,14 +79,84 @@ else
     end
 
     macro gcsafe_ccall(expr)
-        return _gcsafe_ccall_macro_lower(nothing, Base.ccall_macro_parse(expr)...)
+        return _gcsafe_ccall_macro_lower(Base.ccall_macro_parse(expr)...)
     end
+end
 
-    macro stdcall_ccall(expr)
-        return Base.ccall_macro_lower(esc(:stdcall), Base.ccall_macro_parse(expr)...)
-    end
+"""
+    @stdcall_ccall f(args...)::RetType
+    @gcsafe_stdcall_ccall f(args...)::RetType
 
-    macro gcsafe_stdcall_ccall(expr)
-        return _gcsafe_ccall_macro_lower(:stdcall, Base.ccall_macro_parse(expr)...)
+Call a Win32 API function with `@ccall` syntax under the `stdcall` convention.
+
+Win32 exports (kernel32, ws2_32, mswsock, iphlpapi) are `WINAPI`, which is
+`stdcall` on i686; a default-convention call there corrupts the stack on
+return. Julia honors `stdcall` only when targeting i686 and ignores it
+everywhere else, so every Win32 call site can carry the annotation
+unconditionally. The macros lower to the classic `ccall` form, which is the
+only one that can express a convention.
+
+Function specs: `"Lib".f` or `Lib.f` for a library and symbol, bare `f` for
+the process, and `\$ptr` for a function pointer.
+
+`@gcsafe_stdcall_ccall` additionally brackets the call with
+`jl_gc_safe_enter` / `jl_gc_safe_leave`, the same transition native
+`gc_safe = true` inlines, exactly like [`@gcsafe_ccall`](@ref).
+"""
+macro stdcall_ccall end
+macro gcsafe_stdcall_ccall end
+
+function _parse_win32_ccall(ex)
+    Meta.isexpr(ex, :(::), 2) || throw(ArgumentError("expected `f(args...)::RetType`"))
+    call, rettype = ex.args[1], ex.args[2]
+    Meta.isexpr(call, :call) || throw(ArgumentError("expected a function call"))
+    f = call.args[1]
+    func = Meta.isexpr(f, :.) ? Expr(:tuple, f.args[2], f.args[1]) :
+           Meta.isexpr(f, :$) ? f.args[1] :
+           f isa Symbol ? QuoteNode(f) :
+           throw(ArgumentError("bad function spec `$f`"))
+    types, args = Any[], Any[]
+    for a in call.args[2:end]
+        Meta.isexpr(a, :(::), 2) || throw(ArgumentError("argument `$a` needs a type"))
+        push!(args, a.args[1])
+        push!(types, a.args[2])
     end
+    return func, rettype, types, args
+end
+
+function _emit_win32_ccall(ex, gcsafe::Bool)
+    func, rettype, types, args = _parse_win32_ccall(ex)
+    roots = [gensym(:root) for _ in args]
+    ptrs = [gensym(:ptr) for _ in args]
+    pre = [:($(roots[i]) = Base.cconvert($(esc(types[i])), $(esc(args[i])))) for i in eachindex(args)]
+    conv = [:($(ptrs[i]) = Base.unsafe_convert($(esc(types[i])), $(roots[i]))) for i in eachindex(args)]
+    # `stdcall` must be escaped: hygiene would otherwise rename it and lowering
+    # would read the return type as the convention.
+    call = Expr(:call, :ccall, esc(func), esc(:stdcall), esc(rettype),
+                Expr(:tuple, map(esc, types)...), ptrs...)
+    # Nothing between enter and leave may allocate, throw, or yield; every
+    # conversion (including the Cstring NUL scan, which throws) is hoisted above.
+    body = gcsafe ? quote
+        $(conv...)
+        gc_state = ccall(:jl_gc_safe_enter, Int8, ())
+        ret = $call
+        ccall(:jl_gc_safe_leave, Cvoid, (Int8,), gc_state)
+        ret
+    end : quote
+        $(conv...)
+        $call
+    end
+    return quote
+        @inline
+        $(pre...)
+        GC.@preserve $(roots...) $body
+    end
+end
+
+macro stdcall_ccall(ex)
+    return _emit_win32_ccall(ex, false)
+end
+
+macro gcsafe_stdcall_ccall(ex)
+    return _emit_win32_ccall(ex, true)
 end
