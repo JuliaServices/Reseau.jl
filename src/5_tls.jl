@@ -328,6 +328,8 @@ struct Config
     _server_session_cache12::_TLSSessionCache{_TLS12ServerSession}
     _client_identity::_TLSLocalIdentityState
     _server_identity::_TLSLocalIdentityState
+    # Fixture-only override; `nothing` selects the wall clock at each verification.
+    _verification_time_s::Union{Nothing, Int64}
 end
 
 # `policy` records which native handshake lane a `Conn` should enter before the
@@ -358,6 +360,7 @@ function Config(
         max_version::Union{Nothing, UInt16},
         session_tickets_disabled::Bool,
         session_cache_capacity::Int = 64,
+        _verification_time_s::Union{Nothing, Int64} = nothing,
     )
     # Normalize to owned `String` storage so shared configs do not depend on caller-owned
     # string buffers or views.
@@ -397,6 +400,7 @@ function Config(
         _TLSSessionCache(_TLS12ServerSession, session_cache_capacity),
         _TLSLocalIdentityState(),
         _TLSLocalIdentityState(),
+        _verification_time_s,
     )
 end
 
@@ -416,6 +420,7 @@ function Config(;
         max_version::Union{Nothing, UInt16} = nothing,
         session_tickets_disabled::Bool = false,
         session_cache_capacity::Integer = 64,
+        _verification_time_s::Union{Nothing, Int64} = nothing,
     )
     return Config(
         server_name === nothing ? nothing : String(server_name),
@@ -433,6 +438,7 @@ function Config(;
         max_version,
         session_tickets_disabled,
         Int(session_cache_capacity),
+        _verification_time_s,
     )
 end
 
@@ -651,6 +657,7 @@ function _config_with_server_name(config::Config, server_name::String)::Config
         config._server_session_cache12,
         config._client_identity,
         config._server_identity,
+        config._verification_time_s,
     )
 end
 
@@ -963,6 +970,7 @@ function _native_tls13_certificate_verifier(config::Config)::_TLS13OpenSSLCertif
         verify_peer = config.verify_peer,
         verify_hostname = config.verify_hostname,
         ca_file = config.verify_peer ? _effective_ca_file(config; is_server = false) : nothing,
+        verification_time_s = config._verification_time_s,
     )
 end
 
@@ -988,6 +996,7 @@ function _tls12_try_load_client_session(config::Config, cache_key::AbstractStrin
                     verify_peer = config.verify_peer,
                     verify_hostname = config.verify_hostname,
                     ca_file = config.verify_peer ? _effective_ca_file(config; is_server = false) : nothing,
+                    verification_time_s = config._verification_time_s,
                 )
             catch
                 _tls_session_cache_put!(config._client_session_cache12, cache_key, nothing, _securezero_tls12_client_session!)
@@ -1053,6 +1062,7 @@ function _tls13_try_load_client_session(config::Config, cache_key::AbstractStrin
                 verify_peer = config.verify_peer,
                 verify_hostname = config.verify_hostname,
                 ca_file = config.verify_peer ? _effective_ca_file(config; is_server = false) : nothing,
+                verification_time_s = config._verification_time_s,
             )
         catch
             _tls_session_cache_put!(config._client_session_cache, cache_key, nothing, _securezero_tls13_client_session!)

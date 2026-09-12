@@ -505,6 +505,7 @@ function _check_for_resumption!(state::_TLS13ServerHandshakeState, config)::Noth
                         client_certificates;
                         verify_peer = true,
                         ca_file = _effective_ca_file(config; is_server = true),
+                        verification_time_s = config._verification_time_s,
                     )
                 end || continue
                 state.psk = copy(session.secret)
@@ -655,6 +656,7 @@ function _read_client_certificate!(state::_TLS13ServerHandshakeState, io, config
         msg.certificates;
         verify_peer,
         ca_file = verify_peer ? _effective_ca_file(config; is_server = true) : nothing,
+        verification_time_s = config._verification_time_s,
     )
     raw = _read_handshake_bytes!(io)
     parsed_verify = _unmarshal_handshake_message_or_fail(raw)
