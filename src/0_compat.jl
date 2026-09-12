@@ -34,14 +34,44 @@ the built-in form. On older Julia versions it wraps the inner `ccall` with
 """
 macro gcsafe_ccall end
 
+"""
+    @stdcall_ccall ...
+    @gcsafe_stdcall_ccall ...
+
+Call a Win32 API function like `@ccall`, using the `stdcall` calling convention.
+
+Win32 exports (kernel32, ws2_32, mswsock, iphlpapi) and the `WSAIoctl`
+extension function pointers such as `ConnectEx` are `WINAPI`, which is
+`stdcall` on i686; a default-convention call there corrupts the stack on
+return. Julia honors `stdcall` only when targeting i686 and ignores it on every
+other platform, so every Win32 call site can carry the annotation
+unconditionally. `@gcsafe_stdcall_ccall` additionally marks the call GC-safe,
+exactly like [`@gcsafe_ccall`](@ref).
+"""
+macro stdcall_ccall end
+macro gcsafe_stdcall_ccall end
+
 if HAS_CCALL_GCSAFE
+    const _STDCALL_CONVENTION = (:stdcall, UInt16(0))
+
     macro gcsafe_ccall(expr)
         exprs = Any[:(gc_safe = true), expr]
         return Base.ccall_macro_lower((:ccall), Base.ccall_macro_parse(exprs)...)
     end
+
+    macro stdcall_ccall(expr)
+        return Base.ccall_macro_lower(_STDCALL_CONVENTION, Base.ccall_macro_parse(Any[expr])...)
+    end
+
+    macro gcsafe_stdcall_ccall(expr)
+        exprs = Any[:(gc_safe = true), expr]
+        return Base.ccall_macro_lower(_STDCALL_CONVENTION, Base.ccall_macro_parse(exprs)...)
+    end
 else
-    function _gcsafe_ccall_macro_lower(func, rettype, types, args, nreq)
+    function _gcsafe_ccall_macro_lower(convention, func, rettype, types, args, nreq)
         _ = nreq
+        # Escaped so macro hygiene keeps the bare convention symbol `ccall` lowering expects.
+        cconv = convention === nothing ? () : (esc(convention),)
 
         cconvert_exprs = Any[]
         cconvert_args = Any[]
@@ -64,7 +94,7 @@ else
 
             gc_state = @ccall(jl_gc_safe_enter()::Int8)
             ret = ccall(
-                $(esc(func)), $(esc(rettype)), $(Expr(:tuple, map(esc, types)...)),
+                $(esc(func)), $(cconv...), $(esc(rettype)), $(Expr(:tuple, map(esc, types)...)),
                 $(unsafe_convert_args...)
             )
             @ccall(jl_gc_safe_leave(gc_state::Int8)::Cvoid)
@@ -79,6 +109,14 @@ else
     end
 
     macro gcsafe_ccall(expr)
-        return _gcsafe_ccall_macro_lower(Base.ccall_macro_parse(expr)...)
+        return _gcsafe_ccall_macro_lower(nothing, Base.ccall_macro_parse(expr)...)
+    end
+
+    macro stdcall_ccall(expr)
+        return Base.ccall_macro_lower(esc(:stdcall), Base.ccall_macro_parse(expr)...)
+    end
+
+    macro gcsafe_stdcall_ccall(expr)
+        return _gcsafe_ccall_macro_lower(:stdcall, Base.ccall_macro_parse(expr)...)
     end
 end

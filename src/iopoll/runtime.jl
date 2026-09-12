@@ -82,13 +82,16 @@ function _spawn_detached_thread(
     _ = name
     thread_arg = arg === nothing ? C_NULL : pointer_from_objref(arg)
     @static if Sys.iswindows()
+        # `thread_fn` is a cdecl `@cfunction` where kernel32 expects a stdcall
+        # routine. The thunk that invokes it never returns after the call
+        # (it exits the thread), so the 4-byte i686 stack mismatch is inert.
         handle = ccall(
-            (:CreateThread, "kernel32"), Ptr{Cvoid},
+            (:CreateThread, "kernel32"), stdcall, Ptr{Cvoid},
             (Ptr{Cvoid}, Csize_t, Ptr{Cvoid}, Ptr{Cvoid}, UInt32, Ptr{UInt32}),
             C_NULL, Csize_t(0), thread_fn[], thread_arg, UInt32(0), C_NULL,
         )
         handle == C_NULL && throw(ArgumentError("error creating poller thread"))
-        _ = ccall((:CloseHandle, "kernel32"), Int32, (Ptr{Cvoid},), handle)
+        _ = ccall((:CloseHandle, "kernel32"), stdcall, Int32, (Ptr{Cvoid},), handle)
     else
         pthread_ref = Ref{_pthread_t}(0)
         create_ret = ccall(

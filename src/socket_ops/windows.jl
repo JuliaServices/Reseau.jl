@@ -141,11 +141,11 @@ end
 end
 
 @inline function _wsa_get_last_error()::Int32
-    return Int32(ccall((:WSAGetLastError, _WS2_32), Cint, ()))
+    return Int32(ccall((:WSAGetLastError, _WS2_32), stdcall, Cint, ()))
 end
 
 @inline function _win_get_last_error()::UInt32
-    return ccall((:GetLastError, _KERNEL32), UInt32, ())
+    return ccall((:GetLastError, _KERNEL32), stdcall, UInt32, ())
 end
 
 @inline function _map_win32_errno(err::UInt32)::Int32
@@ -293,7 +293,7 @@ function _load_extension_ptr!(sock::SocketFD, guid::Guid)::Ptr{Cvoid}
     out_ref = Ref{Ptr{Cvoid}}(C_NULL)
     bytes_ref = Ref{UInt32}(UInt32(0))
     rc = GC.@preserve guid_ref out_ref bytes_ref begin
-        @gcsafe_ccall _WS2_32.WSAIoctl(
+        @gcsafe_stdcall_ccall _WS2_32.WSAIoctl(
             _socket_value(sock)::UInt,
             _SIO_GET_EXTENSION_FUNCTION_POINTER::UInt32,
             guid_ref::Ref{Guid},
@@ -323,7 +323,7 @@ function set_udp_connreset!(sock::SocketFD, enabled::Bool)::Nothing
     in_ref = Ref{UInt32}(enabled ? UInt32(1) : UInt32(0))
     bytes_ref = Ref{UInt32}(UInt32(0))
     rc = GC.@preserve in_ref bytes_ref begin
-        @gcsafe_ccall _WS2_32.WSAIoctl(
+        @gcsafe_stdcall_ccall _WS2_32.WSAIoctl(
             _socket_value(sock)::UInt,
             _SIO_UDP_CONNRESET::UInt32,
             in_ref::Ref{UInt32},
@@ -375,6 +375,7 @@ function _recv_msg_simple!(fd::SocketFD, msg_ref::Ref{MsgHdr}, flags::Cint)::Css
     n = GC.@preserve bufs bytes_ref flags_ref begin
         ccall(
             (:WSARecv, _WS2_32),
+            stdcall,
             Cint,
             (UInt, Ptr{WSABuf}, UInt32, Ref{UInt32}, Ref{UInt32}, Ptr{Cvoid}, Ptr{Cvoid}),
             _socket_value(fd),
@@ -406,6 +407,7 @@ function _send_msg_simple!(fd::SocketFD, msg_ref::Ref{MsgHdr}, flags::Cint)::Css
     n = GC.@preserve bufs bytes_ref begin
         ccall(
             (:WSASend, _WS2_32),
+            stdcall,
             Cint,
             (UInt, Ptr{WSABuf}, UInt32, Ref{UInt32}, UInt32, Ptr{Cvoid}, Ptr{Cvoid}),
             _socket_value(fd),
@@ -430,6 +432,7 @@ function _recv_msg_ext!(fd::SocketFD, msg_ref::Ref{MsgHdr}, flags::Cint)::Cssize
     n = GC.@preserve bufs wmsg bytes_ref begin
         ccall(
             recv_ptr,
+            stdcall,
             Cint,
             (UInt, Ref{WSAMsg}, Ref{UInt32}, Ptr{Cvoid}, Ptr{Cvoid}),
             _socket_value(fd),
@@ -453,6 +456,7 @@ function _send_msg_ext!(fd::SocketFD, msg_ref::Ref{MsgHdr}, flags::Cint)::Cssize
     n = GC.@preserve bufs wmsg bytes_ref begin
         ccall(
             send_ptr,
+            stdcall,
             Cint,
             (UInt, Ref{WSAMsg}, UInt32, Ref{UInt32}, Ptr{Cvoid}, Ptr{Cvoid}),
             _socket_value(fd),
@@ -494,7 +498,7 @@ function ensure_winsock!()
             UInt16(0),
             C_NULL,
         ))
-        rc = @gcsafe_ccall _WS2_32.WSAStartup(
+        rc = @gcsafe_stdcall_ccall _WS2_32.WSAStartup(
             UInt16(0x0202)::UInt16,
             wsa_data::Ref{_WSAData},
         )::Cint
@@ -513,7 +517,7 @@ end
 
 function fd_is_cloexec(fd::SocketFD)::Bool
     flags = Ref{UInt32}(UInt32(0))
-    ok = ccall((:GetHandleInformation, _KERNEL32), Int32, (Ptr{Cvoid}, Ref{UInt32}), _socket_handle(fd), flags)
+    ok = ccall((:GetHandleInformation, _KERNEL32), stdcall, Int32, (Ptr{Cvoid}, Ref{UInt32}), _socket_handle(fd), flags)
     if ok == 0
         _throw_errno("GetHandleInformation", _map_win32_errno(_win_get_last_error()))
     end
@@ -527,6 +531,7 @@ end
 function set_close_on_exec!(fd::SocketFD)
     ok = ccall(
         (:SetHandleInformation, _KERNEL32),
+        stdcall,
         Int32,
         (Ptr{Cvoid}, UInt32, UInt32),
         _socket_handle(fd),
@@ -546,7 +551,7 @@ Toggle WinSock non-blocking mode and update the Julia-side bookkeeping used by
 function set_nonblocking!(fd::SocketFD, enabled::Bool = true)
     ensure_winsock!()
     arg = Ref{UInt32}(enabled ? UInt32(1) : UInt32(0))
-    ret = ccall((:ioctlsocket, _WS2_32), Cint, (UInt, Clong, Ref{UInt32}), _socket_value(fd), Clong(_FIONBIO), arg)
+    ret = ccall((:ioctlsocket, _WS2_32), stdcall, Cint, (UInt, Clong, Ref{UInt32}), _socket_value(fd), Clong(_FIONBIO), arg)
     ret == 0 || _throw_errno("ioctlsocket(FIONBIO)", _map_wsa_errno(_wsa_get_last_error()))
     _set_fd_nonblocking_state!(fd, enabled)
     return nothing
@@ -568,6 +573,7 @@ function open_socket(family::Integer, sotype::Integer, proto::Integer = 0)::Sock
     flags = UInt32(_WSA_FLAG_OVERLAPPED | _WSA_FLAG_NO_HANDLE_INHERIT)
     sock = ccall(
         (:WSASocketW, _WS2_32),
+        stdcall,
         UInt,
         (Cint, Cint, Cint, Ptr{Cvoid}, UInt32, UInt32),
         Cint(family),
@@ -597,7 +603,7 @@ already invalid.
 """
 function close_socket_nothrow(fd::SocketFD)::Int32
     _clear_fd_state!(fd)
-    ret = @gcsafe_ccall _WS2_32.closesocket(
+    ret = @gcsafe_stdcall_ccall _WS2_32.closesocket(
         _socket_value(fd)::UInt,
     )::Cint
     ret == 0 && return Int32(0)
@@ -629,7 +635,7 @@ function bind_socket(fd::SocketFD, addr::SockAddrIn6)
 end
 
 function bind_socket(fd::SocketFD, addr::Ptr{Cvoid}, addrlen::SockLen)
-    ret = @gcsafe_ccall _WS2_32.bind(
+    ret = @gcsafe_stdcall_ccall _WS2_32.bind(
         _socket_value(fd)::UInt,
         addr::Ptr{Cvoid},
         Cint(addrlen)::Cint,
@@ -639,7 +645,7 @@ function bind_socket(fd::SocketFD, addr::Ptr{Cvoid}, addrlen::SockLen)
 end
 
 function listen_socket(fd::SocketFD, backlog::Integer)
-    ret = @gcsafe_ccall _WS2_32.listen(
+    ret = @gcsafe_stdcall_ccall _WS2_32.listen(
         _socket_value(fd)::UInt,
         Cint(backlog)::Cint,
     )::Cint
@@ -671,7 +677,7 @@ to `EINPROGRESS` so the transport layer can use the same poll-driven connect
 completion path as it does on Unix.
 """
 function connect_socket(fd::SocketFD, addr::Ptr{Cvoid}, addrlen::SockLen)::Int32
-    ret = @gcsafe_ccall "Ws2_32".connect(
+    ret = @gcsafe_stdcall_ccall "Ws2_32".connect(
         _socket_value(fd)::UInt,
         addr::Ptr{Cvoid},
         Cint(addrlen)::Cint,
@@ -747,7 +753,7 @@ function try_accept_socket(fd::SocketFD)::Tuple{SocketFD, AcceptPeer, Int32}
     addrbuf = Ref{NTuple{_ACCEPT_ADDRBUF_LEN, UInt8}}()
     addrlen = Ref{SockLen}(SockLen(_ACCEPT_ADDRBUF_LEN))
     new_sock = GC.@preserve addrbuf begin
-        @gcsafe_ccall "Ws2_32".accept(
+        @gcsafe_stdcall_ccall "Ws2_32".accept(
             _socket_value(fd)::UInt,
             Base.unsafe_convert(Ptr{Cvoid}, addrbuf)::Ptr{Cvoid},
             addrlen::Ref{SockLen},
@@ -783,6 +789,7 @@ end
 function _set_sockopt_ptr!(fd::SocketFD, optname::Cint, ptr::Ptr{UInt8}, optlen::Integer)
     ret = ccall(
         (:setsockopt, _WS2_32),
+        stdcall,
         Cint,
         (UInt, Cint, Cint, Ptr{UInt8}, Cint),
         _socket_value(fd),
@@ -837,7 +844,7 @@ function finish_accept_ex!(listener_fd::SocketFD, acceptfd::SocketFD, addrbuf::V
     remote_ptr = Ref{Ptr{UInt8}}(C_NULL)
     remote_len = Ref{Cint}(0)
     GC.@preserve addrbuf begin
-        @gcsafe_ccall _MSWSOCK.GetAcceptExSockaddrs(
+        @gcsafe_stdcall_ccall _MSWSOCK.GetAcceptExSockaddrs(
             pointer(addrbuf)::Ptr{UInt8},
             UInt32(0)::UInt32,
             UInt32(_ACCEPT_ADDRBUF_LEN)::UInt32,
@@ -863,6 +870,7 @@ function get_sockopt_int(fd::SocketFD, level::Cint, optname::Cint)::Int32
     ret = GC.@preserve value begin
         ccall(
             (:getsockopt, _WS2_32),
+            stdcall,
             Cint,
             (UInt, Cint, Cint, Ptr{UInt8}, Ref{Cint}),
             _socket_value(fd),
@@ -886,6 +894,7 @@ function set_sockopt_int(fd::SocketFD, level::Cint, optname::Cint, value::Intege
     ret = GC.@preserve raw begin
         ccall(
             (:setsockopt, _WS2_32),
+            stdcall,
             Cint,
             (UInt, Cint, Cint, Ptr{UInt8}, Cint),
             _socket_value(fd),
@@ -909,6 +918,7 @@ buffer. The caller must keep the memory behind `ptr` rooted for the call.
 function set_sockopt_bytes(fd::SocketFD, level::Cint, optname::Cint, ptr::Ptr{Cvoid}, len::Integer)::Nothing
     ret = ccall(
         (:setsockopt, _WS2_32),
+        stdcall,
         Cint,
         (UInt, Cint, Cint, Ptr{UInt8}, Cint),
         _socket_value(fd),
@@ -932,6 +942,7 @@ function get_sockopt_bytes!(fd::SocketFD, level::Cint, optname::Cint, ptr::Ptr{C
     ret = GC.@preserve len_ref begin
         ccall(
             (:getsockopt, _WS2_32),
+            stdcall,
             Cint,
             (UInt, Cint, Cint, Ptr{UInt8}, Ref{Cint}),
             _socket_value(fd),
@@ -959,6 +970,7 @@ function get_socket_name_in(fd::SocketFD)::SockAddrIn
     addrlen = Ref{SockLen}(SockLen(sizeof(SockAddrIn)))
     ret = ccall(
         (:getsockname, _WS2_32),
+        stdcall,
         Cint,
         (UInt, Ptr{Cvoid}, Ref{SockLen}),
         _socket_value(fd),
@@ -974,6 +986,7 @@ function get_socket_name_in6(fd::SocketFD)::SockAddrIn6
     addrlen = Ref{SockLen}(SockLen(sizeof(SockAddrIn6)))
     ret = ccall(
         (:getsockname, _WS2_32),
+        stdcall,
         Cint,
         (UInt, Ptr{Cvoid}, Ref{SockLen}),
         _socket_value(fd),
@@ -989,6 +1002,7 @@ function get_peer_name_in(fd::SocketFD)::SockAddrIn
     addrlen = Ref{SockLen}(SockLen(sizeof(SockAddrIn)))
     ret = ccall(
         (:getpeername, _WS2_32),
+        stdcall,
         Cint,
         (UInt, Ptr{Cvoid}, Ref{SockLen}),
         _socket_value(fd),
@@ -1004,6 +1018,7 @@ function get_peer_name_in6(fd::SocketFD)::SockAddrIn6
     addrlen = Ref{SockLen}(SockLen(sizeof(SockAddrIn6)))
     ret = ccall(
         (:getpeername, _WS2_32),
+        stdcall,
         Cint,
         (UInt, Ptr{Cvoid}, Ref{SockLen}),
         _socket_value(fd),
@@ -1020,7 +1035,7 @@ end
 Half-close or fully close the directions designated by `how`.
 """
 function shutdown_socket(fd::SocketFD, how::Integer)
-    ret = @gcsafe_ccall _WS2_32.shutdown(
+    ret = @gcsafe_stdcall_ccall _WS2_32.shutdown(
         _socket_value(fd)::UInt,
         Cint(how)::Cint,
     )::Cint
@@ -1037,7 +1052,7 @@ inspection to the caller.
 """
 function read_once!(fd::SocketFD, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
     n = Int(min(nbytes, Csize_t(typemax(Cint))))
-    ret = @gcsafe_ccall "Ws2_32".recv(
+    ret = @gcsafe_stdcall_ccall "Ws2_32".recv(
         _socket_value(fd)::UInt,
         ptr::Ptr{UInt8},
         Cint(n)::Cint,
@@ -1054,7 +1069,7 @@ Perform one raw `send` call and surface short writes or errors to the caller.
 """
 function write_once!(fd::SocketFD, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
     n = Int(min(nbytes, Csize_t(typemax(Cint))))
-    ret = @gcsafe_ccall "Ws2_32".send(
+    ret = @gcsafe_stdcall_ccall "Ws2_32".send(
         _socket_value(fd)::UInt,
         ptr::Ptr{UInt8},
         Cint(n)::Cint,
@@ -1073,7 +1088,7 @@ function recv_from!(
         fromlen::Ptr{SockLen} = Ptr{SockLen}(C_NULL),
     )::Cssize_t
     n = Int(min(nbytes, Csize_t(typemax(Cint))))
-    ret = @gcsafe_ccall "Ws2_32".recvfrom(
+    ret = @gcsafe_stdcall_ccall "Ws2_32".recvfrom(
         _socket_value(fd)::UInt,
         ptr::Ptr{UInt8},
         Cint(n)::Cint,
@@ -1094,7 +1109,7 @@ function send_to!(
         tolen::SockLen = SockLen(0),
     )::Cssize_t
     n = Int(min(nbytes, Csize_t(typemax(Cint))))
-    ret = @gcsafe_ccall "Ws2_32".sendto(
+    ret = @gcsafe_stdcall_ccall "Ws2_32".sendto(
         _socket_value(fd)::UInt,
         ptr::Ptr{UInt8},
         Cint(n)::Cint,

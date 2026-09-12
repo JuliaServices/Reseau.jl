@@ -42,7 +42,9 @@ end
 end
 
 function _tls_server_config(;
-    handshake_timeout_ns::Int64 = 0,
+    # `Integer`, matching `TL.Config`: typed keywords assert rather than convert,
+    # and literals such as `2_000_000_000` are `Int32` on 32-bit Julia.
+    handshake_timeout_ns::Integer = 0,
     cert_file::String = _TLS_CERT_PATH,
     key_file::String = _TLS_KEY_PATH,
     client_auth::TL.ClientAuthMode.T = TL.ClientAuthMode.NoClientCert,

@@ -181,11 +181,11 @@ end
 end
 
 @inline function _win_get_last_error()::UInt32
-    return ccall((:GetLastError, _KERNEL32), UInt32, ())
+    return ccall((:GetLastError, _KERNEL32), stdcall, UInt32, ())
 end
 
 @inline function _wsa_get_last_error()::Int32
-    return Int32(ccall((:WSAGetLastError, _WS2_32), Cint, ()))
+    return Int32(ccall((:WSAGetLastError, _WS2_32), stdcall, Cint, ()))
 end
 
 @inline function _map_win_errno(err::UInt32)::Int32
@@ -234,7 +234,7 @@ function _load_connectex_ptr(fd::SysFD)::Ptr{Cvoid}
         out_ref = Ref{Ptr{Cvoid}}(C_NULL)
         bytes_ref = Ref{UInt32}(UInt32(0))
         rc = GC.@preserve guid_ref out_ref bytes_ref begin
-            @gcsafe_ccall _WS2_32.WSAIoctl(
+            @gcsafe_stdcall_ccall _WS2_32.WSAIoctl(
                 _socket_value(fd)::UInt,
                 _SIO_GET_EXTENSION_FUNCTION_POINTER::UInt32,
                 guid_ref::Ref{Guid},
@@ -258,7 +258,7 @@ end
     bytes_ref = Ref{UInt32}(UInt32(0))
     flags_ref = Ref{UInt32}(UInt32(0))
     ok = GC.@preserve op bytes_ref flags_ref begin
-        @gcsafe_ccall _WS2_32.WSAGetOverlappedResult(
+        @gcsafe_stdcall_ccall _WS2_32.WSAGetOverlappedResult(
             _socket_value(fd)::UInt,
             Base.unsafe_convert(Ptr{Overlapped}, op.storage)::Ptr{Overlapped},
             bytes_ref::Ref{UInt32},
@@ -289,6 +289,7 @@ function _socket_can_skip_completion_port_on_success(fd::SysFD)::Bool
     rc = GC.@preserve info_ref size_ref begin
         ccall(
             (:getsockopt, _WS2_32),
+            stdcall,
             Cint,
             (UInt, Cint, Cint, Ptr{UInt8}, Ref{Cint}),
             _socket_value(fd),
@@ -307,7 +308,7 @@ function _maybe_set_completion_modes!(fd::SysFD)::Bool
     if _socket_can_skip_completion_port_on_success(fd)
         modes |= _FILE_SKIP_COMPLETION_PORT_ON_SUCCESS
     end
-    ok = @gcsafe_ccall _KERNEL32.SetFileCompletionNotificationModes(
+    ok = @gcsafe_stdcall_ccall _KERNEL32.SetFileCompletionNotificationModes(
         _socket_handle(fd)::Ptr{Cvoid},
         modes::UInt8,
     )::Int32
@@ -348,7 +349,7 @@ its buffer roots must remain live and the storage must not be reused.
 """
 function _cancel_iocp_op!(reg::IocpRegistration, op::IocpOp; strict::Bool = false)::Bool
     (@atomic :acquire op.active) || return false
-    ok = @gcsafe_ccall _KERNEL32.CancelIoEx(
+    ok = @gcsafe_stdcall_ccall _KERNEL32.CancelIoEx(
         _socket_handle(reg.fd)::Ptr{Cvoid},
         _op_ptr(op)::Ptr{Cvoid},
     )::Int32
@@ -407,7 +408,7 @@ function _submit_iocp_op!(
         flags = Ref{UInt32}(UInt32(0))
         rc = GC.@preserve op wsabuf bytes flags begin
             if op.mode == PollMode.READ
-                @gcsafe_ccall _WS2_32.WSARecv(
+                @gcsafe_stdcall_ccall _WS2_32.WSARecv(
                     _socket_value(reg.fd)::UInt,
                     wsabuf::Ref{WSABUF},
                     UInt32(1)::UInt32,
@@ -417,7 +418,7 @@ function _submit_iocp_op!(
                     C_NULL::Ptr{Cvoid},
                 )::Cint
             else
-                @gcsafe_ccall _WS2_32.WSASend(
+                @gcsafe_stdcall_ccall _WS2_32.WSASend(
                     _socket_value(reg.fd)::UInt,
                     wsabuf::Ref{WSABUF},
                     UInt32(1)::UInt32,
@@ -433,7 +434,7 @@ function _submit_iocp_op!(
         bytes = Ref{UInt32}(UInt32(0))
         flags = Ref{UInt32}(UInt32(0))
         rc = GC.@preserve op wsabuf bytes flags begin
-            @gcsafe_ccall _WS2_32.WSARecv(
+            @gcsafe_stdcall_ccall _WS2_32.WSARecv(
                 _socket_value(reg.fd)::UInt,
                 wsabuf::Ref{WSABUF},
                 UInt32(1)::UInt32,
@@ -447,7 +448,7 @@ function _submit_iocp_op!(
         wsabuf = Ref(WSABUF(nbytes, ptr))
         bytes = Ref{UInt32}(UInt32(0))
         rc = GC.@preserve op wsabuf bytes begin
-            @gcsafe_ccall _WS2_32.WSASend(
+            @gcsafe_stdcall_ccall _WS2_32.WSASend(
                 _socket_value(reg.fd)::UInt,
                 wsabuf::Ref{WSABUF},
                 UInt32(1)::UInt32,
@@ -467,7 +468,7 @@ function _submit_iocp_op!(
         addrlen = request.addrlen
         addrlen[] = Cint(length(addrbuf))
         rc = GC.@preserve op wsabuf bytes flags addrbuf addrlen begin
-            @gcsafe_ccall _WS2_32.WSARecvFrom(
+            @gcsafe_stdcall_ccall _WS2_32.WSARecvFrom(
                 _socket_value(reg.fd)::UInt,
                 wsabuf::Ref{WSABUF},
                 UInt32(1)::UInt32,
@@ -486,7 +487,7 @@ function _submit_iocp_op!(
         bytes = Ref{UInt32}(UInt32(0))
         addrbuf = request.addrbuf
         rc = GC.@preserve op wsabuf bytes addrbuf begin
-            @gcsafe_ccall _WS2_32.WSASendTo(
+            @gcsafe_stdcall_ccall _WS2_32.WSASendTo(
                 _socket_value(reg.fd)::UInt,
                 wsabuf::Ref{WSABUF},
                 UInt32(1)::UInt32,
@@ -512,6 +513,7 @@ function _submit_iocp_op!(
         rc = GC.@preserve op addrbuf bytes_ref begin
             ccall(
                 connectex_ptr,
+                stdcall,
                 Int32,
                 (UInt, Ptr{Cvoid}, Cint, Ptr{UInt8}, UInt32, Ref{UInt32}, Ptr{Cvoid}),
                 _socket_value(reg.fd),
@@ -529,7 +531,7 @@ function _submit_iocp_op!(
         bytes_ref = Ref{UInt32}(UInt32(0))
         addrbuf = request.addrbuf
         rc = GC.@preserve op addrbuf bytes_ref begin
-            @gcsafe_ccall _MSWSOCK.AcceptEx(
+            @gcsafe_stdcall_ccall _MSWSOCK.AcceptEx(
                 _socket_value(reg.fd)::UInt,
                 _socket_value(request.acceptfd)::UInt,
                 pointer(addrbuf)::Ptr{UInt8},
@@ -845,7 +847,7 @@ function _iocp_finish_accept!(registration::Registration)::Tuple{SysFD, Vector{U
 end
 
 function _backend_init!(state::Poller)::Int32
-    port = @gcsafe_ccall _KERNEL32.CreateIoCompletionPort(
+    port = @gcsafe_stdcall_ccall _KERNEL32.CreateIoCompletionPort(
         _INVALID_HANDLE_VALUE::Ptr{Cvoid},
         C_NULL::Ptr{Cvoid},
         UInt(0)::UInt,
@@ -918,7 +920,7 @@ function _drain_pending_ops_on_close!(backend::IocpBackendState)
     while _iocp_any_op_active(backend)
         ov_ref[] = C_NULL
         ok = GC.@preserve bytes_ref key_ref ov_ref begin
-            @gcsafe_ccall _KERNEL32.GetQueuedCompletionStatus(
+            @gcsafe_stdcall_ccall _KERNEL32.GetQueuedCompletionStatus(
                 backend.port::Ptr{Cvoid},
                 bytes_ref::Ref{UInt32},
                 key_ref::Ref{UInt},
@@ -960,7 +962,7 @@ function _backend_close!(state::Poller)
             # Retire kernel ownership of every OVERLAPPED before closing the port
             # and dropping the registration objects the GC would otherwise free.
             _drain_pending_ops_on_close!(backend)
-            _ = @gcsafe_ccall _KERNEL32.CloseHandle(
+            _ = @gcsafe_stdcall_ccall _KERNEL32.CloseHandle(
                 backend.port::Ptr{Cvoid},
             )::Int32
         end
@@ -978,7 +980,7 @@ function _backend_open_fd!(
     _ = mode
     backend = _iocp_backend(state)
     backend === nothing && return Int32(Base.Libc.ENOSYS)
-    associated = @gcsafe_ccall _KERNEL32.CreateIoCompletionPort(
+    associated = @gcsafe_stdcall_ccall _KERNEL32.CreateIoCompletionPort(
         _socket_handle(fd)::Ptr{Cvoid},
         backend.port::Ptr{Cvoid},
         UInt(token)::UInt,
@@ -1031,7 +1033,7 @@ function _backend_wake!(state::Poller)::Int32
     backend === nothing && return Int32(Base.Libc.ENOSYS)
     _, ok = @atomicreplace(backend.wake_sig, UInt32(0) => UInt32(1))
     ok || return Int32(0)
-    posted = @gcsafe_ccall _KERNEL32.PostQueuedCompletionStatus(
+    posted = @gcsafe_stdcall_ccall _KERNEL32.PostQueuedCompletionStatus(
         backend.port::Ptr{Cvoid},
         UInt32(0)::UInt32,
         _WAKE_KEY::UInt,
@@ -1067,7 +1069,7 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
     removed = Ref{UInt32}(UInt32(0))
     wait_ms = _iocp_timeout_ms(delay_ns)
     ok = GC.@preserve entries removed begin
-        @gcsafe_ccall _KERNEL32.GetQueuedCompletionStatusEx(
+        @gcsafe_stdcall_ccall _KERNEL32.GetQueuedCompletionStatusEx(
             backend.port::Ptr{Cvoid},
             pointer(entries)::Ptr{OverlappedEntry},
             UInt32(length(entries))::UInt32,

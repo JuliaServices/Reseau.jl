@@ -576,8 +576,9 @@ function __init__()
     global _LIBCRYPTO_PATH = OpenSSL_jll.libcrypto_path
     global _LIBSSL_PATH = OpenSSL_jll.libssl_path
     empty!(_TLS_LOCAL_IDENTITY_CACHE)
+    # `opts` is `uint64_t` in the C prototype; Culong is 32 bits on i686 and Windows.
     _ = @gcsafe_ccall _LIBSSL_PATH.OPENSSL_init_ssl(
-        Culong(0)::Culong,
+        UInt64(0)::UInt64,
         C_NULL::Ptr{Cvoid},
     )::Cint
     _init_x25519_pkey_id!()
