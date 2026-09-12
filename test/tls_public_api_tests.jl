@@ -662,16 +662,20 @@ end
                     addr = NC.addr(listener)::NC.SocketAddrV4
                     server_task = errormonitor(Threads.@spawn begin
                         server_tcp = NC.accept(listener)
-                        server_tls = TL.server(server_tcp, _tls_server_config(
-                            handshake_timeout_ns = 2_000_000_000,
-                        ))
+                        server_tls = nothing
                         try
+                            server_tls = TL.server(server_tcp, _tls_server_config(
+                                handshake_timeout_ns = 2_000_000_000,
+                            ))
                             TL.handshake!(server_tls)
                             return nothing
                         catch ex
                             return ex
                         finally
+                            # Closing the socket on any failure unblocks the
+                            # client's record read; a stranded read hangs the suite.
                             _tls_close_quiet!(server_tls)
+                            _tls_close_quiet!(server_tcp)
                         end
                     end)
 
