@@ -372,8 +372,14 @@ end
 
 Backend hook invoked immediately before waiting so platforms that need explicit
 arming (such as IOCP readiness probes) can submit a wait operation.
+
+Backends that keep readiness interest armed for the life of a registration
+(epoll, kqueue) declare `_BACKEND_ARMS_WAITERS = false`, and this returns
+without touching the poller: every wait would otherwise take the shared poller
+lock and look the registration up again only to call a no-op hook.
 """
 function arm_waiter!(registration::Registration, mode::PollMode.T)
+    _BACKEND_ARMS_WAITERS || return nothing
     _mode_is_empty(mode) && return nothing
     isassigned(POLLER) || return nothing
     state = POLLER[]

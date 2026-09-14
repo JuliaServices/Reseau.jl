@@ -993,6 +993,10 @@ function _backend_open_fd!(
     return Int32(0)
 end
 
+# IOCP has no persistent readiness interest: each wait submits a probe, so
+# `arm_waiter!` must run its locked lifetime checks before calling the hook.
+const _BACKEND_ARMS_WAITERS = true
+
 function _backend_arm_waiter!(state::Poller, registration::Registration, mode::PollMode.T)::Int32
     backend = _iocp_backend(state)
     backend === nothing && return Int32(Base.Libc.ENOSYS)
@@ -1175,6 +1179,8 @@ function _backend_open_fd!(state::Poller, fd::SysFD, mode::PollMode.T, token::UI
     _ = token
     return Int32(Base.Libc.ENOSYS)
 end
+
+const _BACKEND_ARMS_WAITERS = false
 
 function _backend_arm_waiter!(state::Poller, registration::Registration, mode::PollMode.T)::Int32
     _ = state
