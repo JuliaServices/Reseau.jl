@@ -276,6 +276,7 @@ end
 
 """
     Config(; ...)
+    Config(cfg::Config; ...)
 
 Reusable TLS configuration for client and server sessions.
 
@@ -301,6 +302,15 @@ Keyword arguments:
   handshake is running. Existing transport deadlines still win if they are earlier.
 - `min_version` / `max_version`: TLS protocol version bounds. Only TLS 1.2 and TLS 1.3
   are supported; `nothing` leaves the bound unset.
+
+Copy an existing config with `Config(cfg::Config; kwargs...)`, passing only the settings
+above that should change. The copy shares `cfg`'s session caches, session-ticket keys,
+and loaded local identity, so a per-connection copy that only sets `server_name` or
+`handshake_timeout_ns` keeps resuming sessions; changing `cert_file` or `key_file` gives
+the copy its own identity state. Use this instead of rebuilding a `Config` field by
+field: the private fields and their order are not part of the API. The copy keywords
+take exactly the field types (`String` rather than any `AbstractString`), which keeps a
+copy built from another config's fields resolvable under `--trim`.
 
 Returns a reusable immutable `Config`.
 
@@ -344,6 +354,41 @@ const _TLS_POLICY_AUTO = UInt8(3)
 @inline _is_tls12_policy(policy::UInt8) = policy == _TLS_POLICY_TLS12
 @inline _is_tls_auto_policy(policy::UInt8) = policy == _TLS_POLICY_AUTO
 
+# Owned `String` storage for the name and path settings so shared configs do not depend
+# on caller-owned string buffers or views. Certificate and key paths are made absolute.
+@inline function _config_owned_paths(
+        server_name::Union{Nothing, AbstractString},
+        cert_file::Union{Nothing, AbstractString},
+        key_file::Union{Nothing, AbstractString},
+        ca_file::Union{Nothing, AbstractString},
+        client_ca_file::Union{Nothing, AbstractString},
+    )
+    return (
+        server_name === nothing ? nothing : String(server_name),
+        cert_file === nothing ? nothing : abspath(String(cert_file)),
+        key_file === nothing ? nothing : abspath(String(key_file)),
+        ca_file === nothing ? nothing : String(ca_file),
+        client_ca_file === nothing ? nothing : String(client_ca_file),
+    )
+end
+
+@inline function _check_config_settings!(
+        cert_file::Union{Nothing, String},
+        key_file::Union{Nothing, String},
+        handshake_timeout_ns::Int64,
+        min_version::Union{Nothing, UInt16},
+        max_version::Union{Nothing, UInt16},
+    )
+    (cert_file === nothing) == (key_file === nothing) || throw(ConfigError("both `cert_file` and `key_file` must be set together"))
+    handshake_timeout_ns < 0 && throw(ConfigError("handshake_timeout_ns must be >= 0"))
+    min_version !== nothing && _require_supported_tls_version!("min_version", min_version::UInt16)
+    max_version !== nothing && _require_supported_tls_version!("max_version", max_version::UInt16)
+    if min_version !== nothing && max_version !== nothing
+        (min_version::UInt16) <= (max_version::UInt16) || throw(ConfigError("min_version must be <= max_version"))
+    end
+    return nothing
+end
+
 function Config(
         server_name::Union{Nothing, AbstractString},
         verify_peer::Bool,
@@ -362,22 +407,9 @@ function Config(
         session_cache_capacity::Int = 64,
         _verification_time_s::Union{Nothing, Int64} = nothing,
     )
-    # Normalize to owned `String` storage so shared configs do not depend on caller-owned
-    # string buffers or views.
-    server_name_s = server_name === nothing ? nothing : String(server_name)
-    cert_file_s = cert_file === nothing ? nothing : abspath(String(cert_file))
-    key_file_s = key_file === nothing ? nothing : abspath(String(key_file))
-    ca_file_s = ca_file === nothing ? nothing : String(ca_file)
-    client_ca_file_s = client_ca_file === nothing ? nothing : String(client_ca_file)
-    has_cert = cert_file_s !== nothing
-    has_key = key_file_s !== nothing
-    has_cert == has_key || throw(ConfigError("both `cert_file` and `key_file` must be set together"))
-    handshake_timeout_ns < 0 && throw(ConfigError("handshake_timeout_ns must be >= 0"))
-    min_version !== nothing && _require_supported_tls_version!("min_version", min_version::UInt16)
-    max_version !== nothing && _require_supported_tls_version!("max_version", max_version::UInt16)
-    if min_version !== nothing && max_version !== nothing
-        (min_version::UInt16) <= (max_version::UInt16) || throw(ConfigError("min_version must be <= max_version"))
-    end
+    server_name_s, cert_file_s, key_file_s, ca_file_s, client_ca_file_s =
+        _config_owned_paths(server_name, cert_file, key_file, ca_file, client_ca_file)
+    _check_config_settings!(cert_file_s, key_file_s, Int64(handshake_timeout_ns), min_version, max_version)
     return Config(
         server_name_s,
         verify_peer,
@@ -439,6 +471,117 @@ function Config(;
         session_tickets_disabled,
         Int(session_cache_capacity),
         _verification_time_s,
+    )
+end
+
+# Everything below inlines into the keyword sorter. Keyword values are usually read
+# straight out of another config, so several of them are `Union{Nothing, String}`;
+# a non-inlined call carrying that many union-typed arguments stays a dynamic call
+# and fails `--trim=safe`. The struct constructor at the end inlines to `new`, and
+# every other call receives a concrete or narrowed value.
+@inline function Config(
+        cfg::Config;
+        server_name::Union{Nothing, String} = cfg.server_name,
+        verify_peer::Bool = cfg.verify_peer,
+        verify_hostname::Bool = cfg.verify_hostname,
+        client_auth::ClientAuthMode.T = cfg.client_auth,
+        cert_file::Union{Nothing, String} = cfg.cert_file,
+        key_file::Union{Nothing, String} = cfg.key_file,
+        ca_file::Union{Nothing, String} = cfg.ca_file,
+        client_ca_file::Union{Nothing, String} = cfg.client_ca_file,
+        alpn_protocols::Vector{String} = cfg.alpn_protocols,
+        curve_preferences::Vector{UInt16} = cfg.curve_preferences,
+        handshake_timeout_ns::Int64 = cfg.handshake_timeout_ns,
+        min_version::Union{Nothing, UInt16} = cfg.min_version,
+        max_version::Union{Nothing, UInt16} = cfg.max_version,
+        session_tickets_disabled::Bool = cfg.session_tickets_disabled,
+    )
+    # An untouched credential keyword is the very object stored in `cfg`. The loaded
+    # identity is filled lazily from `cert_file`/`key_file` and does not record which
+    # files it came from, so only a copy with the same credential objects may share it;
+    # any other copy starts from empty identity state. Session caches and ticket keys
+    # are keyed by peer and stay shared, which keeps per-connection copies resuming.
+    same_identity = cert_file === cfg.cert_file && key_file === cfg.key_file
+    cert_file_s = cert_file === nothing ? nothing : abspath(cert_file)
+    key_file_s = key_file === nothing ? nothing : abspath(key_file)
+    _check_config_settings!(cert_file_s, key_file_s, handshake_timeout_ns, min_version, max_version)
+    client_identity = same_identity ? cfg._client_identity : _TLSLocalIdentityState()
+    server_identity = same_identity ? cfg._server_identity : _TLSLocalIdentityState()
+    return Config(
+        server_name,
+        verify_peer,
+        verify_hostname,
+        client_auth,
+        cert_file_s,
+        key_file_s,
+        ca_file,
+        client_ca_file,
+        copy(alpn_protocols),
+        copy(curve_preferences),
+        handshake_timeout_ns,
+        min_version,
+        max_version,
+        session_tickets_disabled,
+        cfg._session_ticket_keys,
+        cfg._client_session_cache,
+        cfg._server_session_cache,
+        cfg._client_session_cache12,
+        cfg._server_session_cache12,
+        client_identity,
+        server_identity,
+        cfg._verification_time_s,
+    )
+end
+
+# HTTP.jl 2.6.x builds a `Config` positionally from the field list that predates
+# `_verification_time_s`. Keep that arity working, with the wall-clock default, so
+# already-released HTTP versions keep making HTTPS requests against this Reseau.
+function Config(
+        server_name::Union{Nothing, String},
+        verify_peer::Bool,
+        verify_hostname::Bool,
+        client_auth::ClientAuthMode.T,
+        cert_file::Union{Nothing, String},
+        key_file::Union{Nothing, String},
+        ca_file::Union{Nothing, String},
+        client_ca_file::Union{Nothing, String},
+        alpn_protocols::Vector{String},
+        curve_preferences::Vector{UInt16},
+        handshake_timeout_ns::Int64,
+        min_version::Union{Nothing, UInt16},
+        max_version::Union{Nothing, UInt16},
+        session_tickets_disabled::Bool,
+        session_ticket_keys::_TLSSessionTicketKeyState,
+        client_session_cache::_TLSSessionCache{_TLS13ClientSession},
+        server_session_cache::_TLSSessionCache{_TLS13ServerSession},
+        client_session_cache12::_TLSSessionCache{_TLS12ClientSession},
+        server_session_cache12::_TLSSessionCache{_TLS12ServerSession},
+        client_identity::_TLSLocalIdentityState,
+        server_identity::_TLSLocalIdentityState,
+    )
+    return Config(
+        server_name,
+        verify_peer,
+        verify_hostname,
+        client_auth,
+        cert_file,
+        key_file,
+        ca_file,
+        client_ca_file,
+        alpn_protocols,
+        curve_preferences,
+        handshake_timeout_ns,
+        min_version,
+        max_version,
+        session_tickets_disabled,
+        session_ticket_keys,
+        client_session_cache,
+        server_session_cache,
+        client_session_cache12,
+        server_session_cache12,
+        client_identity,
+        server_identity,
+        nothing,
     )
 end
 
@@ -636,30 +779,7 @@ end
 end
 
 function _config_with_server_name(config::Config, server_name::String)::Config
-    return Config(
-        server_name,
-        config.verify_peer,
-        config.verify_hostname,
-        config.client_auth,
-        config.cert_file,
-        config.key_file,
-        config.ca_file,
-        config.client_ca_file,
-        copy(config.alpn_protocols),
-        copy(config.curve_preferences),
-        config.handshake_timeout_ns,
-        config.min_version,
-        config.max_version,
-        config.session_tickets_disabled,
-        config._session_ticket_keys,
-        config._client_session_cache,
-        config._server_session_cache,
-        config._client_session_cache12,
-        config._server_session_cache12,
-        config._client_identity,
-        config._server_identity,
-        config._verification_time_s,
-    )
+    return Config(config; server_name = server_name)
 end
 
 @inline function _tls_identity_state(config::Config; is_server::Bool)::_TLSLocalIdentityState

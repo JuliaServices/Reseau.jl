@@ -36,6 +36,115 @@ end
     @test TL.DeadlineExceededError === NC.DeadlineExceededError
     @test TL.DeadlineExceededError === IP.DeadlineExceededError
 
+    @testset "config copy and legacy positional form" begin
+        base = TL.Config(
+            server_name = "base.example",
+            verify_peer = false,
+            verify_hostname = false,
+            cert_file = _TLS_CERT_PATH,
+            key_file = _TLS_KEY_PATH,
+            alpn_protocols = ["h2", "http/1.1"],
+            curve_preferences = UInt16[TL.P256],
+            handshake_timeout_ns = Int64(1_000),
+            max_version = TL.TLS1_3_VERSION,
+            session_tickets_disabled = true,
+        )
+        copied = TL.Config(
+            base;
+            server_name = "copy.example",
+            alpn_protocols = ["http/1.1"],
+            handshake_timeout_ns = Int64(2_000),
+        )
+        @test copied.server_name == "copy.example"
+        @test copied.alpn_protocols == ["http/1.1"]
+        @test copied.handshake_timeout_ns == Int64(2_000)
+        @test copied.curve_preferences == base.curve_preferences
+        # Vectors are owned by the copy, as with a fresh config.
+        @test copied.curve_preferences !== base.curve_preferences
+        @test copied.alpn_protocols !== base.alpn_protocols
+        @test copied.verify_peer == base.verify_peer
+        @test copied.verify_hostname == base.verify_hostname
+        @test copied.client_auth == base.client_auth
+        @test copied.cert_file == base.cert_file
+        @test copied.key_file == base.key_file
+        @test copied.ca_file === base.ca_file
+        @test copied.client_ca_file === base.client_ca_file
+        @test copied.min_version == base.min_version
+        @test copied.max_version == base.max_version
+        @test copied.session_tickets_disabled == base.session_tickets_disabled
+        # Private state is shared, so resumption and the loaded identity carry over.
+        @test copied._session_ticket_keys === base._session_ticket_keys
+        @test copied._client_session_cache === base._client_session_cache
+        @test copied._server_session_cache === base._server_session_cache
+        @test copied._client_session_cache12 === base._client_session_cache12
+        @test copied._server_session_cache12 === base._server_session_cache12
+        @test copied._client_identity === base._client_identity
+        @test copied._server_identity === base._server_identity
+        @test copied._verification_time_s === base._verification_time_s
+
+        renamed = TL._config_with_server_name(base, "renamed.example")
+        @test renamed.server_name == "renamed.example"
+        @test renamed._client_session_cache === base._client_session_cache
+        @test renamed._client_identity === base._client_identity
+
+        # Different credentials must not inherit an identity that may already be loaded.
+        recredentialed = TL.Config(
+            base;
+            cert_file = _TLS_NATIVE_SERVER_CERT_PATH,
+            key_file = _TLS_NATIVE_SERVER_KEY_PATH,
+        )
+        @test recredentialed.cert_file == abspath(_TLS_NATIVE_SERVER_CERT_PATH)
+        @test recredentialed.key_file == abspath(_TLS_NATIVE_SERVER_KEY_PATH)
+        @test recredentialed._client_identity !== base._client_identity
+        @test recredentialed._server_identity !== base._server_identity
+        @test recredentialed._client_session_cache === base._client_session_cache
+        @test recredentialed._session_ticket_keys === base._session_ticket_keys
+
+        # Copies go through the same validation as fresh configs.
+        @test_throws TL.ConfigError TL.Config(base; handshake_timeout_ns = Int64(-1))
+        @test_throws TL.ConfigError TL.Config(base; key_file = nothing)
+        @test_throws TL.ConfigError TL.Config(base; min_version = TL.TLS1_3_VERSION, max_version = TL.TLS1_2_VERSION)
+        @test_throws TL.ConfigError TL.Config(TL.Config(); cert_file = _TLS_CERT_PATH)
+
+        # HTTP.jl 2.6.x builds configs positionally from the field list that predates
+        # `_verification_time_s`. That arity must keep working and select the wall clock.
+        fixture = TL.Config(
+            server_name = "fixture.example",
+            verify_peer = false,
+            _verification_time_s = Int64(1_700_000_000),
+        )
+        legacy = TL.Config(
+            "legacy.example",
+            fixture.verify_peer,
+            fixture.verify_hostname,
+            fixture.client_auth,
+            fixture.cert_file,
+            fixture.key_file,
+            fixture.ca_file,
+            fixture.client_ca_file,
+            copy(fixture.alpn_protocols),
+            copy(fixture.curve_preferences),
+            fixture.handshake_timeout_ns,
+            fixture.min_version,
+            fixture.max_version,
+            fixture.session_tickets_disabled,
+            fixture._session_ticket_keys,
+            fixture._client_session_cache,
+            fixture._server_session_cache,
+            fixture._client_session_cache12,
+            fixture._server_session_cache12,
+            fixture._client_identity,
+            fixture._server_identity,
+        )
+        @test legacy.server_name == "legacy.example"
+        @test legacy.verify_peer == fixture.verify_peer
+        @test legacy._verification_time_s === nothing
+        @test legacy._client_session_cache === fixture._client_session_cache
+        @test legacy._client_identity === fixture._client_identity
+        # Adding a field means revisiting the 21-argument compatibility method above.
+        @test fieldcount(TL.Config) == 22
+    end
+
     @testset "config validation" begin
         cfg_default = TL.Config()
         @test cfg_default.min_version == TL.TLS1_2_VERSION
