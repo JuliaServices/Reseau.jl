@@ -89,8 +89,11 @@ end
             @testset "pointer-sized WinSock handles" begin
                 @test SO.SocketFD === UInt
                 @test IP.SysFD === UInt
-                high_handle = (UInt(1) << 40) | UInt(0x1234)
-                @test high_handle > UInt(typemax(UInt32))
+                # Set a bit above 32 on 64-bit Windows and the top bit on 32-bit
+                # Windows, so the handle needs the full machine word either way.
+                high_bit = Sys.WORD_SIZE == 64 ? 40 : Sys.WORD_SIZE - 1
+                high_handle = (UInt(1) << high_bit) | UInt(0x1234)
+                @test high_handle > (Sys.WORD_SIZE == 64 ? UInt(typemax(UInt32)) : UInt(typemax(UInt16)))
                 @test SO.is_valid_socket(high_handle)
                 @test SO._socket_value(high_handle) == high_handle
                 pollstate = IP.PollState(high_handle, UInt64(7))
