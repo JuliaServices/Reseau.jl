@@ -9,6 +9,10 @@ const ND = HostResolvers
 const NU = UDP
 const TL = TLS
 
+# 2026-05-01 UTC lies inside every bundled certificate validity window.
+# Freeze only X.509 verification time, never deadlines or session-ticket age.
+const _PC_TLS_VERIFICATION_TIME_S = Int64(1_777_593_600)
+
 @inline function _pc_runtime_supported()::Bool
     return Sys.isapple() || Sys.islinux() || Sys.iswindows()
 end
@@ -439,6 +443,7 @@ function _pc_tls_server_config(
     max_version::Union{Nothing, UInt16} = TL.TLS1_3_VERSION,
 )::TL.Config
     return TL.Config(
+        _verification_time_s = _PC_TLS_VERIFICATION_TIME_S,
         verify_peer = false,
         cert_file = cert_path,
         key_file = key_path,
@@ -474,6 +479,7 @@ function _pc_tls_client_config(;
     max_version::Union{Nothing, UInt16} = TL.TLS1_3_VERSION,
 )::TL.Config
     return TL.Config(
+        _verification_time_s = _PC_TLS_VERIFICATION_TIME_S,
         verify_peer = verify_peer,
         verify_hostname = verify_hostname,
         server_name = server_name,
