@@ -95,6 +95,11 @@ jobs:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
       - uses: julia-actions/cache@v2
+      - name: Install the 32-bit C toolchain the trim tests need
+        if: matrix.os == 'ubuntu-latest' && matrix.arch == 'x86'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
       - if: matrix.os == 'ubuntu-latest' && matrix.arch == 'x64' && matrix.version == '1' && matrix.threads == 1
