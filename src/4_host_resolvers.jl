@@ -906,11 +906,20 @@ function _parse_ipv4_literal(host::AbstractString)::Union{Nothing, NTuple{4, UIn
     h = String(host)
     bytes = Vector{UInt8}(undef, 4)
     rc = GC.@preserve bytes begin
-        @gcsafe_win32_ccall inet_pton(
-            SocketOps.AF_INET::Cint,
-            h::Cstring,
-            pointer(bytes)::Ptr{UInt8},
-        )::Cint
+        @static if Sys.iswindows()
+            # Name the library: on Windows `inet_pton` lives in Ws2_32 and is stdcall.
+            @gcsafe_win32_ccall "Ws2_32".inet_pton(
+                SocketOps.AF_INET::Cint,
+                h::Cstring,
+                pointer(bytes)::Ptr{UInt8},
+            )::Cint
+        else
+            @gcsafe_ccall inet_pton(
+                SocketOps.AF_INET::Cint,
+                h::Cstring,
+                pointer(bytes)::Ptr{UInt8},
+            )::Cint
+        end
     end
     rc == 1 || return nothing
     return (bytes[1], bytes[2], bytes[3], bytes[4])
@@ -925,11 +934,20 @@ function _parse_ipv6_literal(host::AbstractString)::Union{Nothing, NTuple{16, UI
     occursin('%', h) && return nothing
     bytes = Vector{UInt8}(undef, 16)
     rc = GC.@preserve bytes begin
-        @gcsafe_win32_ccall inet_pton(
-            SocketOps.AF_INET6::Cint,
-            h::Cstring,
-            pointer(bytes)::Ptr{UInt8},
-        )::Cint
+        @static if Sys.iswindows()
+            # Name the library: on Windows `inet_pton` lives in Ws2_32 and is stdcall.
+            @gcsafe_win32_ccall "Ws2_32".inet_pton(
+                SocketOps.AF_INET6::Cint,
+                h::Cstring,
+                pointer(bytes)::Ptr{UInt8},
+            )::Cint
+        else
+            @gcsafe_ccall inet_pton(
+                SocketOps.AF_INET6::Cint,
+                h::Cstring,
+                pointer(bytes)::Ptr{UInt8},
+            )::Cint
+        end
     end
     rc == 1 || return nothing
     return (
