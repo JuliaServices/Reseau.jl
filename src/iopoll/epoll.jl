@@ -151,6 +151,11 @@ function _backend_open_fd!(
     return Int32(0)
 end
 
+# epoll keeps the interest set armed from registration until deregistration, so
+# there is nothing to submit before a wait. `arm_waiter!` skips its locked
+# lifetime checks when this is `false`.
+const _BACKEND_ARMS_WAITERS = false
+
 function _backend_arm_waiter!(state::Poller, registration::Registration, mode::PollMode.T)::Int32
     _ = state
     _ = registration

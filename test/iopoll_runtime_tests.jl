@@ -345,6 +345,15 @@ end
             end
         end
         _el_log_test_progress("DONE: earlier scheduled deadline wakes poll early")
+        _el_log_test_progress("START: backend arming contract")
+        @testset "backend arming contract" begin
+            # Only IOCP submits a probe per wait. epoll and kqueue keep interest
+            # armed for the life of a registration, so `arm_waiter!` must not
+            # take the poller lock on their behalf.
+            @test NP._BACKEND_ARMS_WAITERS == Sys.iswindows()
+            @test NP.arm_waiter!(NP._new_registration(SO.INVALID_SOCKET, UInt64(0), NP.PollMode.READ), NP.PollMode.READ) === nothing
+        end
+        _el_log_test_progress("DONE: backend arming contract")
         _el_log_test_progress("START: runtime register/pollwait/deregister")
         @testset "runtime register/pollwait/deregister" begin
             _el_log_test_progress("runtime register/pollwait/deregister: init")
