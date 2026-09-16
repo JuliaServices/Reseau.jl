@@ -11,11 +11,9 @@ jobs:
       fail-fast: false
       matrix:
         version: ['1.13']
-        arch: [x86]
-        guard: ['false', 'true']
+        arch: [x86, x64]
     env:
       JULIA_NUM_THREADS: '1'
-      PROBE_PROFILE_GUARD: ${{ matrix.guard }}
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
@@ -28,7 +26,7 @@ jobs:
           $debuggers = Get-ChildItem "C:\Program Files (x86)\Windows Kits" -Filter cdb.exe -Recurse -ErrorAction SilentlyContinue
           $debuggers | Select-Object -ExpandProperty FullName
           $cdb = $debuggers | Where-Object { $_.Directory.Name -eq 'x86' } | Select-Object -First 1
-          $probe = Start-Process julia -ArgumentList '--startup-file=no','test/foreign_thread_exception_probe.jl' -PassThru -RedirectStandardOutput probe.stdout -RedirectStandardError probe.stderr
+          $probe = Start-Process julia -ArgumentList '--startup-file=no','test/foreign_thread_exit_probe.jl' -PassThru -RedirectStandardOutput probe.stdout -RedirectStandardError probe.stderr
           $finished = $probe.WaitForExit(90000)
           Get-Content probe.stdout
           Get-Content probe.stderr

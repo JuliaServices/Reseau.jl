@@ -1,42 +1,37 @@
-# Standalone runtime probe: no Reseau import or sockets.
-const completed = Threads.Atomic{Int}(0)
-function callback(arg::Ptr{Cvoid})::Cvoid
-    if arg != C_NULL
-        queue = unsafe_pointer_to_objref(arg)::Channel{Union{Nothing,Int}}
-        for item in queue
-            item === nothing && break
-            item == 1 || error("unexpected item")
+
+        const entered = Threads.Atomic{Int}(0)
+        const completed = Threads.Atomic{Int}(0)
+        function callback(arg::Ptr{Cvoid})::Cvoid
+            queue = unsafe_pointer_to_objref(arg)::Channel{Int}
+            Threads.atomic_add!(entered, 1)
+            for _ in queue
+            end
+            Threads.atomic_add!(completed, 1)
+            return nothing
         end
-    end
-    Threads.atomic_add!(completed, 1)
-    return nothing
-end
-const entry = @cfunction(callback, Cvoid, (Ptr{Cvoid},))
-function mark(message)
-    println(message)
-    flush(stdout)
-end
-for iteration in 1:100
-    mark("iteration $iteration: create")
-    queue = Channel{Union{Nothing,Int}}(64)
-    handles = [Ref{Ptr{Cvoid}}(C_NULL) for _ in 1:4]
-    for handle in handles
-        ret = ccall(:uv_thread_create, Cint,
-            (Ref{Ptr{Cvoid}}, Ptr{Cvoid}, Ptr{Cvoid}), handle, entry, pointer_from_objref(queue))
-        ret == 0 || error("uv_thread_create: $ret")
-    end
-    mark("iteration $iteration: close queue")
-    put!(queue, 1)
-    for _ in 1:4
-        put!(queue, nothing)
-    end
-    mark("iteration $iteration: join")
-    GC.@preserve queue for handle in handles
-        ret = @ccall gc_safe=true uv_thread_join(handle::Ref{Ptr{Cvoid}})::Cint
-        ret == 0 || error("uv_thread_join: $ret")
-    end
-    mark("iteration $iteration: completed=$(completed[]), GC start")
-    GC.gc()
-    mark("iteration $iteration: GC complete")
-end
-completed[] == 400 || error("missing callbacks")
+        const entry = @cfunction(callback, Cvoid, (Ptr{Cvoid},))
+        function run_close_probe()
+            for iteration in 1:100
+                queue = Channel{Int}(64)
+                handles = [Ref{UInt}(0) for _ in 1:4]
+                GC.@preserve queue begin
+                    for handle in handles
+                        arg = pointer_from_objref(queue)
+                        ret = @ccall uv_thread_create(handle::Ref{UInt}, entry::Ptr{Cvoid}, arg::Ptr{Cvoid})::Cint
+                        ret == 0 || Base.uv_error("uv_thread_create", ret)
+                    end
+                    while entered[] < 4 * iteration
+                        yield()
+                    end
+                    close(queue)
+                    for handle in handles
+                        ret = @ccall gc_safe=true uv_thread_join(handle::Ref{UInt})::Cint
+                        ret == 0 || Base.uv_error("uv_thread_join", ret)
+                    end
+                end
+                GC.gc()
+            end
+            @assert completed[] == 400
+        end
+        run_close_probe()
+        
