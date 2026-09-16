@@ -1,26 +1,24 @@
-name: Windows Min TLS Debug
-
+name: Windows Resolver Restart Diagnostic
 on:
   workflow_dispatch:
-
+permissions:
+  contents: read
 jobs:
-  windows-min-tls:
-    name: Julia min - windows-latest - x64 - tls-debug
+  resolver:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 6
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ['1.10', '1.13']
     env:
-      JULIA_NUM_THREADS: 1
-      RESEAU_RUN_TLS_TESTS: '1'
-      RESEAU_RUN_NETWORK_TESTS: '1'
-      RESEAU_TEST_ONLY: tls_native_tls12_tests.jl
-      RESEAU_TRIM_EXE_TIMEOUT_S: "60.0"
-      RESEAU_TRIM_BUNDLE: '1'
+      JULIA_NUM_THREADS: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
         with:
-          version: 'min'
-          arch: x64
+          version: ${{ matrix.version }}
+          arch: x86
       - uses: julia-actions/cache@v2
-      - uses: julia-actions/julia-buildpkg@v1
-      - uses: julia-actions/julia-runtest@v1
+      - name: Exercise fresh resolver worker generations
+        run: julia --project=. --startup-file=no -e 'using Pkg; Pkg.instantiate(); include("test/resolver_restart_probe.jl")'
