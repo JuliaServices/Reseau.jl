@@ -2,8 +2,9 @@
 const completed = Threads.Atomic{Int}(0)
 function callback(arg::Ptr{Cvoid})::Cvoid
     if arg != C_NULL
-        queue = unsafe_pointer_to_objref(arg)::Channel{Int}
+        queue = unsafe_pointer_to_objref(arg)::Channel{Union{Nothing,Int}}
         for item in queue
+            item === nothing && break
             item == 1 || error("unexpected item")
         end
     end
@@ -17,7 +18,7 @@ function mark(message)
 end
 for iteration in 1:100
     mark("iteration $iteration: create")
-    queue = Channel{Int}(64)
+    queue = Channel{Union{Nothing,Int}}(64)
     handles = [Ref{Ptr{Cvoid}}(C_NULL) for _ in 1:4]
     for handle in handles
         ret = ccall(:uv_thread_create, Cint,
@@ -26,7 +27,9 @@ for iteration in 1:100
     end
     mark("iteration $iteration: close queue")
     put!(queue, 1)
-    close(queue)
+    for _ in 1:4
+        put!(queue, nothing)
+    end
     mark("iteration $iteration: join")
     GC.@preserve queue for handle in handles
         ret = @ccall gc_safe=true uv_thread_join(handle::Ref{Ptr{Cvoid}})::Cint
