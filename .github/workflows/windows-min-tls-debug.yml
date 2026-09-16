@@ -10,25 +10,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - version: '1.13'
-            arch: x86
-            disable_gc: 'false'
-          - version: '1.13'
-            arch: x86
-            disable_gc: 'true'
-          - version: '1.13'
-            arch: x64
-            disable_gc: 'false'
+        version: ['1.12', '1.13']
+        arch: [x86, x64]
     env:
       JULIA_NUM_THREADS: '1'
-      PROBE_DISABLE_GC: ${{ matrix.disable_gc }}
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
         with:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
-      - uses: julia-actions/cache@v2
-      - name: Exercise fresh resolver worker generations
-        run: julia --project=. --startup-file=no -e 'using Pkg; Pkg.instantiate(); include("test/resolver_restart_probe.jl")'
+      - name: Exercise standalone foreign thread teardown
+        run: julia --startup-file=no test/foreign_thread_exit_probe.jl
