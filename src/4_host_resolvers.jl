@@ -516,11 +516,6 @@ function _addrinfo_live_threads()::Int
     end
 end
 
-function _addrinfo_worker_entry_uv(arg::Ptr{Cvoid})::Cvoid
-    _addrinfo_worker_entry(arg)
-    return nothing
-end
-
 function _addrinfo_worker_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
     work_queue = unsafe_pointer_to_objref(arg)::Channel{_AddrInfoFuture}
     try
@@ -593,11 +588,7 @@ function _wait_addrinfo_future!(future::_AddrInfoFuture)::Cint
 end
 
 function __init__()
-    @static if Sys.iswindows()
-        _ADDRINFO_THREAD_ENTRY_C[] = @cfunction(_addrinfo_worker_entry_uv, Cvoid, (Ptr{Cvoid},))
-    else
-        _ADDRINFO_THREAD_ENTRY_C[] = @cfunction(_addrinfo_worker_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
-    end
+    _ADDRINFO_THREAD_ENTRY_C[] = @cfunction(_addrinfo_worker_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
     _ADDRINFO_WORK_QUEUE[] = Channel{_AddrInfoFuture}(_ADDRINFO_POOL_CAPACITY)
     _ADDRINFO_STARTED_THREADS[] = 0
     _ADDRINFO_LIVE_THREADS[] = 0

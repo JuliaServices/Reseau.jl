@@ -82,13 +82,26 @@ function _spawn_detached_thread(
     _ = name
     thread_arg = arg === nothing ? C_NULL : pointer_from_objref(arg)
     @static if Sys.iswindows()
-        # Diagnostic: let libuv supply the Windows thread entry wrapper.
-        thread_ref = Ref{Ptr{Cvoid}}(C_NULL)
-        create_ret = ccall(:uv_thread_create, Cint,
-            (Ref{Ptr{Cvoid}}, Ptr{Cvoid}, Ptr{Cvoid}),
-            thread_ref, thread_fn[], thread_arg)
-        create_ret == 0 || throw(ErrorException("uv_thread_create failed: $create_ret"))
-        _ = @win32_cconv ccall((:CloseHandle, "kernel32"), Int32, (Ptr{Cvoid},), thread_ref[])
+        # NOTE (32-bit Windows): `LPTHREAD_START_ROUTINE` is `__stdcall`, while
+        # `@cfunction` emits a cdecl callback and cannot be asked for anything
+        # else -- codegen builds the thunk with `CallingConv::C` and discards
+        # the convention slot of `Expr(:cfunction, ...)`.
+        #
+        # This is an ABI nonconformance with no known observable effect. Both
+        # conventions pass arguments the same way on i686, so `thread_arg`
+        # arrives intact; they differ only in who pops, and the entry point
+        # returns straight into the thread-exit thunk, which never relies on the
+        # restored stack pointer. It is invoked once per thread, so nothing
+        # accumulates. Fixing it properly means not needing a stdcall callback
+        # at all -- `uv_thread_create` takes a cdecl `uv_thread_cb` and would
+        # also collapse this branch and the pthread one into a single path.
+        handle = @win32_cconv ccall(
+            (:CreateThread, "kernel32"), Ptr{Cvoid},
+            (Ptr{Cvoid}, Csize_t, Ptr{Cvoid}, Ptr{Cvoid}, UInt32, Ptr{UInt32}),
+            C_NULL, Csize_t(0), thread_fn[], thread_arg, UInt32(0), C_NULL,
+        )
+        handle == C_NULL && throw(ArgumentError("error creating poller thread"))
+        _ = @win32_cconv ccall((:CloseHandle, "kernel32"), Int32, (Ptr{Cvoid},), handle)
     else
         pthread_ref = Ref{_pthread_t}(0)
         create_ret = ccall(
@@ -454,11 +467,6 @@ function _poller_thread_main!(state::Poller)
     return nothing
 end
 
-function _poller_thread_entry_uv(arg::Ptr{Cvoid})::Cvoid
-    _poller_thread_entry(arg)
-    return nothing
-end
-
 function _poller_thread_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
     state = unsafe_pointer_to_objref(arg)::Poller
     try
@@ -479,11 +487,7 @@ function _poller_thread_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
 end
 
 function __init__()
-    @static if Sys.iswindows()
-        _POLLER_THREAD_ENTRY_C[] = @cfunction(_poller_thread_entry_uv, Cvoid, (Ptr{Cvoid},))
-    else
-        _POLLER_THREAD_ENTRY_C[] = @cfunction(_poller_thread_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
-    end
+    _POLLER_THREAD_ENTRY_C[] = @cfunction(_poller_thread_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
     if _is_generating_output()
         atexit(shutdown!)
         POLLER[] = Poller()
