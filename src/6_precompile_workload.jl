@@ -340,13 +340,13 @@ function _pc_run_tcp_workload!()
         server = NC.accept(listener)
         NC.set_deadline!(client, _pc_deadline_ns())
         NC.set_deadline!(server, _pc_deadline_ns())
-        NC.pending_input(server) === :none || throw(ArgumentError("tcp workload expected no pending input"))
+        NC.tryread!(server, Vector{UInt8}(undef, 1)) === nothing || throw(ArgumentError("tcp workload expected no pending input"))
         payload = UInt8[0x41, 0x42, 0x43]
         written = write(client, payload)
         written == length(payload) || throw(ArgumentError("tcp workload expected 3-byte write"))
         recv_buf = Vector{UInt8}(undef, length(payload))
         _pc_read_exact!(server, recv_buf) == length(payload) || throw(EOFError())
-        NC.pending_input(server) === :none || throw(ArgumentError("tcp workload expected input drained"))
+        NC.tryread!(server, Vector{UInt8}(undef, 1)) === nothing || throw(ArgumentError("tcp workload expected input drained"))
     finally
         try
             server === nothing || close(server)
@@ -615,7 +615,7 @@ Drive one public-API TLS roundtrip and return the post-handshake connection
 state snapshots observed by both peers.
 
 The helper exercises `TLS.listen`, `TLS.accept`, `TLS.connect`, `TLS.handshake!`,
-`read`, `write`, `eof`, `pending_input`, and `connection_state` so the canonical workload stays
+`read`, `write`, `eof`, `tryread!`, and `connection_state` so the canonical workload stays
 anchored at the supported public surface.
 """
 function _pc_run_tls_roundtrip_states!(
@@ -653,10 +653,10 @@ function _pc_run_tls_roundtrip_states!(
         )
         TL.set_deadline!(client, _pc_deadline_ns())
         read(client, 1) == UInt8[0x41] || throw(ArgumentError("TLS precompile workload expected server byte"))
-        TL.pending_input(client) === :none || throw(ArgumentError("TLS precompile workload expected no pending input"))
+        TL.tryread!(client, Vector{UInt8}(undef, 1)) === nothing || throw(ArgumentError("TLS precompile workload expected no pending input"))
         write(client, UInt8[0x51]) == 1 || throw(ArgumentError("TLS precompile workload expected client ack write"))
         eof(client) || throw(ArgumentError("TLS precompile workload expected connection EOF"))
-        TL.pending_input(client) === :eof || throw(ArgumentError("TLS precompile workload expected pending_input EOF"))
+        TL.tryread!(client, Vector{UInt8}(undef, 1)) === 0 || throw(ArgumentError("TLS precompile workload expected tryread! EOF"))
         client_state = TL.connection_state(client)
         _pc_wait_task_done(server_task::Task)
         return _PCTLSRoundtripStates(client_state, fetch(server_task::Task)::TL.ConnectionState)

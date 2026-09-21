@@ -443,7 +443,7 @@ end
                     close(client_tcp)
                     client_tcp = nothing
                     err = try
-                        TLN._tls_read_wire_record!(server_tcp, UInt8[], TLN._TLS13_MAX_CIPHERTEXT, UInt16(0))
+                        TLN._tls_read_wire_record!(server_tcp, TLN._TLS13NativeClientState(), TLN._TLS13_MAX_CIPHERTEXT, UInt16(0))
                         nothing
                     catch ex
                         ex
@@ -467,7 +467,7 @@ end
             write(client_tcp, UInt8[TLN._TLS_RECORD_TYPE_HANDSHAKE, 0x03, 0x03, 0x00, 0x00])
             close(client_tcp)
             client_tcp = nothing
-            record_buffer = UInt8[]
+            record_buffer = TLN._TLS13NativeClientState()
             @test TLN._tls_read_wire_record!(server_tcp, record_buffer, TLN._TLS13_MAX_CIPHERTEXT, UInt16(0)) == 0
             @test_throws EOFError TLN._tls_read_wire_record!(server_tcp, record_buffer, TLN._TLS13_MAX_CIPHERTEXT, UInt16(0))
         finally
@@ -576,7 +576,7 @@ end
                     result = try
                         TLN._tls_read_wire_record!(
                             server_tcp,
-                            UInt8[],
+                            TLN._TLS13NativeClientState(),
                             TLN._TLS13_MAX_CIPHERTEXT,
                             negotiated_version,
                         )

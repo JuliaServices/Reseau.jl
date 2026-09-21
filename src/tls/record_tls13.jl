@@ -58,6 +58,7 @@ mutable struct _TLS13NativeClientState
     read_cipher::Union{Nothing, _TLS13RecordCipherState}
     write_cipher::Union{Nothing, _TLS13RecordCipherState}
     record_buffer::Vector{UInt8}
+    record_received::Int
     handshake_buffer::Vector{UInt8}
     handshake_buffer_pos::Int
     plaintext_buffer::Vector{UInt8}
@@ -78,6 +79,7 @@ mutable struct _TLS13NativeClientState
     # (Reseau supports neither 0-RTT nor 0.5-RTT), so the record layer rejects
     # pre-Finished application records instead of buffering them unbounded.
     handshake_complete::Bool
+    @atomic key_update_pending::Bool
 end
 
 _TLS13NativeClientState() = _TLS13NativeClientState(
@@ -85,6 +87,7 @@ _TLS13NativeClientState() = _TLS13NativeClientState(
     nothing,
     nothing,
     UInt8[],
+    0,
     UInt8[],
     1,
     UInt8[],
@@ -101,6 +104,7 @@ _TLS13NativeClientState() = _TLS13NativeClientState(
     false,
     false,
     UInt16(0),
+    false,
     false,
 )
 
@@ -150,6 +154,7 @@ function _securezero_tls13_native_client_state!(state::_TLS13NativeClientState):
         _securezero!(cert)
     end
     empty!(state.record_buffer)
+    state.record_received = 0
     empty!(state.handshake_buffer)
     empty!(state.plaintext_buffer)
     empty!(state.resumption_secret)
@@ -159,6 +164,7 @@ function _securezero_tls13_native_client_state!(state::_TLS13NativeClientState):
     state.plaintext_buffer_pos = 1
     state.useless_record_count = 0
     state.peer_close_notify = false
+    @atomic state.key_update_pending = false
     state.sent_close_notify = false
     state.sent_dummy_ccs = false
     state.session_cipher_suite = UInt16(0)
@@ -385,8 +391,9 @@ end
 # Record reads are responsible for parsing/decrypting the outer TLS 1.3 record,
 # then feeding any recovered handshake, alert, application, or post-handshake
 # bytes into the appropriate connection-owned buffers.
-function _tls13_read_record!(tcp::TCP.Conn, state::_TLS13NativeClientState)::Nothing
-    payload_len = _tls_read_wire_record!(tcp, state.record_buffer, _TLS13_MAX_CIPHERTEXT, state.version)
+function _tls13_read_record!(tcp::TCP.Conn, state::_TLS13NativeClientState; block::Bool = true)::Bool
+    payload_len = _tls_read_wire_record!(tcp, state, _TLS13_MAX_CIPHERTEXT, state.version; block)
+    payload_len === nothing && return false
     record = state.record_buffer
     content_type = record[1]
     payload_start = 6
@@ -410,7 +417,7 @@ function _tls13_read_record!(tcp::TCP.Conn, state::_TLS13NativeClientState)::Not
     if content_type == _TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC
         payload_len == 1 && payload[1] == 0x01 || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed ChangeCipherSpec record")
         _tls_note_useless_record!(state, "tls: too many ignored TLS records")
-        return nothing
+        return true
     end
     if state.read_cipher === nothing
         if content_type == _TLS_RECORD_TYPE_HANDSHAKE
@@ -419,11 +426,11 @@ function _tls13_read_record!(tcp::TCP.Conn, state::_TLS13NativeClientState)::Not
             length(state.handshake_buffer) <= _TLS13_MAX_HANDSHAKE_BUFFER ||
                 _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received too much buffered TLS 1.3 handshake data")
             _tls_reset_useless_record_count!(state)
-            return nothing
+            return true
         end
         if content_type == _TLS_RECORD_TYPE_ALERT
             _tls13_process_alert!(state, payload)
-            return nothing
+            return true
         end
         _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected plaintext TLS 1.3 record type $(Int(content_type))")
     end
@@ -459,7 +466,7 @@ function _tls13_read_record!(tcp::TCP.Conn, state::_TLS13NativeClientState)::Not
     else
         cipher.seq += UInt64(1)
     end
-    return nothing
+    return true
 end
 
 function _tls13_try_take_handshake_message!(state::_TLS13NativeClientState)::Union{Nothing, Vector{UInt8}}
@@ -536,21 +543,24 @@ end
 # takes `c.out.Lock()` before writing the response and calling
 # `c.out.setTrafficSecret`. A failed response write becomes the permanent
 # write-side error (Go's `setErrorLocked`) instead of corrupting the read path.
-function _tls13_handle_key_update!(conn, state::_TLS13NativeClientState, request_update::Bool)::Nothing
+function _tls13_handle_key_update!(conn, state::_TLS13NativeClientState, request_update::Bool; block::Bool = true)::Nothing
     _tls13_advance_read_cipher!(state)
     request_update || return nothing
+    @atomic state.key_update_pending = true
+    block && _tls13_flush_key_update!(conn, state)
+    return nothing
+end
+
+function _tls13_flush_key_update!(conn, state::_TLS13NativeClientState)::Nothing
+    (@atomic state.key_update_pending) || return nothing
     lock(conn.write_lock)
     try
         conn.write_permanent_error === nothing || return nothing
+        (@atomicswap state.key_update_pending = false) || return nothing
         try
             _tls13_write_key_update_response!(conn.tcp, state)
         catch err
-            conn.write_permanent_error = TLSError(
-                "write",
-                Int32(0),
-                "tls: failed to send key update",
-                _as_exception(err),
-            )
+            conn.write_permanent_error = TLSError("write", Int32(0), "tls: failed to send key update", _as_exception(err))
         end
     finally
         unlock(conn.write_lock)
@@ -641,7 +651,8 @@ function _tls13_handle_post_handshake_messages!(tcp::TCP.Conn, state::_TLS13Nati
     end
 end
 
-function _tls13_handle_post_handshake_messages!(conn, state::_TLS13NativeClientState)::Nothing
+function _tls13_handle_post_handshake_messages!(conn, state::_TLS13NativeClientState; block::Bool = true)::Nothing
+    block && _tls13_flush_key_update!(conn, state)
     while true
         raw = _tls13_try_take_handshake_message!(state)
         raw === nothing && return nothing
@@ -658,7 +669,7 @@ function _tls13_handle_post_handshake_messages!(conn, state::_TLS13NativeClientS
             request_update = _tls13_parse_key_update(raw)
             request_update === nothing && _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.3 key update message")
             _tls_note_useless_record!(state, "tls: too many non-advancing TLS 1.3 records")
-            _tls13_handle_key_update!(conn, state, request_update::Bool)
+            _tls13_handle_key_update!(conn, state, request_update::Bool; block)
             continue
         end
         _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: unexpected post-handshake TLS 1.3 message")

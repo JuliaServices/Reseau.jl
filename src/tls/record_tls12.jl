@@ -58,6 +58,7 @@ mutable struct _TLS12NativeState
     read_cipher::Union{Nothing, _TLS12RecordCipherState}
     write_cipher::Union{Nothing, _TLS12RecordCipherState}
     record_buffer::Vector{UInt8}
+    record_received::Int
     handshake_buffer::Vector{UInt8}
     handshake_buffer_pos::Int
     plaintext_buffer::Vector{UInt8}
@@ -80,6 +81,7 @@ _TLS12NativeState() = _TLS12NativeState(
     nothing,
     nothing,
     UInt8[],
+    0,
     UInt8[],
     1,
     UInt8[],
@@ -137,6 +139,7 @@ function _securezero_tls12_native_state!(state::_TLS12NativeState)::Nothing
     _securezero!(state.handshake_buffer)
     _securezero!(state.plaintext_buffer)
     empty!(state.record_buffer)
+    state.record_received = 0
     empty!(state.handshake_buffer)
     empty!(state.plaintext_buffer)
     state.version = UInt16(0)
@@ -324,8 +327,9 @@ end
 # 2. decrypt/authenticate if keys are installed,
 # 3. route alerts/plaintext/handshake bytes into the right buffers,
 # 4. enforce TLS 1.2 invariants like ChangeCipherSpec ordering.
-function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeState)::Nothing
-    payload_len = _tls_read_wire_record!(tcp, state.record_buffer, _TLS12_MAX_CIPHERTEXT, state.version)
+function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeState; block::Bool = true)::Bool
+    payload_len = _tls_read_wire_record!(tcp, state, _TLS12_MAX_CIPHERTEXT, state.version; block)
+    payload_len === nothing && return false
     record = state.record_buffer
     content_type = record[1]
     payload_start = 6
@@ -342,7 +346,7 @@ function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeState)::Nothing
         state.received_change_cipher_spec && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received duplicate TLS 1.2 ChangeCipherSpec")
         state.received_change_cipher_spec = true
         _tls_reset_useless_record_count!(state)
-        return nothing
+        return true
     end
     if state.read_cipher === nothing
         if content_type == _TLS_RECORD_TYPE_HANDSHAKE
@@ -351,11 +355,11 @@ function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeState)::Nothing
             length(state.handshake_buffer) <= _TLS12_MAX_HANDSHAKE_BUFFER ||
                 _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received too much buffered TLS 1.2 handshake data")
             _tls_reset_useless_record_count!(state)
-            return nothing
+            return true
         end
         if content_type == _TLS_RECORD_TYPE_ALERT
             _tls12_process_alert!(state, payload)
-            return nothing
+            return true
         end
         if content_type == _TLS_RECORD_TYPE_APPLICATION_DATA
             _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected plaintext TLS 1.2 application data before ChangeCipherSpec")
@@ -424,7 +428,7 @@ function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeState)::Nothing
     else
         cipher.seq += UInt64(1)
     end
-    return nothing
+    return true
 end
 
 function _tls12_try_take_handshake_message!(state::_TLS12NativeState)::Union{Nothing, Vector{UInt8}}

@@ -52,7 +52,7 @@ Base.read!(::Conn, ::Vector{UInt8})
 Base.readbytes!(::Conn, ::Vector{UInt8}, ::Integer)
 Base.readavailable(::Conn)
 Base.eof(::Conn)
-pending_input
+tryread!
 Base.isopen(::Conn)
 Base.isopen(::Listener)
 Base.write(::Conn, ::AbstractVector{UInt8})
@@ -156,7 +156,7 @@ Base.read!(::Conn, ::Vector{UInt8})
 Base.readbytes!(::Conn, ::Vector{UInt8}, ::Integer)
 Base.readavailable(::Conn)
 Base.eof(::Conn)
-pending_input
+tryread!
 Base.isopen(::Conn)
 Base.isopen(::Listener)
 Base.write(::Conn, ::AbstractVector{UInt8})

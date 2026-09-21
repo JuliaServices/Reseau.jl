@@ -1081,47 +1081,6 @@ end
         end
     end
 
-    @testset "pending_input answers data, eof, and none without blocking" begin
-        IP.shutdown!()
-        listener = nothing
-        client = nothing
-        server = nothing
-        try
-            listener = NC.listen(NC.loopback_addr(0); backlog = 8)
-            laddr = NC.addr(listener)::NC.SocketAddrV4
-            accept_task = errormonitor(@async NC.accept(listener))
-            client = NC.connect(NC.loopback_addr(Int(laddr.port)))
-            _nc_wait_task_done(accept_task)
-            server = fetch(accept_task)
-            # an idle connection answers at once, where eof would park
-            @test NC.pending_input(server) === :none
-            @test write(client, UInt8[0x77]) == 1
-            # eof is the synchronizer: it returns once the byte has landed
-            @test !eof(server)
-            # the byte is reported, not consumed
-            @test NC.pending_input(server) === :data
-            @test read(server, UInt8) == 0x77
-            @test NC.pending_input(server) === :none
-            # an expired read deadline applies exactly as it does to a read
-            NC.set_read_deadline!(server, Int64(1))
-            @test_throws IP.DeadlineExceededError NC.pending_input(server)
-            NC.set_read_deadline!(server, Int64(0))
-            @test NC.pending_input(server) === :none
-            close(client)
-            @test eof(server)
-            @test NC.pending_input(server) === :eof
-            @test_throws EOFError read(server, UInt8)
-            close(server)
-            # a locally closed connection is EOF, not an error
-            @test NC.pending_input(server) === :eof
-        finally
-            _close_quiet!(server)
-            _close_quiet!(client)
-            _close_quiet!(listener)
-            IP.shutdown!()
-        end
-    end
-
     @testset "single-string listen" begin
         listener = TCP.listen("127.0.0.1:0"; backlog = 64)
         addr = TCP.addr(listener)

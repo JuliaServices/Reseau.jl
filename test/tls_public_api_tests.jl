@@ -737,14 +737,14 @@ end
                     server_task = errormonitor(Threads.@spawn begin
                         server_tcp = NC.accept(listener)
                         try
-                            record = UInt8[]
+                            record_state = TL._TLS12NativeState()
                             TL._tls_read_wire_record!(
                                 server_tcp,
-                                record,
+                                record_state,
                                 TL._TLS12_MAX_CIPHERTEXT,
                                 UInt16(0),
                             )
-                            client_hello = TL._unmarshal_client_hello(copy(@view record[6:end]))
+                            client_hello = TL._unmarshal_client_hello(copy(@view record_state.record_buffer[6:end]))
                             client_hello === nothing && error("failed to parse mixed ClientHello")
                             server_hello = TL._ServerHelloMsg()
                             server_hello.vers = TL.TLS1_2_VERSION
@@ -1444,57 +1444,6 @@ end
                 server = fetch(accept_task)
             finally
                 _tls_close_quiet!(server)
-                _tls_close_quiet!(client)
-                _tls_close_quiet!(listener)
-                IP.shutdown!()
-            end
-        end
-        @testset "pending_input answers data, eof, and none without blocking" begin
-            IP.shutdown!()
-            listener = nothing
-            client = nothing
-            server_task = nothing
-            try
-                listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(); backlog = 8)
-                laddr = TL.addr(listener)::NC.SocketAddrV4
-                send_payload = Base.Event()
-                finish = Base.Event()
-                server_task = errormonitor(Threads.@spawn begin
-                    conn = TL.accept(listener)
-                    try
-                        TL.handshake!(conn)
-                        wait(send_payload)
-                        write(conn, UInt8[0x41, 0x42])
-                        wait(finish)
-                    finally
-                        close(conn)
-                    end
-                    return nothing
-                end)
-                client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
-                    verify_peer = false,
-                    server_name = "localhost",
-                ))
-                # idle after the handshake: post-handshake records that have
-                # arrived are consumed on the way, and nothing else waits
-                @test TL.pending_input(client) === :none
-                notify(send_payload)
-                # eof is the synchronizer: it returns once the record is decrypted
-                @test !eof(client)
-                @test TL.pending_input(client) === :data
-                @test read(client, UInt8) == 0x41
-                # answered from buffered plaintext, without a transport read
-                @test TL.pending_input(client) === :data
-                @test read(client, UInt8) == 0x42
-                @test TL.pending_input(client) === :none
-                notify(finish)
-                @test eof(client)
-                @test TL.pending_input(client) === :eof
-                close(client)
-                @test TL.pending_input(client) === :eof
-                _tls_wait_task_done(server_task)
-            finally
-                server_task isa Task && !istaskdone(server_task) && wait(server_task)
                 _tls_close_quiet!(client)
                 _tls_close_quiet!(listener)
                 IP.shutdown!()

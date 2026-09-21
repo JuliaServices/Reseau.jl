@@ -636,11 +636,7 @@ function _grow_readbytes_target!(buf::Vector{UInt8}, current::Int, nb::Int)::Int
     return newlen
 end
 
-# One-byte MSG_PEEK of the receive queue: `:data` when a byte can be read
-# without blocking, `:eof` when the peer has closed the stream, `:none` when
-# nothing has arrived. With `block` set, `:none` waits for readiness instead,
-# so the answer is `:data` or `:eof` (this is what `eof` needs).
-function _peek_input(conn::Conn, block::Bool)::Symbol
+function _peek_eof(conn::Conn)::Bool
     pfd = conn.fd.pfd
     pref = Ref{UInt8}(0x00)
     try
@@ -650,7 +646,7 @@ function _peek_input(conn::Conn, block::Bool)::Symbol
         ex isa IOPoll.NetClosingError || rethrow(ex)
         # A close that lands between the caller's isopen check and taking the
         # read lock reports EOF instead of surfacing the closing error.
-        return :eof
+        return true
     end
     try
         while true
@@ -661,11 +657,12 @@ function _peek_input(conn::Conn, block::Bool)::Symbol
                 Csize_t(1),
                 SocketOps.MSG_PEEK,
             )
-            n > 0 && return :data
-            n == 0 && return :eof
+            if n > 0
+                return false
+            end
+            n == 0 && return true
             errno = SocketOps.last_error()
             if errno == Int32(Base.Libc.EAGAIN) && IOPoll.pollable(pfd.pd)
-                block || return :none
                 IOPoll.waitread(pfd.pd, pfd.is_file)
                 continue
             end
@@ -675,8 +672,6 @@ function _peek_input(conn::Conn, block::Bool)::Symbol
         IOPoll._fd_read_unlock!(pfd)
     end
 end
-
-_peek_eof(conn::Conn)::Bool = _peek_input(conn, true) === :eof
 
 """
     unsafe_read(conn, ptr, nbytes)
@@ -870,21 +865,39 @@ function Base.eof(conn::Conn)::Bool
 end
 
 """
-    pending_input(conn) -> Symbol
+    tryread!(conn, buf) -> Union{Int, Nothing}
 
-Report what a read on `conn` would do right now, without blocking and without
-consuming anything: `:data` when at least one byte is ready to read, `:eof`
-when the peer has closed the stream (or `conn` is closed locally) and nothing
-is left to read, and `:none` when nothing has arrived yet.
+Copy currently available bytes into a nonempty contiguous mutable byte buffer.
+Return the byte count, `0` at EOF (including a locally closed connection), or
+`nothing` if no bytes are ready or another reader owns the connection. Never
+wait for network input or for the read lock. A short read is not EOF.
 
-Unlike `eof`, which waits until the answer is known, this never parks the
-task, so a connection pool can notice a peer that hung up while a connection
-sat idle before handing it out, without sending anything. An expired read
-deadline surfaces as `DeadlineExceededError`, as it would for a read.
+Read deadlines and transport errors apply as for ordinary reads. The caller
+owns the returned bytes; subsequent reads continue after them. Use `read!` or
+`readbytes!` when waiting for input is intended.
 """
-function pending_input(conn::Conn)::Symbol
-    isopen(conn) || return :eof
-    return _peek_input(conn, false)
+function tryread!(conn::Conn, buf::MutableByteBuffer)::Union{Int, Nothing}
+    Base.require_one_based_indexing(buf)
+    isempty(buf) && throw(ArgumentError("tryread! requires a nonempty buffer"))
+    GC.@preserve buf return _tryread!(conn, pointer(buf), length(buf))
+end
+
+function _tryread!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Union{Int, Nothing}
+    isopen(conn) || return 0
+    pfd = conn.fd.pfd
+    IOPoll._fdlock_rwlock!(pfd.fdlock, true, false) || return nothing
+    try
+        IOPoll.prepareread(pfd.pd, pfd.is_file, false)
+        # All TCP descriptors, including IOCP sockets, are nonblocking. The
+        # read lock excludes overlapped reads while this synchronous recv runs.
+        n = SocketOps.recv_from!(pfd.sysfd, ptr, Csize_t(min(nbytes, 1 << 30)))
+        n >= 0 && return Int(n)
+        errno = SocketOps.last_error()
+        errno == Int32(Base.Libc.EAGAIN) && return nothing
+        throw(SystemError("recv", Int(errno)))
+    finally
+        IOPoll._fd_read_unlock!(pfd)
+    end
 end
 
 """
