@@ -1449,6 +1449,57 @@ end
                 IP.shutdown!()
             end
         end
+        @testset "pending_input answers data, eof, and none without blocking" begin
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server_task = nothing
+            try
+                listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(); backlog = 8)
+                laddr = TL.addr(listener)::NC.SocketAddrV4
+                send_payload = Base.Event()
+                finish = Base.Event()
+                server_task = errormonitor(Threads.@spawn begin
+                    conn = TL.accept(listener)
+                    try
+                        TL.handshake!(conn)
+                        wait(send_payload)
+                        write(conn, UInt8[0x41, 0x42])
+                        wait(finish)
+                    finally
+                        close(conn)
+                    end
+                    return nothing
+                end)
+                client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
+                    verify_peer = false,
+                    server_name = "localhost",
+                ))
+                # idle after the handshake: post-handshake records that have
+                # arrived are consumed on the way, and nothing else waits
+                @test TL.pending_input(client) === :none
+                notify(send_payload)
+                # eof is the synchronizer: it returns once the record is decrypted
+                @test !eof(client)
+                @test TL.pending_input(client) === :data
+                @test read(client, UInt8) == 0x41
+                # answered from buffered plaintext, without a transport read
+                @test TL.pending_input(client) === :data
+                @test read(client, UInt8) == 0x42
+                @test TL.pending_input(client) === :none
+                notify(finish)
+                @test eof(client)
+                @test TL.pending_input(client) === :eof
+                close(client)
+                @test TL.pending_input(client) === :eof
+                _tls_wait_task_done(server_task)
+            finally
+                server_task isa Task && !istaskdone(server_task) && wait(server_task)
+                _tls_close_quiet!(client)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
         @testset "peer read observes clean EOF after close_notify" begin
             IP.shutdown!()
             listener = nothing

@@ -636,7 +636,11 @@ function _grow_readbytes_target!(buf::Vector{UInt8}, current::Int, nb::Int)::Int
     return newlen
 end
 
-function _peek_eof(conn::Conn)::Bool
+# One-byte MSG_PEEK of the receive queue: `:data` when a byte can be read
+# without blocking, `:eof` when the peer has closed the stream, `:none` when
+# nothing has arrived. With `block` set, `:none` waits for readiness instead,
+# so the answer is `:data` or `:eof` (this is what `eof` needs).
+function _peek_input(conn::Conn, block::Bool)::Symbol
     pfd = conn.fd.pfd
     pref = Ref{UInt8}(0x00)
     try
@@ -646,7 +650,7 @@ function _peek_eof(conn::Conn)::Bool
         ex isa IOPoll.NetClosingError || rethrow(ex)
         # A close that lands between the caller's isopen check and taking the
         # read lock reports EOF instead of surfacing the closing error.
-        return true
+        return :eof
     end
     try
         while true
@@ -657,12 +661,11 @@ function _peek_eof(conn::Conn)::Bool
                 Csize_t(1),
                 SocketOps.MSG_PEEK,
             )
-            if n > 0
-                return false
-            end
-            n == 0 && return true
+            n > 0 && return :data
+            n == 0 && return :eof
             errno = SocketOps.last_error()
             if errno == Int32(Base.Libc.EAGAIN) && IOPoll.pollable(pfd.pd)
+                block || return :none
                 IOPoll.waitread(pfd.pd, pfd.is_file)
                 continue
             end
@@ -672,6 +675,8 @@ function _peek_eof(conn::Conn)::Bool
         IOPoll._fd_read_unlock!(pfd)
     end
 end
+
+_peek_eof(conn::Conn)::Bool = _peek_input(conn, true) === :eof
 
 """
     unsafe_read(conn, ptr, nbytes)
@@ -862,6 +867,24 @@ Report whether the peer has cleanly closed the read side of the connection.
 function Base.eof(conn::Conn)::Bool
     isopen(conn) || return true
     return _peek_eof(conn)
+end
+
+"""
+    pending_input(conn) -> Symbol
+
+Report what a read on `conn` would do right now, without blocking and without
+consuming anything: `:data` when at least one byte is ready to read, `:eof`
+when the peer has closed the stream (or `conn` is closed locally) and nothing
+is left to read, and `:none` when nothing has arrived yet.
+
+Unlike `eof`, which waits until the answer is known, this never parks the
+task, so a connection pool can notice a peer that hung up while a connection
+sat idle before handing it out, without sending anything. An expired read
+deadline surfaces as `DeadlineExceededError`, as it would for a read.
+"""
+function pending_input(conn::Conn)::Symbol
+    isopen(conn) || return :eof
+    return _peek_input(conn, false)
 end
 
 """

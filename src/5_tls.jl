@@ -2000,7 +2000,13 @@ function _grow_readbytes_target!(buf::Vector{UInt8}, current::Int, nb::Int)::Int
     return newlen
 end
 
-function _peek_eof(conn::Conn)::Bool
+# TLS-level peek. Buffered plaintext or a peer close_notify answer without
+# touching the transport. Otherwise the next record is read: always with
+# `block`, and without it only when the transport already holds its first
+# byte, so an idle connection answers `:none` instead of waiting. A record
+# that yields no plaintext (a post-handshake message) is consumed and the
+# loop repeats; a transport EOF without close_notify still answers `:eof`.
+function _peek_input(conn::Conn, block::Bool)::Symbol
     _ensure_open!(conn, "peek")
     _ensure_handshake!(conn)
     lock(conn.read_lock)
@@ -2010,16 +2016,24 @@ function _peek_eof(conn::Conn)::Bool
             state = _native_tls13_state(conn)
             while true
                 _tls13_handle_post_handshake_messages!(conn, state)
-                _tls_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos) > 0 && return false
-                state.peer_close_notify && return true
+                _tls_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos) > 0 && return :data
+                state.peer_close_notify && return :eof
+                if !block
+                    transport = TCP._peek_input(conn.tcp, false)
+                    transport === :data || return transport
+                end
                 _tls13_read_record!(conn.tcp, state)
             end
         end
         if _active_tls12(conn)
             state = _native_tls12_state(conn)
             while true
-                _tls_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos) > 0 && return false
-                state.peer_close_notify && return true
+                _tls_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos) > 0 && return :data
+                state.peer_close_notify && return :eof
+                if !block
+                    transport = TCP._peek_input(conn.tcp, false)
+                    transport === :data || return transport
+                end
                 _tls12_read_record!(conn.tcp, state)
             end
         end
@@ -2057,6 +2071,8 @@ function _peek_eof(conn::Conn)::Bool
         unlock(conn.read_lock)
     end
 end
+
+_peek_eof(conn::Conn)::Bool = _peek_input(conn, true) === :eof
 
 """
     unsafe_read(conn, ptr, nbytes)
@@ -2238,6 +2254,25 @@ Report whether the peer has cleanly finished the TLS stream.
 function Base.eof(conn::Conn)::Bool
     isopen(conn) || return true
     return _peek_eof(conn)
+end
+
+"""
+    pending_input(conn) -> Symbol
+
+Report what a read on `conn` would do right now, without blocking and without
+consuming application data: `:data` when decrypted bytes are ready to read,
+`:eof` when the peer has closed the stream (with or without a close_notify
+alert) or `conn` is closed locally, and `:none` when nothing has arrived yet.
+
+A record that has fully arrived but carries no application data (a key
+update, a session ticket, or the close_notify itself) is processed on the
+way, so the answer describes the plaintext stream rather than the raw
+transport. A record whose bytes are still arriving is read to completion
+before answering.
+"""
+function pending_input(conn::Conn)::Symbol
+    isopen(conn) || return :eof
+    return _peek_input(conn, false)
 end
 
 """
