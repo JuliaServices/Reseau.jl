@@ -58,6 +58,7 @@ Base.isopen(::Listener)
 Base.write(::Conn, ::AbstractVector{UInt8})
 Base.close(::Conn)
 Base.close(::Listener)
+NetClosingError
 closeread
 Base.closewrite(::Conn)
 ```

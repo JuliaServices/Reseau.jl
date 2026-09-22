@@ -37,6 +37,18 @@ underlying poller timeout type so downstream code does not need to depend on
 const DeadlineExceededError = IOPoll.DeadlineExceededError
 
 """
+    NetClosingError
+
+Raised when a TCP operation encounters a locally closed connection or listener,
+including a pending operation woken by `close` from another task.
+
+Catch `TCP.NetClosingError` during deliberate connection or listener shutdown.
+This aliases the underlying poller exception without requiring callers to use
+`Reseau.IOPoll`. Peer EOF and deadline expiry have separate error behavior.
+"""
+const NetClosingError = IOPoll.NetClosingError
+
+"""
     connect
 
 Connect a TCP client using either a concrete `SocketAddr` or a string-address
