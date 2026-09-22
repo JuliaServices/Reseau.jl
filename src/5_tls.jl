@@ -1884,28 +1884,34 @@ end
 # 2. drain any buffered plaintext,
 # 3. if necessary read more TLS records,
 # 4. translate protocol/transport failures into `TLSError`.
-function _native_tls13_fill_plaintext!(conn::Conn)::Nothing
+function _native_tls13_fill_plaintext!(conn::Conn; block::Bool = true)::Bool
     state = _native_tls13_state(conn)
+    records = 0
     while true
-        _tls13_handle_post_handshake_messages!(conn, state)
-        _tls_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos) > 0 && return nothing
+        _tls13_handle_post_handshake_messages!(conn, state; block)
+        _tls_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos) > 0 && return true
         state.peer_close_notify && throw(EOFError())
-        _tls13_read_record!(conn.tcp, state)
+        !block && records == 16 && return false
+        records += 1
+        _tls13_read_record!(conn.tcp, state; block) || return false
     end
 end
 
-function _native_tls12_fill_plaintext!(conn::Conn)::Nothing
+function _native_tls12_fill_plaintext!(conn::Conn; block::Bool = true)::Bool
     state = _native_tls12_state(conn)
+    records = 0
     while true
-        _tls_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos) > 0 && return nothing
+        _tls_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos) > 0 && return true
         state.peer_close_notify && throw(EOFError())
-        _tls12_read_record!(conn.tcp, state)
+        !block && records == 16 && return false
+        records += 1
+        _tls12_read_record!(conn.tcp, state; block) || return false
     end
 end
 
-function _native_tls13_take_plaintext!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
+function _native_tls13_take_plaintext!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int; block::Bool = true)::Union{Int, Nothing}
     nbytes == 0 && return 0
-    _native_tls13_fill_plaintext!(conn)
+    _native_tls13_fill_plaintext!(conn; block) || return nothing
     state = _native_tls13_state(conn)
     available = _tls_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos)
     n = min(nbytes, available)
@@ -1915,9 +1921,9 @@ function _native_tls13_take_plaintext!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)
     return n
 end
 
-function _native_tls12_take_plaintext!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
+function _native_tls12_take_plaintext!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int; block::Bool = true)::Union{Int, Nothing}
     nbytes == 0 && return 0
-    _native_tls12_fill_plaintext!(conn)
+    _native_tls12_fill_plaintext!(conn; block) || return nothing
     state = _native_tls12_state(conn)
     available = _tls_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos)
     n = min(nbytes, available)
@@ -1939,25 +1945,37 @@ end
     end
 end
 
-function _read_some!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
+function _read_some!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int; block::Bool = true)::Union{Int, Nothing}
     _ensure_open!(conn, "read")
-    _ensure_handshake!(conn)
+    if block
+        _ensure_handshake!(conn)
+    else
+        _handshake_complete(conn) || throw(ArgumentError("call handshake! before tryread!"))
+    end
     # Match Go's tls.Conn.Read ordering: an empty read still performs the
     # handshake for its side effect, but never waits for application data.
     nbytes == 0 && return 0
-    lock(conn.read_lock)
+    if block
+        lock(conn.read_lock)
+    else
+        trylock(conn.read_lock) || return nothing
+    end
     try
         _ensure_open!(conn, "read")
         if _active_tls13(conn)
-            return _native_tls13_take_plaintext!(conn, ptr, nbytes)
+            return _native_tls13_take_plaintext!(conn, ptr, nbytes; block)
         end
         if _active_tls12(conn)
-            return _native_tls12_take_plaintext!(conn, ptr, nbytes)
+            return _native_tls12_take_plaintext!(conn, ptr, nbytes; block)
         end
         throw(ArgumentError("tls: unsupported connection mode"))
     catch err
         ex = _as_exception(err)
-        ex isa EOFError && rethrow()
+        ex isa EOFError && (block ? rethrow() : (return 0))
+        # A failed nonblocking read must not wait to transmit a fatal alert.
+        if !block && !(ex isa _TLSTransportDeadlineError)
+            close(conn.tcp)
+        end
         ex isa TLSError && rethrow()
         if ex isa _TLSTransportDeadlineError
             throw(TLSError("read", Int32(0), "i/o timeout", (ex::_TLSTransportDeadlineError).cause))
@@ -1969,17 +1987,17 @@ function _read_some!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
         end
         if ex isa _TLSAlertError
             tls13_err = ex::_TLSAlertError
-            if _active_tls13(conn) && !tls13_err.from_peer
+            if block && _active_tls13(conn) && !tls13_err.from_peer
                 _native_tls13_try_write_fatal_alert!(conn, tls13_err.alert)
-            elseif _active_tls12(conn) && !tls13_err.from_peer
+            elseif block && _active_tls12(conn) && !tls13_err.from_peer
                 _native_tls12_try_write_fatal_alert!(conn, tls13_err.alert)
             end
             throw(TLSError("read", Int32(0), tls13_err.message, tls13_err))
         end
         if ex isa ArgumentError
-            if _active_tls13(conn)
+            if block && _active_tls13(conn)
                 _native_tls13_try_write_fatal_alert!(conn, _TLS_ALERT_INTERNAL_ERROR)
-            elseif _active_tls12(conn)
+            elseif block && _active_tls12(conn)
                 _native_tls12_try_write_fatal_alert!(conn, _TLS_ALERT_INTERNAL_ERROR)
             end
             throw(TLSError("read", Int32(0), (ex::ArgumentError).msg::String, ex))
@@ -2241,6 +2259,29 @@ function Base.eof(conn::Conn)::Bool
 end
 
 """
+    tryread!(conn, buf) -> Union{Int, Nothing}
+
+Copy available decrypted application bytes into a nonempty contiguous mutable
+byte buffer. Return a byte count, `0` at EOF (including local close), or
+`nothing` when no plaintext is returned in this attempt. An attempt processes
+at most 16 records; partial input and a busy read lock also return `nothing`.
+Call `handshake!` first. This operation does not wait for network input, acquire
+a busy read lock, or send TLS records.
+
+Incomplete encrypted records remain buffered for the next `tryread!`, `read`,
+or `eof`. Complete records are authenticated before plaintext is returned.
+TLS 1.3 key-update replies are deferred until the next ordinary read or write,
+before further application output. Protocol and transport failures throw;
+read deadlines retain their ordinary meaning.
+"""
+function tryread!(conn::Conn, buf::MutableByteBuffer)::Union{Int, Nothing}
+    Base.require_one_based_indexing(buf)
+    isempty(buf) && throw(ArgumentError("tryread! requires a nonempty buffer"))
+    isopen(conn) || return 0
+    GC.@preserve buf return _read_some!(conn, pointer(buf), length(buf); block = false)
+end
+
+"""
     isopen(conn) -> Bool
 
 Return `true` while both the TLS state and underlying TCP transport remain open.
@@ -2346,6 +2387,8 @@ end
 
 function _native_tls13_write_application!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
     state = _native_tls13_state(conn)
+    _tls13_flush_key_update!(conn, state)
+    conn.write_permanent_error === nothing || throw(conn.write_permanent_error::TLSError)
     total = 0
     while total < nbytes
         chunk_len = min(nbytes - total, _TLS13_MAX_PLAINTEXT)

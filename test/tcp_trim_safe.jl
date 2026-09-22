@@ -33,11 +33,16 @@ function run_tcp_trim_sample()::Nothing
         client_remote.port == laddr.port || error("client remote port mismatch")
         server_local.port == laddr.port || error("server local port mismatch")
         server_remote.port == client_local.port || error("server remote port mismatch")
+        NC.tryread!(server, Vector{UInt8}(undef, 1)) === nothing || error("expected no pending input on an idle connection")
         payload = UInt8[0x61, 0x62, 0x63]
         write(client, payload) == length(payload) || error("expected TCP payload write")
         recv_buf = Vector{UInt8}(undef, length(payload))
         _read_exact!(server, recv_buf)
         recv_buf == payload || error("TCP payload mismatch")
+        NC.tryread!(server, Vector{UInt8}(undef, 1)) === nothing || error("expected no pending input after draining")
+        close(client)
+        eof(server) || error("expected EOF after peer close")
+        NC.tryread!(server, Vector{UInt8}(undef, 1)) === 0 || error("expected tryread! to report EOF")
     finally
         _close_quiet!(server)
         _close_quiet!(client)

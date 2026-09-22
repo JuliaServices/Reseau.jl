@@ -865,6 +865,42 @@ function Base.eof(conn::Conn)::Bool
 end
 
 """
+    tryread!(conn, buf) -> Union{Int, Nothing}
+
+Copy currently available bytes into a nonempty contiguous mutable byte buffer.
+Return the byte count, `0` at EOF (including a locally closed connection), or
+`nothing` if no bytes are ready or another reader owns the connection. Never
+wait for network input or for the read lock. A short read is not EOF.
+
+Read deadlines and transport errors apply as for ordinary reads. The caller
+owns the returned bytes; subsequent reads continue after them. Use `read!` or
+`readbytes!` when waiting for input is intended.
+"""
+function tryread!(conn::Conn, buf::MutableByteBuffer)::Union{Int, Nothing}
+    Base.require_one_based_indexing(buf)
+    isempty(buf) && throw(ArgumentError("tryread! requires a nonempty buffer"))
+    GC.@preserve buf return _tryread!(conn, pointer(buf), length(buf))
+end
+
+function _tryread!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Union{Int, Nothing}
+    isopen(conn) || return 0
+    pfd = conn.fd.pfd
+    IOPoll._fdlock_rwlock!(pfd.fdlock, true, false) || return nothing
+    try
+        IOPoll.prepareread(pfd.pd, pfd.is_file, false)
+        # All TCP descriptors, including IOCP sockets, are nonblocking. The
+        # read lock excludes overlapped reads while this synchronous recv runs.
+        n = SocketOps.recv_from!(pfd.sysfd, ptr, Csize_t(min(nbytes, 1 << 30)))
+        n >= 0 && return Int(n)
+        errno = SocketOps.last_error()
+        errno == Int32(Base.Libc.EAGAIN) && return nothing
+        throw(SystemError("recv", Int(errno)))
+    finally
+        IOPoll._fd_read_unlock!(pfd)
+    end
+end
+
+"""
     isopen(conn) -> Bool
 
 Return `true` while `conn` still owns an open socket.
