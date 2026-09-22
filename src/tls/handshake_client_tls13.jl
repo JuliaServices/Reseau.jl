@@ -143,6 +143,7 @@ mutable struct _TLS13OpenSSLCertificateVerifier
     verify_peer::Bool
     verify_hostname::Bool
     ca_file::Union{Nothing, String}
+    ca_dir::Union{Nothing, String}
     leaf_public_key::_TLSPublicKeyState
     verification_time_s::Union{Nothing, Int64}
 end
@@ -151,12 +152,14 @@ function _TLS13OpenSSLCertificateVerifier(;
     verify_peer::Bool = false,
     verify_hostname::Bool = verify_peer,
     ca_file::Union{Nothing, AbstractString} = nothing,
+    ca_dir::Union{Nothing, AbstractString} = nothing,
     verification_time_s::Union{Nothing, Int64} = nothing,
 )
     return _TLS13OpenSSLCertificateVerifier(
         verify_peer,
         verify_hostname,
         ca_file === nothing ? nothing : String(ca_file),
+        ca_dir === nothing ? nothing : String(ca_dir),
         nothing,
         verification_time_s,
     )
@@ -249,6 +252,7 @@ function _tls13_verify_server_certificates!(
         verify_peer = verifier.verify_peer,
         verify_hostname = verifier.verify_hostname,
         ca_file = verifier.ca_file,
+        ca_dir = verifier.ca_dir,
         verification_time_s = verifier.verification_time_s,
     )
     return nothing

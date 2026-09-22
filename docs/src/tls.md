@@ -42,8 +42,25 @@ DeadlineExceededError
 - `TLS.ClientAuthMode.VerifyClientCertIfGiven`
 - `TLS.ClientAuthMode.RequireAndVerifyClientCert`
 
-For server-side verified client-certificate auth, provide `client_ca_file`
-explicitly in [`Config`](@ref).
+For server-side verified client-certificate auth, provide `client_ca_file`,
+`client_ca_dir`, or both in [`Config`](@ref).
+
+To trust a bundle and a directory together, set both paths:
+
+```julia
+config = TLS.Config(ca_file="company-roots.pem", ca_dir="additional-roots")
+```
+
+`ca_file` still accepts either a bundle file or a directory. `ca_dir` must be a
+directory. Reseau reads PEM certificates from its files; hashed filenames are not
+required. Both sources contribute trusted roots. An invalid source is not ignored
+because the other source is valid. Missing paths and non-directory `ca_dir` values
+are rejected before dialing. Certificate contents are loaded when verification runs.
+The same rules apply to `client_ca_file` and `client_ca_dir` for client certificates.
+
+Providing either explicit source replaces the default roots. To add a directory to
+the system bundle, pass the bundle path as `ca_file` too. Config copies retain both
+paths. Resumed sessions are checked against the current configured roots.
 
 ## Client and Server Construction
 
@@ -113,7 +130,7 @@ deadline expires. Higher-level TLS operations may instead raise
 ## Practical Usage Notes
 
 - If `server_name` is omitted, [`connect`](@ref) derives it from the dial target when possible so SNI and certificate verification use that host name automatically.
-- If `ca_file` is omitted for outbound verification, Reseau falls back to `NetworkOptions.ca_roots_path()` when that path is available.
+- If both `ca_file` and `ca_dir` are omitted for outbound verification, Reseau falls back to `NetworkOptions.ca_roots_path()` when that path is available.
 - [`connection_state`](@ref) does not force the handshake to run; it reports the current negotiated state as-is.
 - [`set_deadline!`](@ref) also applies to `TLS.Listener`, where it sets the
   `accept` deadline only. `local_addr(listener)` is available as an alias for

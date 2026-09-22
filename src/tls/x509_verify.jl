@@ -184,6 +184,24 @@ function _tls_load_trust_store(ca_path::AbstractString)::_TLSTrustStore
     return store
 end
 
+# Cache each source independently. The combined roots vector is owned by this
+# store, so adding a directory never changes a cached single-source store.
+function _tls_load_trust_store(ca_file::Union{Nothing, String}, ca_dir::Union{Nothing, String})::_TLSTrustStore
+    if ca_dir === nothing
+        ca_file === nothing && throw(ArgumentError("tls: certificate verification requires a CA roots path"))
+        return _tls_load_trust_store(ca_file::String)
+    end
+    isdir(ca_dir) || throw(ArgumentError("tls: CA roots directory not found"))
+    directory_store = _tls_load_trust_store(ca_dir)
+    ca_file === nothing && return directory_store
+    file_store = _tls_load_trust_store(ca_file)
+    roots = copy(file_store.roots)
+    for root in directory_store.roots
+        any(existing -> existing.der == root.der, roots) || push!(roots, root)
+    end
+    return _TLSTrustStore(roots)
+end
+
 # Chain verification works top-down from the peer leaf and recursively searches
 # intermediates/roots that satisfy issuer linkage, CA constraints, time
 # validity, and signature checks until it finds a trust anchor.
@@ -582,20 +600,45 @@ end
 # This is the native cert-auth entry point used by TLS 1.2 and TLS 1.3
 # handshakes: optionally build to a trust anchor, optionally check hostname/IP,
 # then return the parsed leaf public key for later TLS-level signature checks.
-function _tls_verify_certificate_chain(
+# Resolve the optional directory before dispatching with the other optional
+# config fields so the verifier remains statically callable under --trim=safe.
+@inline function _tls_verify_certificate_chain(
     certificates::Vector{Vector{UInt8}};
     verify_peer::Bool,
     verify_hostname::Bool,
     ca_file::Union{Nothing, String},
+    ca_dir::Union{Nothing, String} = nothing,
     verification_time_s::Union{Nothing, Int64} = nothing,
     purpose::AbstractString,
     peer_name::AbstractString = "",
 )::_TLSPublicKey
+    if ca_dir === nothing
+        return _tls_verify_certificate_chain(
+            certificates, verify_peer, verify_hostname, ca_file, nothing,
+            verification_time_s, purpose, peer_name,
+        )
+    end
+    return _tls_verify_certificate_chain(
+        certificates, verify_peer, verify_hostname, ca_file, ca_dir::String,
+        verification_time_s, purpose, peer_name,
+    )
+end
+
+function _tls_verify_certificate_chain(
+    certificates::Vector{Vector{UInt8}},
+    verify_peer::Bool,
+    verify_hostname::Bool,
+    ca_file::Union{Nothing, String},
+    ca_dir::Union{Nothing, String},
+    verification_time_s::Union{Nothing, Int64},
+    purpose::AbstractString,
+    peer_name::AbstractString,
+)::_TLSPublicKey
     isempty(certificates) && _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: received empty certificates message")
     leaf = if verify_peer
-        ca_file === nothing && _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: certificate verification requires a CA roots path")
+        ca_file === nothing && ca_dir === nothing && _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: certificate verification requires a CA roots path")
         store = try
-            _tls_load_trust_store(ca_file::String)
+            _tls_load_trust_store(ca_file, ca_dir)
         catch ex
             ex isa _TLSAlertError && rethrow()
             _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: failed to load CA roots")
@@ -688,11 +731,12 @@ function _tls13_check_x509_peer_name!(x509::Ptr{Cvoid}, peer_name::AbstractStrin
     return _tls13_check_x509_peer_name!(_tls13_x509_to_der(x509), peer_name)
 end
 
-function _tls13_verify_certificate_chain(
+@inline function _tls13_verify_certificate_chain(
     certificates::Vector{Vector{UInt8}};
     verify_peer::Bool,
     verify_hostname::Bool,
     ca_file::Union{Nothing, String},
+    ca_dir::Union{Nothing, String} = nothing,
     verification_time_s::Union{Nothing, Int64} = nothing,
     purpose::AbstractString,
     peer_name::AbstractString = "",
@@ -702,18 +746,20 @@ function _tls13_verify_certificate_chain(
         verify_peer,
         verify_hostname,
         ca_file,
+        ca_dir,
         verification_time_s,
         purpose,
         peer_name,
     )
 end
 
-function _tls13_verify_server_certificate_chain(
+@inline function _tls13_verify_server_certificate_chain(
     certificates::Vector{Vector{UInt8}},
     server_name::AbstractString;
     verify_peer::Bool,
     verify_hostname::Bool,
     ca_file::Union{Nothing, String},
+    ca_dir::Union{Nothing, String} = nothing,
     verification_time_s::Union{Nothing, Int64} = nothing,
 )::_TLSPublicKey
     return _tls13_verify_certificate_chain(
@@ -721,16 +767,18 @@ function _tls13_verify_server_certificate_chain(
         verify_peer,
         verify_hostname,
         ca_file,
+        ca_dir,
         verification_time_s,
         purpose = "ssl_server",
         peer_name = server_name,
     )
 end
 
-function _tls13_verify_client_certificate_chain(
+@inline function _tls13_verify_client_certificate_chain(
     certificates::Vector{Vector{UInt8}};
     verify_peer::Bool,
     ca_file::Union{Nothing, String},
+    ca_dir::Union{Nothing, String} = nothing,
     verification_time_s::Union{Nothing, Int64} = nothing,
 )::_TLSPublicKey
     return _tls13_verify_certificate_chain(
@@ -738,6 +786,7 @@ function _tls13_verify_client_certificate_chain(
         verify_peer,
         verify_hostname = false,
         ca_file,
+        ca_dir,
         verification_time_s,
         purpose = "ssl_client",
     )
