@@ -43,6 +43,13 @@ function run_tcp_trim_sample()::Nothing
         close(client)
         eof(server) || error("expected EOF after peer close")
         NC.tryread!(server, Vector{UInt8}(undef, 1)) === 0 || error("expected tryread! to report EOF")
+        close(listener)
+        try
+            NC.accept(listener)
+            error("expected local listener closure")
+        catch err
+            err isa NC.NetClosingError || rethrow()
+        end
     finally
         _close_quiet!(server)
         _close_quiet!(client)
