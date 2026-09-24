@@ -290,10 +290,14 @@ Keyword arguments:
 - `client_auth`: server-side client certificate policy.
 - `cert_file` / `key_file`: PEM-encoded certificate chain and private key. Servers must
   provide both; clients may provide both for mutual TLS.
-- `ca_file`: CA bundle or hashed CA directory used to verify remote servers. When omitted,
-  client verification uses `NetworkOptions.ca_roots_path()`.
-- `client_ca_file`: CA bundle or hashed CA directory used by servers to verify client
-  certificates. This is required for server configs that verify presented client certs.
+- `ca_file`: CA bundle or CA directory used to verify remote servers.
+- `ca_dir`: additional CA directory used together with `ca_file`. Each explicit source
+  must contain usable PEM certificates. If both are omitted, client verification uses
+  `NetworkOptions.ca_roots_path()`. An explicit source replaces that default.
+- `client_ca_file` / `client_ca_dir`: CA bundle or directory, and optional additional
+  directory, used by servers to verify client certificates. At least one is required
+  for server configs that verify presented client certs. Directory entries are read as
+  PEM files; hashed filenames are accepted but are not required.
 - `alpn_protocols`: ordered ALPN protocol preference list.
 - `curve_preferences`: ordered native ECDHE group preferences for TLS 1.2/1.3.
   When empty, native handshakes default to
@@ -340,6 +344,8 @@ struct Config
     _server_identity::_TLSLocalIdentityState
     # Fixture-only override; `nothing` selects the wall clock at each verification.
     _verification_time_s::Union{Nothing, Int64}
+    ca_dir::Union{Nothing, String}
+    client_ca_dir::Union{Nothing, String}
 end
 
 # `policy` records which native handshake lane a `Conn` should enter before the
@@ -406,6 +412,8 @@ function Config(
         session_tickets_disabled::Bool,
         session_cache_capacity::Int = 64,
         _verification_time_s::Union{Nothing, Int64} = nothing,
+        ca_dir::Union{Nothing, AbstractString} = nothing,
+        client_ca_dir::Union{Nothing, AbstractString} = nothing,
     )
     server_name_s, cert_file_s, key_file_s, ca_file_s, client_ca_file_s =
         _config_owned_paths(server_name, cert_file, key_file, ca_file, client_ca_file)
@@ -433,6 +441,8 @@ function Config(
         _TLSLocalIdentityState(),
         _TLSLocalIdentityState(),
         _verification_time_s,
+        ca_dir === nothing ? nothing : String(ca_dir),
+        client_ca_dir === nothing ? nothing : String(client_ca_dir),
     )
 end
 
@@ -453,6 +463,8 @@ function Config(;
         session_tickets_disabled::Bool = false,
         session_cache_capacity::Integer = 64,
         _verification_time_s::Union{Nothing, Int64} = nothing,
+        ca_dir::Union{Nothing, AbstractString} = nothing,
+        client_ca_dir::Union{Nothing, AbstractString} = nothing,
     )
     return Config(
         server_name === nothing ? nothing : String(server_name),
@@ -471,6 +483,8 @@ function Config(;
         session_tickets_disabled,
         Int(session_cache_capacity),
         _verification_time_s,
+        ca_dir === nothing ? nothing : String(ca_dir),
+        client_ca_dir === nothing ? nothing : String(client_ca_dir),
     )
 end
 
@@ -489,6 +503,8 @@ end
         key_file::Union{Nothing, String} = cfg.key_file,
         ca_file::Union{Nothing, String} = cfg.ca_file,
         client_ca_file::Union{Nothing, String} = cfg.client_ca_file,
+        ca_dir::Union{Nothing, String} = cfg.ca_dir,
+        client_ca_dir::Union{Nothing, String} = cfg.client_ca_dir,
         alpn_protocols::Vector{String} = cfg.alpn_protocols,
         curve_preferences::Vector{UInt16} = cfg.curve_preferences,
         handshake_timeout_ns::Int64 = cfg.handshake_timeout_ns,
@@ -530,12 +546,14 @@ end
         client_identity,
         server_identity,
         cfg._verification_time_s,
+        ca_dir,
+        client_ca_dir,
     )
 end
 
 # HTTP.jl 2.6.x builds a `Config` positionally from the field list that predates
-# `_verification_time_s`. Keep that arity working, with the wall-clock default, so
-# already-released HTTP versions keep making HTTPS requests against this Reseau.
+# `_verification_time_s`. Accept that arity and the later verification-time arity,
+# with no additional CA directories, so released callers keep working.
 function Config(
         server_name::Union{Nothing, String},
         verify_peer::Bool,
@@ -558,6 +576,7 @@ function Config(
         server_session_cache12::_TLSSessionCache{_TLS12ServerSession},
         client_identity::_TLSLocalIdentityState,
         server_identity::_TLSLocalIdentityState,
+        verification_time_s::Union{Nothing, Int64} = nothing,
     )
     return Config(
         server_name,
@@ -581,6 +600,8 @@ function Config(
         server_session_cache12,
         client_identity,
         server_identity,
+        verification_time_s,
+        nothing,
         nothing,
     )
 end
@@ -646,6 +667,7 @@ end
         return _server_needs_verified_client_ca(config) ? config.client_ca_file : nothing
     end
     config.ca_file !== nothing && return config.ca_file::String
+    config.ca_dir !== nothing && return nothing
     return _default_ca_file_path()
 end
 
@@ -856,10 +878,16 @@ function _validate_config(config::Config; is_server::Bool)
     if config.client_ca_file !== nothing
         client_ca_path = config.client_ca_file::String
         ispath(client_ca_path) || throw(ConfigError("client CA roots path not found: $client_ca_path"))
-    elseif is_server && _server_needs_verified_client_ca(config)
-        throw(ConfigError("server TLS with verified client auth requires `client_ca_file`"))
+    elseif is_server && _server_needs_verified_client_ca(config) && config.client_ca_dir === nothing
+        throw(ConfigError("server TLS with verified client auth requires `client_ca_file` or `client_ca_dir`"))
     end
-    if !is_server && config.verify_peer && config.ca_file === nothing
+    if config.ca_dir !== nothing
+        isdir(config.ca_dir::String) || throw(ConfigError("CA roots directory not found: $(config.ca_dir)"))
+    end
+    if config.client_ca_dir !== nothing
+        isdir(config.client_ca_dir::String) || throw(ConfigError("client CA roots directory not found: $(config.client_ca_dir)"))
+    end
+    if !is_server && config.verify_peer && config.ca_file === nothing && config.ca_dir === nothing
         _default_ca_file_path() === nothing && throw(ConfigError("client TLS verification requires a CA roots path from NetworkOptions.ca_roots_path()"))
     end
     config.min_version !== nothing && _require_supported_tls_version!("min_version", config.min_version::UInt16)
@@ -1091,6 +1119,7 @@ function _native_tls13_certificate_verifier(config::Config)::_TLS13OpenSSLCertif
         verify_peer = config.verify_peer,
         verify_hostname = config.verify_hostname,
         ca_file = config.verify_peer ? _effective_ca_file(config; is_server = false) : nothing,
+        ca_dir = config.ca_dir,
         verification_time_s = config._verification_time_s,
     )
 end
@@ -1117,6 +1146,7 @@ function _tls12_try_load_client_session(config::Config, cache_key::AbstractStrin
                     verify_peer = config.verify_peer,
                     verify_hostname = config.verify_hostname,
                     ca_file = config.verify_peer ? _effective_ca_file(config; is_server = false) : nothing,
+                    ca_dir = config.ca_dir,
                     verification_time_s = config._verification_time_s,
                 )
             catch
@@ -1183,6 +1213,7 @@ function _tls13_try_load_client_session(config::Config, cache_key::AbstractStrin
                 verify_peer = config.verify_peer,
                 verify_hostname = config.verify_hostname,
                 ca_file = config.verify_peer ? _effective_ca_file(config; is_server = false) : nothing,
+                ca_dir = config.ca_dir,
                 verification_time_s = config._verification_time_s,
             )
         catch
@@ -3041,6 +3072,7 @@ function _connect(
         config::Config,
     )::Conn
     tls_config = _prepare_connect_config(config, address)
+    _validate_config(tls_config; is_server = false)
     connect_deadline_ns = HostResolvers._connect_deadline_ns(host_resolver)
     tcp = TCP.connect(host_resolver, network, address)
     return _connect_client(tcp, tls_config, connect_deadline_ns)
@@ -3052,6 +3084,7 @@ function _connect(
         config::Config,
     )::Conn
     tls_config = _prepare_connect_config(config, remote_addr)
+    _validate_config(tls_config; is_server = false)
     tcp = TCP.connect(remote_addr, local_addr)
     return _connect_client(tcp, tls_config)
 end
@@ -3108,8 +3141,8 @@ TLS keyword arguments are forwarded to `Config`:
 - `client_auth`
 - `cert_file`
 - `key_file`
-- `ca_file`
-- `client_ca_file`
+- `ca_file` / `ca_dir`
+- `client_ca_file` / `client_ca_dir`
 - `alpn_protocols`
 - `handshake_timeout_ns`
 - `min_version`

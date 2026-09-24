@@ -189,7 +189,32 @@ function _run_tls_roundtrip!(
     return nothing
 end
 
+function _run_combined_ca_trim!(version::UInt16)::Nothing
+    root = joinpath(@__DIR__, "resources", "combined_ca")
+    key = joinpath(root, "leaf.key")
+    ca_file = joinpath(root, "ca_a.crt")
+    ca_dir = joinpath(root, "ca_b")
+    server_config = TL.Config(
+        cert_file=joinpath(root, "leaf_b.crt"), key_file=key, verify_peer=false,
+        client_auth=TL.ClientAuthMode.RequireAndVerifyClientCert,
+        client_ca_file=ca_file, client_ca_dir=ca_dir,
+        min_version=version, max_version=version,
+        handshake_timeout_ns=10_000_000_000, _verification_time_s=Int64(1790121600),
+    )
+    client_config = TL.Config(
+        server_name="localhost", cert_file=joinpath(root, "leaf_a.crt"), key_file=key,
+        ca_file=ca_file, ca_dir=ca_dir, min_version=version, max_version=version,
+        handshake_timeout_ns=10_000_000_000, _verification_time_s=Int64(1790121600),
+    )
+    states = _run_tls_roundtrip_states!(TL.Config(server_config), TL.Config(client_config))
+    states.client_state.handshake_complete || error("combined CA client handshake failed")
+    states.server_state.handshake_complete || error("combined CA server handshake failed")
+    return nothing
+end
+
 function run_tls_trim_sample()::Nothing
+    _run_combined_ca_trim!(TL.TLS1_2_VERSION)
+    _run_combined_ca_trim!(TL.TLS1_3_VERSION)
     _run_tls_roundtrip!(_TLS_MIXED_SERVER_CONFIG, _tls_client_config(), "TLSv1.3", true)
     _run_tls_roundtrip!(_TLS_EXACT_TLS12_SERVER_CONFIG, _tls_client_config(), "TLSv1.2", false)
     _run_tls_roundtrip!(_TLS_MIXED_SERVER_CONFIG, _tls_client_config(max_version = TL.TLS1_2_VERSION), "TLSv1.2", false)

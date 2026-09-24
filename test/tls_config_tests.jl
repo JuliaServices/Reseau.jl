@@ -39,6 +39,8 @@ end
     @testset "config copy and legacy positional form" begin
         base = TL.Config(
             server_name = "base.example",
+            ca_dir = SubString(dirname(_TLS_CERT_PATH), 1),
+            client_ca_dir = dirname(_TLS_NATIVE_CA_PATH),
             verify_peer = false,
             verify_hostname = false,
             cert_file = _TLS_CERT_PATH,
@@ -69,6 +71,9 @@ end
         @test copied.key_file == base.key_file
         @test copied.ca_file === base.ca_file
         @test copied.client_ca_file === base.client_ca_file
+        @test copied.ca_dir === base.ca_dir
+        @test copied.client_ca_dir === base.client_ca_dir
+        @test copied.ca_dir isa String
         @test copied.min_version == base.min_version
         @test copied.max_version == base.max_version
         @test copied.session_tickets_disabled == base.session_tickets_disabled
@@ -142,11 +147,17 @@ end
         @test legacy._client_session_cache === fixture._client_session_cache
         @test legacy._client_identity === fixture._client_identity
         # Adding a field means revisiting the 21-argument compatibility method above.
-        @test fieldcount(TL.Config) == 22
+        @test fieldcount(TL.Config) == 24
+        @test legacy.ca_dir === legacy.client_ca_dir === nothing
+        raw = _tls_raw_config_for_test(fixture)
+        @test raw._verification_time_s == fixture._verification_time_s
+        @test raw.ca_dir === raw.client_ca_dir === nothing
     end
 
     @testset "config validation" begin
         cfg_default = TL.Config()
+        @test cfg_default.ca_dir === nothing
+        @test cfg_default.client_ca_dir === nothing
         @test cfg_default.min_version == TL.TLS1_2_VERSION
         @test cfg_default.client_auth == TL.ClientAuthMode.NoClientCert
         @test cfg_default.verify_hostname
