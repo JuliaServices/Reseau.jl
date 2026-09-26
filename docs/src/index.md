@@ -10,11 +10,13 @@ deliberately small: plain TCP lives under [`Reseau.TCP`](@ref) and TLS lives
 under [`Reseau.TLS`](@ref). String-address dialing uses the same entrypoints,
 while the advanced resolver types behind that behavior are documented
 separately in [Name Resolution](@ref name-resolution-manual).
+Filesystem Unix socket clients are available through [`Reseau.Unix`](@ref).
 
 ```@contents
 Pages = [
     "index.md",
     "tcp.md",
+    "unix.md",
     "tls.md",
     "resolution.md",
     "migrate-sockets.md",
@@ -32,11 +34,12 @@ Pkg.add("Reseau")
 
 ## Module Entry Points
 
-The package exports only `TCP` and `TLS`, which keeps the public API module-scoped
-instead of namespace-flat:
+The package exports `TCP`, `UDP` and `TLS`. Filesystem Unix socket clients use
+the qualified `Reseau.Unix` namespace:
 
 ```@docs; canonical=false
 Reseau.TCP
+Reseau.Unix
 Reseau.TLS
 ```
 
@@ -89,6 +92,7 @@ reply
 ## Documentation Map
 
 - Read [TCP](@ref tcp-manual) for plain connections, address constructors, deadlines, I/O semantics, and socket options.
+- Read [Unix Socket Clients](@ref unix-manual) for local filesystem connections.
 - Read [TLS](@ref tls-manual) for `TLS.Config`, client/server wrappers, lazy handshakes, and connection-state inspection.
 - Read [Name Resolution](@ref name-resolution-manual) for advanced resolver controls behind the string-address entrypoints.
 - Read [Migrating from `Sockets` to Reseau](@ref sockets-migration-manual) if you are porting code from Julia's stdlib `Sockets`.
