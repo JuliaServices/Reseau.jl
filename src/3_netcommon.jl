@@ -2,14 +2,16 @@
     NetCommon
 
 Shared socket-address types and the internal `FD` (netFD) owner used by the
-`TCP` and `UDP` transport layers.
+`TCP`, `UDP` and `Unix` transport layers.
 
 This mirrors Go's `net` package structure, where one `netFD` and one set of
 sockaddr conversion helpers back every socket type. Public API surfaces live in
-`TCP` and `UDP`; those modules re-expose the address types defined here so the
+the transport modules; `TCP` and `UDP` re-expose the address types here so the
 documented names (`TCP.SocketAddrV4`, ...) keep working unchanged.
 """
 module NetCommon
+
+using ..Reseau: ByteMemory, MutableByteBuffer
 
 using ..Reseau.IOPoll
 using ..Reseau.SocketOps
@@ -199,7 +201,7 @@ end
 Internal socket owner built on `IOPoll.FD`.
 
 This is the internal object that owns the actual socket. Public callers usually
-interact with the `TCP`/`UDP` connection and listener types, but the transport
+interact with the transport connection and listener types, but the transport
 implementations keep the extra metadata here so they can cache local/remote
 addresses, remember the socket family and type, and share
 shutdown/close/deadline behavior with the poll layer.
@@ -369,5 +371,7 @@ end
     end
     return nothing
 end
+
+include("netcommon/stream.jl")
 
 end
