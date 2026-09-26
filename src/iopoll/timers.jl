@@ -28,8 +28,19 @@ end
     return (i << 1) + 1
 end
 
+@inline function _time_set_index!(entry::TimeEntry, index::Int)
+    if entry.kind == TimeEntryKind.DEADLINE
+        pd = entry.pollstate::PollState
+        _mode_has_read(entry.mode) && (pd.read_timer_index = index)
+        _mode_has_write(entry.mode) && (pd.write_timer_index = index)
+    end
+    return nothing
+end
+
 function _time_swap!(heap::Vector{TimeEntry}, i::Int, j::Int)
     heap[i], heap[j] = heap[j], heap[i]
+    _time_set_index!(heap[i], i)
+    _time_set_index!(heap[j], j)
     return nothing
 end
 
@@ -63,20 +74,37 @@ end
 function _time_push_locked!(state::Poller, entry::TimeEntry)
     heap = state.time_heap
     push!(heap, entry)
+    _time_set_index!(entry, length(heap))
     _time_sift_up!(heap, length(heap))
     return nothing
 end
 
-function _time_pop_locked!(state::Poller)::TimeEntry
+function _time_remove_locked!(state::Poller, index::Int)::TimeEntry
     heap = state.time_heap
-    isempty(heap) && throw(ArgumentError("time heap is empty"))
-    entry = heap[1]
+    entry = heap[index]
     last = pop!(heap)
-    if !isempty(heap)
-        heap[1] = last
-        _time_sift_down!(heap, 1)
+    _time_set_index!(entry, 0)
+    if index <= length(heap)
+        heap[index] = last
+        _time_set_index!(last, index)
+        if index > 1 && _time_less(last, heap[_heap_parent_index(index)])
+            _time_sift_up!(heap, index)
+        else
+            _time_sift_down!(heap, index)
+        end
     end
     return entry
+end
+
+function _time_pop_locked!(state::Poller)::TimeEntry
+    isempty(state.time_heap) && throw(ArgumentError("time heap is empty"))
+    return _time_remove_locked!(state, 1)
+end
+
+function _remove_deadlines_locked!(state::Poller, pd::PollState)
+    pd.read_timer_index == 0 || _time_remove_locked!(state, pd.read_timer_index)
+    pd.write_timer_index == 0 || _time_remove_locked!(state, pd.write_timer_index)
+    return nothing
 end
 
 @inline function _registration_active_locked(state::Poller, pd::PollState)::Bool
@@ -156,35 +184,27 @@ end
     return TimeEntry(deadline_ns, TimeEntryKind.TIMER, nothing, timer, PollMode.READ, seq, UInt64(0))
 end
 
-function _build_deadline_entries(
-        pd::PollState,
-        rd_ns::Int64,
-        wd_ns::Int64,
-        rseq::UInt64,
-        wseq::UInt64,
-    )::Vector{TimeEntry}
-    entries = TimeEntry[]
-    # When both deadlines are identical, one combined entry is enough. Distinct
-    # deadlines stay as separate heap entries because they can expire
-    # independently.
-    if rd_ns > 0 && wd_ns > 0 && rd_ns == wd_ns
-        push!(entries, _deadline_entry(rd_ns, pd, PollMode.READWRITE, rseq, wseq))
-        return entries
-    end
-    rd_ns > 0 && push!(entries, _deadline_entry(rd_ns, pd, PollMode.READ, rseq, UInt64(0)))
-    wd_ns > 0 && push!(entries, _deadline_entry(wd_ns, pd, PollMode.WRITE, UInt64(0), wseq))
-    return entries
+function _reuse_deadline_entry!(entry::Union{Nothing,TimeEntry}, deadline_ns::Int64,
+        pd::PollState, mode::PollMode.T, rseq::UInt64, wseq::UInt64)::TimeEntry
+    entry === nothing && return _deadline_entry(deadline_ns, pd, mode, rseq, wseq)
+    entry.deadline_ns = deadline_ns
+    entry.mode = mode
+    entry.primary_seq = rseq
+    entry.secondary_seq = wseq
+    return entry
 end
 
 """
     schedule_deadlines!(pd, rd_ns, wd_ns, rseq, wseq)
 
-Publish the current deadline snapshot for `pd` into the poller heap.
+Replace `pd`'s heap entries with its current deadline snapshot.
 
 Arguments are the already-updated read/write deadline words and their sequence
 counters. Callers should hold any descriptor-local synchronization needed to
 produce a self-consistent snapshot before calling this function; the poller does
-not try to reconstruct that relationship after the fact.
+not try to reconstruct that relationship after the fact. A delayed snapshot with
+superseded sequence numbers is ignored. Entries still in the heap are reused;
+already-popped callbacks retain their own captured generations.
 
 Returns `nothing`.
 
@@ -206,18 +226,26 @@ function schedule_deadlines!(
     lock(state.lock)
     try
         _registration_active_locked(state, pd) || return nothing
+        (@atomic :acquire pd.rseq) == rseq && (@atomic :acquire pd.wseq) == wseq || return nothing
+        first = pd.read_timer_index == 0 ? nothing : _time_remove_locked!(state, pd.read_timer_index)
+        second = pd.write_timer_index == 0 ? nothing : _time_remove_locked!(state, pd.write_timer_index)
+        if first === nothing
+            first = second
+            second = nothing
+        end
         if rd_ns > 0 && wd_ns > 0 && rd_ns == wd_ns
-            entry = _deadline_entry(rd_ns, pd, PollMode.READWRITE, rseq, wseq)
+            entry = _reuse_deadline_entry!(first, rd_ns, pd, PollMode.READWRITE, rseq, wseq)
             _time_push_locked!(state, entry)
             new_earliest = entry.deadline_ns
         else
             if rd_ns > 0
-                entry = _deadline_entry(rd_ns, pd, PollMode.READ, rseq, UInt64(0))
+                entry = _reuse_deadline_entry!(first, rd_ns, pd, PollMode.READ, rseq, UInt64(0))
                 _time_push_locked!(state, entry)
                 new_earliest = entry.deadline_ns
             end
             if wd_ns > 0
-                entry = _deadline_entry(wd_ns, pd, PollMode.WRITE, UInt64(0), wseq)
+                entry = _reuse_deadline_entry!(rd_ns > 0 ? second : first,
+                    wd_ns, pd, PollMode.WRITE, UInt64(0), wseq)
                 _time_push_locked!(state, entry)
                 if new_earliest == 0 || entry.deadline_ns < new_earliest
                     new_earliest = entry.deadline_ns

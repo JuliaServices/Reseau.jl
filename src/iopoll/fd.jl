@@ -249,9 +249,8 @@ function _set_deadline_impl!(fd::FD, deadline_ns::Integer, mode::PollMode.T)
         finally
             unlock(pd.lock)
         end
-        # Publish the post-update snapshot to the poller heap. Stale entries are
-        # left in the heap and filtered by sequence/token checks when they
-        # reach the top, which keeps scheduling cheap.
+        # Replace this descriptor's heap entries. If another setter published
+        # a newer snapshot first, its sequence numbers reject this older one.
         schedule_deadlines!(pd, rd_ns, wd_ns, rseq, wseq)
         if wake_read && wake_write
             _wake_waiters!(pd, PollMode.READWRITE)

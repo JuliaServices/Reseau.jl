@@ -196,6 +196,7 @@ function shutdown!()
             append!(registrations, values(state.registrations))
             _discard_stale_time_entries_locked!(state)
             for entry in state.time_heap
+                _time_set_index!(entry, 0)
                 entry.kind == TimeEntryKind.TIMER || continue
                 push!(timers, entry.timer::TimerState)
             end
@@ -317,7 +318,10 @@ function deregister!(fd::SysFD)
     try
         (@atomic :acquire state.running) || return nothing
         registration = pop!(state.registrations, sysfd, nothing)
-        registration === nothing || delete!(state.registrations_by_token, registration.token)
+        if registration !== nothing
+            delete!(state.registrations_by_token, registration.token)
+            _remove_deadlines_locked!(state, registration.pollstate)
+        end
         errno = _backend_close_fd!(state, sysfd)
     finally
         unlock(state.lock)
@@ -358,6 +362,7 @@ function deregister!(pd::PollState)
         registered === current || return nothing
         delete!(state.registrations, pd.sysfd)
         delete!(state.registrations_by_token, current.token)
+        _remove_deadlines_locked!(state, pd)
         errno = _backend_close_fd!(state, pd.sysfd)
     finally
         unlock(state.lock)

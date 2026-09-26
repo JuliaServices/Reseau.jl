@@ -315,6 +315,8 @@ end
                 state.registrations_by_token[token] = registration
                 @atomic :release state.poll_until_ns = _EL_FAR_FUTURE_NS
                 deadline_ns = _EL_FAR_FUTURE_NS - Int64(20_000_000)
+                @atomic :release registration.pollstate.rd_ns = deadline_ns
+                @atomic :release registration.pollstate.rseq = UInt64(1)
                 if _el_can_block_julia_worker()
                     # Poll with no timeout at all: the fetch below completing
                     # is exactly the earlier-deadline wake working. A wake that
@@ -463,10 +465,39 @@ end
             waiter_task = nothing
             try
                 registration = NP.register!(fd0; mode = NP.PollMode.READ)
-                stale_pd = NP.PollState(fd0, registration.token - UInt64(1))
-                @atomic :release stale_pd.pollable = true
-                close(stale_pd)
-                @test NP.current_registration(registration.pollstate) === registration
+                pd = registration.pollstate
+                @atomic :release pd.rd_ns = _EL_FAR_FUTURE_NS
+                @atomic :release pd.wd_ns = _EL_FAR_FUTURE_NS
+                @atomic :release pd.rseq = UInt64(3)
+                @atomic :release pd.wseq = UInt64(5)
+                NP.schedule_deadlines!(pd, _EL_FAR_FUTURE_NS, _EL_FAR_FUTURE_NS, UInt64(3), UInt64(5))
+                state = NP.POLLER[]
+                entry = lock(state.lock) do
+                    state.time_heap[pd.read_timer_index]
+                end
+                # Tokens can repeat after poller restart, so object identity
+                # must also protect a replacement registration and its timer.
+                for token in (registration.token - UInt64(1), registration.token)
+                    stale_pd = NP.PollState(fd0, token)
+                    @atomic :release stale_pd.pollable = true
+                    @atomic :release stale_pd.rd_ns = _EL_FAR_FUTURE_NS
+                    @atomic :release stale_pd.wd_ns = _EL_FAR_FUTURE_NS
+                    @atomic :release stale_pd.rseq = UInt64(3)
+                    @atomic :release stale_pd.wseq = UInt64(5)
+                    NP.schedule_deadlines!(stale_pd, _EL_FAR_FUTURE_NS, _EL_FAR_FUTURE_NS, UInt64(3), UInt64(5))
+                    NP.deadline_fire!(stale_pd, NP.PollMode.READWRITE, UInt64(3), UInt64(5))
+                    close(stale_pd)
+                    NP.deregister!(stale_pd)
+                    @test NP.current_registration(pd) === registration
+                    @test (@atomic pd.rd_ns) == (@atomic pd.wd_ns) == _EL_FAR_FUTURE_NS
+                    @test (@atomic stale_pd.rd_ns) == (@atomic stale_pd.wd_ns) == _EL_FAR_FUTURE_NS
+                    lock(state.lock) do
+                        @test pd.read_timer_index == pd.write_timer_index != 0
+                        @test state.time_heap[pd.read_timer_index] === entry
+                        @test count(e -> e.pollstate === pd, state.time_heap) == 1
+                        @test count(e -> e.pollstate === stale_pd, state.time_heap) == 0
+                    end
+                end
                 wait_ch = Channel{Nothing}(1)
                 wait_started = Channel{Nothing}(1)
                 waiter_task = errormonitor(@async begin
@@ -605,12 +636,25 @@ end
             # The drain runs on the detached poller thread every cycle, and
             # allocating there has crashed under gVisor's sandbox. Coverage
             # instrumentation adds allocations, so only assert without it.
-            drained = NP._drain_expired_time_entries!(state, now)
-            @test drained === nothing
+            for timer in (t1, t2)
+                @atomic :release timer.waiter.state = nothing
+                @atomic :release timer.deadline_ns = now - Int64(1)
+                seq = @atomic timer.seq += UInt64(1)
+                lock(state.lock) do
+                    NP._time_push_locked!(state, NP._timer_entry(now - Int64(1), timer, seq))
+                end
+            end
+            @test length(state.time_heap) == 2
             if Base.JLOptions().code_coverage == 0
                 allocs = @allocated NP._drain_expired_time_entries!(state, now)
                 @test allocs == 0
+            else
+                @test NP._drain_expired_time_entries!(state, now) === nothing
             end
+            @test isempty(state.time_heap)
+            @test (@atomic :acquire t1.deadline_ns) == (@atomic :acquire t2.deadline_ns) == Int64(0)
+            @test (@atomic :acquire t1.waiter.state) === NP._POLLWAKE_READY
+            @test (@atomic :acquire t2.waiter.state) === NP._POLLWAKE_READY
         end
         _el_log_test_progress("DONE: expired-entry drain fires without allocating")
         _el_log_test_progress("START: shutdown wakes an idle poller promptly")
