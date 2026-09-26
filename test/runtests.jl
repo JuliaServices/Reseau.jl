@@ -26,6 +26,7 @@ test_files = [
     "timing_semantics_tests.jl",
     "iopoll_runtime_tests.jl",
     "internal_poll_tests.jl",
+    "deadline_heap_tests.jl",
     "socket_ops_tests.jl",
     "tcp_tests.jl",
     "udp_tests.jl",

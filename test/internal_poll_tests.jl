@@ -328,18 +328,6 @@ end
                 IP.shutdown!()
             end
         end
-        @testset "combined deadline entry normalization" begin
-            registration = IP.Registration(IP.SysFD(7), UInt64(11), IP.PollMode.READWRITE, IP.PollWaiter(), IP.PollWaiter(), false)
-            combined = IP._build_deadline_entries(registration.pollstate, Int64(10), Int64(10), UInt64(3), UInt64(5))
-            @test length(combined) == 1
-            @test combined[1].mode == IP.PollMode.READWRITE
-            @test combined[1].primary_seq == UInt64(3)
-            @test combined[1].secondary_seq == UInt64(5)
-            split = IP._build_deadline_entries(registration.pollstate, Int64(10), Int64(11), UInt64(3), UInt64(5))
-            @test length(split) == 2
-            @test split[1].mode == IP.PollMode.READ
-            @test split[2].mode == IP.PollMode.WRITE
-        end
         @testset "set_deadline uses one combined heap entry and expires both sides" begin
             fd0, fd1 = _ip_socketpair_stream()
             ipfd = IP.FD(fd0)
