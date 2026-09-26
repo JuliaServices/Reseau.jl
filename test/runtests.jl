@@ -15,6 +15,10 @@ _log_test_progress("[runtests] julia threads: $(Threads.nthreads())")
 @test UDP === Reseau.UDP
 @test TLS === Reseau.TLS
 
+@static if Sys.islinux() || Sys.isapple() || Sys.isfreebsd()
+    include("unix_helpers.jl")
+end
+
 function _include_with_progress(path::AbstractString)
     _log_test_progress("[runtests] include START: $(path)")
     include(path)
@@ -28,6 +32,7 @@ test_files = [
     "internal_poll_tests.jl",
     "socket_ops_tests.jl",
     "tcp_tests.jl",
+    "unix_tests.jl",
     "udp_tests.jl",
     "host_resolvers_tests.jl",
     "socks_tests.jl",

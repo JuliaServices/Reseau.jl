@@ -30,7 +30,7 @@ Do not use a short delay to prove that an event has not occurred. Build a
 barrier that makes the event impossible until the test releases it, or assert
 the guarded state directly.
 
-Two places legitimately read the clock:
+These places legitimately read the clock:
 
 - `timing_semantics_tests.jl` holds the product-latency tests that genuinely
   require a real timer to fire (the poller-owned sleep heap, backend poll
@@ -40,6 +40,10 @@ Two places legitimately read the clock:
 - The native TLS test files call `time()` because TLS session tickets carry
   UNIX-seconds protocol timestamps that the product compares against its own
   clock. Those tests use tolerances of hours to days.
+- `unix_trim_safe.jl` arms a future read deadline to verify that the poller
+  timer actually fires in the compiled executable. The peer remains open and
+  sends nothing; there is no elapsed-time assertion or ordering based on a
+  delay. An already-expired deadline would not exercise that native wait path.
 
 Product timeout configuration remains valid test input. It tests parsing,
 propagation, and expired-deadline behavior. It must not act as the test

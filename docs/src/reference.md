@@ -18,6 +18,7 @@ Depth = 2:2
 ```@docs
 Reseau
 Reseau.TCP
+Reseau.Unix
 Reseau.UDP
 Reseau.TLS
 ```
@@ -82,6 +83,23 @@ local_addr
 remote_addr
 addr
 ```
+
+## Unix Socket Clients
+
+```@meta
+CurrentModule = Reseau.Unix
+```
+
+```@docs
+Conn
+connect
+DeadlineExceededError
+NetClosingError
+```
+
+Unix connections use the shared stream IO, deadline, half-close and borrowed
+descriptor methods documented above. See [Unix Socket Clients](@ref unix-manual)
+for path limits and lifecycle details.
 
 ## UDP
 
