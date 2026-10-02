@@ -17,10 +17,6 @@ jobs:
         include:
           - arch: x86
             mode: exception
-          - arch: x86
-            mode: no-exception
-          - arch: x64
-            mode: exception
     env:
       JULIA_NUM_THREADS: 1
       JULIA_PKG_PRECOMPILE_AUTO: '0'

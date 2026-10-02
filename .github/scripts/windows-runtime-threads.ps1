@@ -45,11 +45,13 @@ try {
         if (-not $cdb) { throw "No matching $Architecture CDB debugger is installed." }
         $metadata.debuggerPath = $cdb.FullName
         $dump = Join-Path $OutputDirectory 'runtime.dmp'
-        $commands = '~*kb; lm; .dump /ma "{0}"; .detach; q' -f $dump
+        $symbols = Join-Path $OutputDirectory 'local-symbols'
+        New-Item -ItemType Directory -Force -Path $symbols | Out-Null
+        $commands = '.dump /ma "{0}"; ~*kb; lm; .detach; q' -f $dump
         $commandFile = Join-Path $OutputDirectory 'cdb.commands.txt'
         $commands | Set-Content $commandFile
         $debugger = Start-Process $cdb.FullName -PassThru `
-            -ArgumentList @('-p', $child.Id, '-cf', ('"{0}"' -f $commandFile)) `
+            -ArgumentList @('-p', $child.Id, '-y', ('"{0}"' -f $symbols), '-cf', ('"{0}"' -f $commandFile)) `
             -RedirectStandardOutput (Join-Path $OutputDirectory 'cdb.stdout.txt') `
             -RedirectStandardError (Join-Path $OutputDirectory 'cdb.stderr.txt')
         $metadata.debuggerPid = $debugger.Id
