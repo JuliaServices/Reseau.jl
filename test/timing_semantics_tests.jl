@@ -81,3 +81,48 @@ end
         _TS_NP._backend_close!(state)
     end
 end
+
+@static if Sys.islinux() || Sys.isapple() || Sys.isfreebsd()
+    @testset "Unix deadlines fire while operations are parked" begin
+        U = Reseau.Unix
+        UnixTestHelpers.with_pair() do client, server
+            task = errormonitor(Threads.@spawn try read(client, UInt8) catch e; e end)
+            waiter = _TS_IP._poll_registration(client.fd.pfd.pd).read_waiter
+            @test UnixTestHelpers.wait_parked(task, waiter)
+            U.set_read_deadline!(client, Int64(time_ns()) + 30_000_000)
+            @test fetch(task) isa U.DeadlineExceededError
+            U.set_read_deadline!(client, 0)
+            @test write(server, 0x61) == 1
+            @test read(client, UInt8) == 0x61
+
+            SO = Reseau.SocketOps
+            _TS_IP.set_sockopt_int!(client.fd.pfd, SO.SOL_SOCKET, SO.SO_SNDBUF, 4096)
+            payload = zeros(UInt8, 1 << 20)
+            writer = errormonitor(Threads.@spawn try
+                while true
+                    write(client, payload)
+                end
+            catch e
+                e
+            end)
+            waiter = _TS_IP._poll_registration(client.fd.pfd.pd).write_waiter
+            @test UnixTestHelpers.wait_parked(writer, waiter)
+            U.set_write_deadline!(client, Int64(time_ns()) + 30_000_000)
+            @test fetch(writer) isa U.DeadlineExceededError
+        end
+
+        # An unconnected Unix descriptor can report write readiness and
+        # SO_ERROR=0. Completion must still reject the absent peer and wait
+        # until its deadline, rather than treating readiness as a connection.
+        fd = Reseau.NetCommon.open_net_fd!(; family = Reseau.SocketOps.AF_UNIX, net = :unix)
+        try
+            _TS_IP.register!(fd.pfd)
+            @test Reseau.SocketOps.get_socket_error(fd.pfd.sysfd) == 0
+            @test_throws SystemError Reseau.SocketOps.check_peer_name_un(fd.pfd.sysfd)
+            _TS_IP.set_write_deadline!(fd.pfd, Int64(time_ns()) + 30_000_000)
+            @test_throws U.DeadlineExceededError U._wait_connected!(fd)
+        finally
+            close(fd)
+        end
+    end
+end
