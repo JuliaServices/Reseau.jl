@@ -1,26 +1,55 @@
-name: Windows Min TLS Debug
+name: Windows Resolver Native Diagnostic
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  windows-min-tls:
-    name: Julia min - windows-latest - x64 - tls-debug
+  resolver:
+    name: Julia 1.13.1 - windows-latest - ${{ matrix.arch }} - resolver
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86, x64]
     env:
       JULIA_NUM_THREADS: 1
-      RESEAU_RUN_TLS_TESTS: '1'
       RESEAU_RUN_NETWORK_TESTS: '1'
-      RESEAU_TEST_ONLY: tls_native_tls12_tests.jl
-      RESEAU_TRIM_EXE_TIMEOUT_S: "60.0"
-      RESEAU_TRIM_BUNDLE: '1'
+      RESEAU_TEST_ONLY: host_resolvers_tests.jl
+      JULIA_PKG_PRECOMPILE_AUTO: '0'
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: diagnostic
+      - uses: actions/checkout@v4
+        with:
+          ref: 159e02da68024fd6421481dc4b8a020d9d20ead6
+          persist-credentials: false
+          path: subject
       - uses: julia-actions/setup-julia@v2
         with:
-          version: 'min'
-          arch: x64
-      - uses: julia-actions/cache@v2
-      - uses: julia-actions/julia-buildpkg@v1
-      - uses: julia-actions/julia-runtest@v1
+          version: '1.13.1'
+          arch: ${{ matrix.arch }}
+      - name: Instantiate unchanged subject
+        timeout-minutes: 3
+        shell: pwsh
+        run: julia --project=subject --startup-file=no -e 'using Pkg; Pkg.instantiate(; allow_autoprecomp=false)'
+      - name: Run unchanged resolver tests with bounded native capture
+        shell: pwsh
+        run: >-
+          & diagnostic/.github/scripts/windows-resolver-diagnostic.ps1
+          -Subject (Resolve-Path subject).Path
+          -OutputDirectory (Join-Path $env:GITHUB_WORKSPACE 'capture')
+          -Architecture '${{ matrix.arch }}'
+      - name: Upload native capture and exact source metadata
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resolver-julia-1.13.1-${{ matrix.arch }}
+          path: capture
+          if-no-files-found: error
+          retention-days: 7
