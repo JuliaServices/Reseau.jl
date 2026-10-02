@@ -70,9 +70,11 @@ end
 """
     _spawn_detached_thread(name, thread_fn, arg=nothing)
 
-Start a detached native OS thread that runs `thread_fn(::Ptr{Cvoid})`.
-This intentionally does not keep a join handle; shutdown is coordinated via
-poller state (`running`) and backend wakeups.
+Start a native OS thread that runs `thread_fn(::Ptr{Cvoid})`, then detach it.
+The caller must keep `arg` alive until the callback no longer uses its raw pointer.
+This function throws only if no thread was created. After successful creation,
+return the `pthread_detach` status (zero on Windows); a nonzero status still means
+the callback can run. The caller coordinates shutdown without a join handle.
 """
 function _spawn_detached_thread(
         name::AbstractString,
@@ -102,6 +104,7 @@ function _spawn_detached_thread(
         )
         handle == C_NULL && throw(ArgumentError("error creating poller thread"))
         _ = @win32_cconv ccall((:CloseHandle, "kernel32"), Int32, (Ptr{Cvoid},), handle)
+        return Cint(0)
     else
         pthread_ref = Ref{_pthread_t}(0)
         create_ret = ccall(
@@ -110,10 +113,8 @@ function _spawn_detached_thread(
             pthread_ref, C_NULL, thread_fn[], thread_arg,
         )
         create_ret != 0 && throw(SystemError("pthread_create", Int(create_ret)))
-        detach_ret = ccall(:pthread_detach, Cint, (_pthread_t,), pthread_ref[])
-        detach_ret != 0 && throw(SystemError("pthread_detach", Int(detach_ret)))
+        return ccall(:pthread_detach, Cint, (_pthread_t,), pthread_ref[])
     end
-    return nothing
 end
 
 """
@@ -145,7 +146,7 @@ function init!()::Poller
         errno == Int32(0) || _throw_errno("iopoll backend init", errno)
         @atomic new_state.running = true
         POLLER[] = new_state
-        try
+        detach_ret = try
             _spawn_detached_thread(
                 "reseau-iopoll-poller",
                 _POLLER_THREAD_ENTRY_C,
@@ -156,6 +157,10 @@ function init!()::Poller
             _backend_close!(new_state)
             POLLER[] = Poller()
             rethrow()
+        end
+        if detach_ret != 0
+            shutdown!()
+            throw(SystemError("pthread_detach", Int(detach_ret)))
         end
         return new_state
     finally
