@@ -277,8 +277,10 @@ poller.
 
 It holds registration identity (`sysfd`, `token`), coarse descriptor state
 (`pollable`, `closing`, `event_err`), and the read/write deadline words plus
-their sequence numbers. The sequence counters let the poller heap discard stale
-deadline entries after deadline changes without mutating the heap in place.
+their sequence numbers. Sequence counters reject callbacks already removed from
+the heap before a deadline changed. The two heap indices are protected by the
+poller's lock; zero means absent, and equal nonzero indices identify one combined
+read/write entry.
 """
 mutable struct PollState
     lock::ReentrantLock
@@ -291,6 +293,8 @@ mutable struct PollState
     @atomic wd_ns::Int64
     @atomic rseq::UInt64
     @atomic wseq::UInt64
+    read_timer_index::Int
+    write_timer_index::Int
     function PollState(sysfd::SysFD = INVALID_FD, token::UInt64 = UInt64(0))
         return new(
             ReentrantLock(),
@@ -303,6 +307,8 @@ mutable struct PollState
             Int64(0),
             UInt64(0),
             UInt64(0),
+            0,
+            0,
         )
     end
 end
@@ -344,20 +350,20 @@ end
 
 One scheduled time event in the poller min-heap.
 
-`TimeEntryKind.DEADLINE` entries are immutable snapshots of descriptor timeout
-state. `mode`, `primary_seq`, and `secondary_seq` capture the read/write
-deadline generation at the moment the entry was scheduled, and `pollstate`
-points at the descriptor-local state that will eventually consume the timeout.
+`TimeEntryKind.DEADLINE` entries are updated only while owned by the heap under
+the poller's lock. Once removed for firing, their captured read/write generations
+are unchanged, so a later deadline update can invalidate the callback. `pollstate`
+identifies the descriptor whose deadline will be consumed.
 
 `TimeEntryKind.TIMER` entries are object-owned timer wakeups. `primary_seq`
 stores the timer generation captured when the entry was armed, and `timer`
 points at the `TimerState` that will eventually be notified.
 """
-struct TimeEntry
+mutable struct TimeEntry
     deadline_ns::Int64
-    kind::TimeEntryKind.T
-    pollstate::Union{Nothing, PollState}
-    timer::Union{Nothing, TimerState}
+    const kind::TimeEntryKind.T
+    const pollstate::Union{Nothing, PollState}
+    const timer::Union{Nothing, TimerState}
     mode::PollMode.T
     primary_seq::UInt64
     secondary_seq::UInt64

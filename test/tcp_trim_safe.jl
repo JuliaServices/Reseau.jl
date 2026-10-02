@@ -17,7 +17,7 @@ function _close_quiet!(x)
     return nothing
 end
 
-function run_tcp_trim_sample()::Nothing
+function run_tcp_trim_sample(updates::Int)::Nothing
     listener::Union{Nothing, NC.Listener} = nothing
     client::Union{Nothing, NC.Conn} = nothing
     server::Union{Nothing, NC.Conn} = nothing
@@ -33,6 +33,15 @@ function run_tcp_trim_sample()::Nothing
         client_remote.port == laddr.port || error("client remote port mismatch")
         server_local.port == laddr.port || error("server local port mismatch")
         server_remote.port == client_local.port || error("server remote port mismatch")
+        deadline = Int64(time_ns()) + Int64(60_000_000_000)
+        NC.set_write_deadline!(client, deadline)
+        for i in 1:updates
+            NC.set_read_deadline!(client, deadline + i)
+        end
+        NC.set_deadline!(client, 0)
+        NC.set_deadline!(server, deadline)
+        NC.set_write_deadline!(server, deadline + 1)
+        NC.set_deadline!(server, 0)
         NC.tryread!(server, Vector{UInt8}(undef, 1)) === nothing || error("expected no pending input on an idle connection")
         payload = UInt8[0x61, 0x62, 0x63]
         write(client, payload) == length(payload) || error("expected TCP payload write")
@@ -59,8 +68,9 @@ function run_tcp_trim_sample()::Nothing
 end
 
 function @main(args::Vector{String})::Cint
-    _ = args
-    run_tcp_trim_sample()
+    updates = isempty(args) ? 32 : parse(Int, only(args))
+    1 <= updates <= 100_000 || throw(ArgumentError("deadline updates must be between 1 and 100000"))
+    run_tcp_trim_sample(updates)
     return 0
 end
 
