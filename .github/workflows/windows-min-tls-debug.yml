@@ -1,4 +1,4 @@
-name: Windows Resolver Native Diagnostic
+name: Windows Resolver Prefix Native Diagnostic
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   resolver:
-    name: Julia 1.13.1 - windows-latest - ${{ matrix.arch }} - resolver
+    name: Julia 1.13.1 - windows-latest - ${{ matrix.arch }} - resolver-prefix
     runs-on: windows-latest
     timeout-minutes: 8
     strategy:
@@ -18,7 +18,7 @@ jobs:
     env:
       JULIA_NUM_THREADS: 1
       RESEAU_RUN_NETWORK_TESTS: '1'
-      RESEAU_TEST_ONLY: host_resolvers_tests.jl
+      RESEAU_RUN_TLS_TESTS: '1'
       JULIA_PKG_PRECOMPILE_AUTO: '0'
     steps:
       - uses: actions/checkout@v4
@@ -38,18 +38,19 @@ jobs:
         timeout-minutes: 3
         shell: pwsh
         run: julia --project=subject --startup-file=no -e 'using Pkg; Pkg.instantiate(; allow_autoprecomp=false)'
-      - name: Run unchanged resolver tests with bounded native capture
+      - name: Run unchanged ordered test prefix with bounded native capture
         shell: pwsh
         run: >-
           & diagnostic/.github/scripts/windows-resolver-diagnostic.ps1
           -Subject (Resolve-Path subject).Path
+          -Driver (Resolve-Path diagnostic/.github/scripts/windows-resolver-prefix.jl).Path
           -OutputDirectory (Join-Path $env:GITHUB_WORKSPACE 'capture')
           -Architecture '${{ matrix.arch }}'
       - name: Upload native capture and exact source metadata
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: resolver-julia-1.13.1-${{ matrix.arch }}
+          name: resolver-prefix-julia-1.13.1-${{ matrix.arch }}
           path: capture
           if-no-files-found: error
           retention-days: 7

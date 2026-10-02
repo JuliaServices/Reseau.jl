@@ -1,5 +1,6 @@
 param(
     [Parameter(Mandatory)][string]$Subject,
+    [Parameter(Mandatory)][string]$Driver,
     [Parameter(Mandatory)][string]$OutputDirectory,
     [Parameter(Mandatory)][ValidateSet('x86', 'x64')][string]$Architecture
 )
@@ -12,7 +13,7 @@ $metadata = [ordered]@{
     actualSource = (& git -C $Subject rev-parse HEAD).Trim()
     architecture = $Architecture
     juliaVersion = (& julia --startup-file=no -e 'print(VERSION)').Trim()
-    testFile = 'host_resolvers_tests.jl'
+    mode = 'ordered prefix through host_resolvers_tests.jl'
     childTimeoutSeconds = 120
     debuggerTimeoutSeconds = 30
     childTimedOut = $false
@@ -27,15 +28,20 @@ try {
     if ($metadata.juliaVersion -ne '1.13.1') { throw 'Diagnostic requires exactly Julia 1.13.1.' }
     & git -C $Subject diff --exit-code HEAD -- src test Project.toml
     if ($LASTEXITCODE -ne 0) { throw 'Subject source or tests changed before the diagnostic.' }
+    $trackedFiles = & git -C $Subject ls-files -- src test Project.toml
+    $hashesBefore = @($trackedFiles | ForEach-Object {
+        [ordered]@{ path = $_; sha256 = (Get-FileHash (Join-Path $Subject $_) -Algorithm SHA256).Hash }
+    }) | ConvertTo-Json
+    $hashesBefore | Set-Content (Join-Path $OutputDirectory 'subject.hashes.before.json')
     Copy-Item (Join-Path $Subject 'Project.toml') $OutputDirectory
     Copy-Item (Join-Path $Subject 'Manifest.toml') $OutputDirectory
+    Copy-Item $Driver $OutputDirectory
     & julia --startup-file=no -e 'using InteractiveUtils; versioninfo()' |
         Set-Content (Join-Path $OutputDirectory 'versioninfo.txt')
 
     $julia = (Get-Command julia).Source
-    $testPath = Join-Path $Subject 'test/runtests.jl'
     $arguments = @('--startup-file=no', '--history-file=no', '--threads=1',
-        ('--project="{0}"' -f $Subject), ('"{0}"' -f $testPath))
+        ('--project="{0}"' -f $Subject), ('"{0}"' -f $Driver), ('"{0}"' -f $Subject))
     $child = Start-Process $julia -ArgumentList $arguments -WorkingDirectory $Subject -PassThru `
         -RedirectStandardOutput (Join-Path $OutputDirectory 'test.stdout.txt') `
         -RedirectStandardError (Join-Path $OutputDirectory 'test.stderr.txt')
@@ -47,6 +53,14 @@ try {
         $exitCode = $child.ExitCode
     } else {
         $metadata.childTimedOut = $true
+        [string]$progress = Get-Content (Join-Path $OutputDirectory 'test.stdout.txt') -Raw
+        $metadata.resolverReached = $progress.Contains('[runtests] include START: host_resolvers_tests.jl')
+        $metadata.resolverCompleted = $progress.Contains('[runtests] include DONE: host_resolvers_tests.jl')
+        $metadata.deadlineClassification = if ($metadata.resolverReached -and -not $metadata.resolverCompleted) {
+            'Diagnostic deadline during resolver tests; inspect native stacks before attributing cause.'
+        } else {
+            'Diagnostic deadline outside resolver tests; does not establish a resolver shutdown hang.'
+        }
         $cdb = Get-ChildItem 'C:\Program Files (x86)\Windows Kits' -Filter cdb.exe -Recurse -ErrorAction SilentlyContinue |
             Where-Object { $_.Directory.Name -eq $Architecture } | Select-Object -First 1
         if (-not $cdb) { throw "No matching $Architecture CDB debugger is installed." }
@@ -83,6 +97,14 @@ try {
         Set-Content (Join-Path $OutputDirectory 'subject.diff.txt')
     $metadata.sourceUnchanged = $LASTEXITCODE -eq 0
     if (-not $metadata.sourceUnchanged) { $exitCode = 1 }
+    if ($trackedFiles) {
+        $hashesAfter = @($trackedFiles | ForEach-Object {
+            [ordered]@{ path = $_; sha256 = (Get-FileHash (Join-Path $Subject $_) -Algorithm SHA256).Hash }
+        }) | ConvertTo-Json
+        $hashesAfter | Set-Content (Join-Path $OutputDirectory 'subject.hashes.after.json')
+        $metadata.sourceAndTestHashesUnchanged = $hashesBefore -ceq $hashesAfter
+        if (-not $metadata.sourceAndTestHashesUnchanged) { $exitCode = 1 }
+    }
     $metadata.completedAt = [DateTime]::UtcNow.ToString('o')
     $metadata | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $OutputDirectory 'metadata.json')
     Get-Content (Join-Path $OutputDirectory 'test.stdout.txt') -ErrorAction SilentlyContinue
