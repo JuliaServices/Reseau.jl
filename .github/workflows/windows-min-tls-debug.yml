@@ -1,4 +1,4 @@
-name: Windows Resolver Prefix Native Diagnostic
+name: Windows Native Thread Runtime Diagnostic
 
 on:
   workflow_dispatch:
@@ -7,50 +7,57 @@ permissions:
   contents: read
 
 jobs:
-  resolver:
-    name: Julia 1.13.1 - windows-latest - ${{ matrix.arch }} - resolver-prefix
+  runtime:
+    name: Julia 1.13.1 - windows-latest - ${{ matrix.arch }} - ${{ matrix.mode }}
     runs-on: windows-latest
     timeout-minutes: 8
     strategy:
       fail-fast: false
       matrix:
-        arch: [x86, x64]
+        include:
+          - arch: x86
+            mode: exception
+          - arch: x86
+            mode: no-exception
+          - arch: x64
+            mode: exception
     env:
       JULIA_NUM_THREADS: 1
-      RESEAU_RUN_NETWORK_TESTS: '1'
-      RESEAU_RUN_TLS_TESTS: '1'
       JULIA_PKG_PRECOMPILE_AUTO: '0'
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
           path: diagnostic
-      - uses: actions/checkout@v4
-        with:
-          ref: 159e02da68024fd6421481dc4b8a020d9d20ead6
-          persist-credentials: false
-          path: subject
       - uses: julia-actions/setup-julia@v2
         with:
           version: '1.13.1'
           arch: ${{ matrix.arch }}
-      - name: Instantiate unchanged subject
-        timeout-minutes: 3
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
+      - name: Compile native thread trampoline
         shell: pwsh
-        run: julia --project=subject --startup-file=no -e 'using Pkg; Pkg.instantiate(; allow_autoprecomp=false)'
-      - name: Run unchanged ordered test prefix with bounded native capture
+        run: |
+          New-Item -ItemType Directory -Force capture | Out-Null
+          Copy-Item diagnostic/.github/scripts/windows-runtime-threads.* capture
+          cl /nologo /LD /O2 /W4 /WX diagnostic/.github/scripts/windows-runtime-threads.c /link /out:capture/runtime-threads.dll
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dumpbin /exports capture/runtime-threads.dll | Set-Content capture/native-exports.txt
+      - name: Run runtime-only control with bounded native capture
         shell: pwsh
         run: >-
-          & diagnostic/.github/scripts/windows-resolver-diagnostic.ps1
-          -Subject (Resolve-Path subject).Path
-          -Driver (Resolve-Path diagnostic/.github/scripts/windows-resolver-prefix.jl).Path
+          & diagnostic/.github/scripts/windows-runtime-threads.ps1
+          -Driver (Resolve-Path diagnostic/.github/scripts/windows-runtime-threads.jl).Path
+          -Library (Resolve-Path capture/runtime-threads.dll).Path
           -OutputDirectory (Join-Path $env:GITHUB_WORKSPACE 'capture')
           -Architecture '${{ matrix.arch }}'
+          -Mode '${{ matrix.mode }}'
       - name: Upload native capture and exact source metadata
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: resolver-prefix-julia-1.13.1-${{ matrix.arch }}
+          name: runtime-julia-1.13.1-${{ matrix.arch }}-${{ matrix.mode }}
           path: capture
           if-no-files-found: error
           retention-days: 7
