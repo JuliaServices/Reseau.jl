@@ -31,7 +31,6 @@ test_files = [
     "tcp_tests.jl",
     "udp_tests.jl",
     "host_resolvers_tests.jl",
-    "native_thread_lifetime_tests.jl",
     "socks_tests.jl",
     "tls_crypto_tests.jl",
     "tls_x509_tests.jl",

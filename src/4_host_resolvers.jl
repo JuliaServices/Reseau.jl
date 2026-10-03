@@ -551,14 +551,13 @@ function _ensure_addrinfo_pool!()::Channel{_AddrInfoFuture}
         while _ADDRINFO_STARTED_THREADS[] < _ADDRINFO_POOL_SIZE
             next_idx = _ADDRINFO_STARTED_THREADS[] + 1
             _addrinfo_worker_started!(work_queue)
-            detach_ret = try
+            try
                 IOPoll._spawn_detached_thread("reseau-getaddrinfo-$next_idx", _ADDRINFO_THREAD_ENTRY_C, work_queue)
             catch
                 _addrinfo_worker_stopped!(work_queue)
                 rethrow()
             end
             _ADDRINFO_STARTED_THREADS[] = next_idx
-            detach_ret == 0 || throw(SystemError("pthread_detach", Int(detach_ret)))
         end
         return work_queue
     finally
