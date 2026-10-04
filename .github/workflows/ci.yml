@@ -12,12 +12,12 @@ jobs:
       fail-fast: false
       matrix:
         threads: [1, 2]
-        label: [release-1.5.0, current-main]
+        label: [unchanged-main, writable-fixture]
         include:
-          - label: release-1.5.0
-            revision: 5769fdd78afc918bd4892388b90961c28a71f1b7
-          - label: current-main
+          - label: unchanged-main
             revision: 50ca2655561fff36f2dca6c5987b110e3d829c7b
+          - label: writable-fixture
+            revision: 94ae6e30551009be0129716726e1dfe07221649c
     env:
       JULIA_NUM_THREADS: ${{ matrix.threads }}
       JULIA_PKG_PRECOMPILE_AUTO: '1'
@@ -50,6 +50,29 @@ jobs:
           info = Pkg.dependencies()[UUID("802f3686-a58f-41ce-bb0c-3c43c75bba36")]
           @show info
           Pkg.status(; mode=Pkg.PKGMODE_MANIFEST)
+          fixture = joinpath(dirname(pathof(Reseau)), "..", "test", "resources", "combined_ca", "ca_b", "ca_b.crt")
+          println("Installed certificate mode: ", string(stat(fixture).mode; base=8))
+          mktempdir() do dir
+              copied = joinpath(dir, "copied.pem")
+              writable = joinpath(dir, "writable.pem")
+              cp(fixture, copied)
+              println("Copied certificate mode: ", string(stat(copied).mode; base=8))
+              @assert stat(copied).mode & 0o222 == 0
+              try
+                  write(copied, read(fixture), "\n")
+                  error("Expected the read-only copy to reject writes")
+              catch err
+                  @assert err isa SystemError && err.errnum == Base.Libc.EACCES
+                  println("COPY_REJECTS_WRITE_WITH_EACCES")
+              finally
+                  chmod(copied, 0o600)
+              end
+              write(writable, read(fixture))
+              @assert read(writable) == read(fixture)
+              @assert write(writable, "updated") == 7
+              @assert read(writable, String) == "updated"
+              println("WRITABLE_COPY_CONTROL_COMPLETE")
+          end
           println("FRESH_PRECOMPILE_COMPLETE")
           Pkg.test("Reseau"; coverage=false)
           println("FULL_SUITE_COMPLETE")
