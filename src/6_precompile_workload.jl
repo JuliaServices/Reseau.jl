@@ -9,6 +9,10 @@ const ND = HostResolvers
 const NU = UDP
 const TL = TLS
 
+# 2026-05-01 UTC lies inside every bundled certificate validity window.
+# Freeze only X.509 verification time, never deadlines or session-ticket age.
+const _PC_TLS_VERIFICATION_TIME_S = Int64(1_777_593_600)
+
 @inline function _pc_runtime_supported()::Bool
     return Sys.isapple() || Sys.islinux() || Sys.iswindows()
 end
@@ -336,11 +340,13 @@ function _pc_run_tcp_workload!()
         server = NC.accept(listener)
         NC.set_deadline!(client, _pc_deadline_ns())
         NC.set_deadline!(server, _pc_deadline_ns())
+        NC.tryread!(server, Vector{UInt8}(undef, 1)) === nothing || throw(ArgumentError("tcp workload expected no pending input"))
         payload = UInt8[0x41, 0x42, 0x43]
         written = write(client, payload)
         written == length(payload) || throw(ArgumentError("tcp workload expected 3-byte write"))
         recv_buf = Vector{UInt8}(undef, length(payload))
         _pc_read_exact!(server, recv_buf) == length(payload) || throw(EOFError())
+        NC.tryread!(server, Vector{UInt8}(undef, 1)) === nothing || throw(ArgumentError("tcp workload expected input drained"))
     finally
         try
             server === nothing || close(server)
@@ -439,6 +445,7 @@ function _pc_tls_server_config(
     max_version::Union{Nothing, UInt16} = TL.TLS1_3_VERSION,
 )::TL.Config
     return TL.Config(
+        _verification_time_s = _PC_TLS_VERIFICATION_TIME_S,
         verify_peer = false,
         cert_file = cert_path,
         key_file = key_path,
@@ -474,6 +481,7 @@ function _pc_tls_client_config(;
     max_version::Union{Nothing, UInt16} = TL.TLS1_3_VERSION,
 )::TL.Config
     return TL.Config(
+        _verification_time_s = _PC_TLS_VERIFICATION_TIME_S,
         verify_peer = verify_peer,
         verify_hostname = verify_hostname,
         server_name = server_name,
@@ -607,7 +615,7 @@ Drive one public-API TLS roundtrip and return the post-handshake connection
 state snapshots observed by both peers.
 
 The helper exercises `TLS.listen`, `TLS.accept`, `TLS.connect`, `TLS.handshake!`,
-`read`, `write`, `eof`, and `connection_state` so the canonical workload stays
+`read`, `write`, `eof`, `tryread!`, and `connection_state` so the canonical workload stays
 anchored at the supported public surface.
 """
 function _pc_run_tls_roundtrip_states!(
@@ -645,8 +653,10 @@ function _pc_run_tls_roundtrip_states!(
         )
         TL.set_deadline!(client, _pc_deadline_ns())
         read(client, 1) == UInt8[0x41] || throw(ArgumentError("TLS precompile workload expected server byte"))
+        TL.tryread!(client, Vector{UInt8}(undef, 1)) === nothing || throw(ArgumentError("TLS precompile workload expected no pending input"))
         write(client, UInt8[0x51]) == 1 || throw(ArgumentError("TLS precompile workload expected client ack write"))
         eof(client) || throw(ArgumentError("TLS precompile workload expected connection EOF"))
+        TL.tryread!(client, Vector{UInt8}(undef, 1)) === 0 || throw(ArgumentError("TLS precompile workload expected tryread! EOF"))
         client_state = TL.connection_state(client)
         _pc_wait_task_done(server_task::Task)
         return _PCTLSRoundtripStates(client_state, fetch(server_task::Task)::TL.ConnectionState)

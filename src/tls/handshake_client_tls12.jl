@@ -473,6 +473,7 @@ function _tls12_read_server_flight!(
         verify_peer = config.verify_peer,
         verify_hostname = config.verify_hostname,
         ca_file = config.verify_peer ? _effective_ca_file(config; is_server = false) : nothing,
+        verification_time_s = config._verification_time_s,
     )
     _tls12_server_certificate_matches_suite!(state.cipher_suite, pubkey)
 

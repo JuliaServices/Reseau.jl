@@ -1035,8 +1035,10 @@ function _tls_parse_der_certificate_info(cert_der::AbstractVector{UInt8})::_TLSC
     _tls_parse_certificate_signature_spec(cert_der, tbs_sig_alg_start, tbs_sig_alg_end)
     cert_der[tbs_sig_alg_start:tbs_sig_alg_end] == cert_der[outer_sig_alg_start:outer_sig_alg_end] ||
         throw(ArgumentError("tls: mismatched X.509 certificate signature algorithms"))
+    issuer_tlv_start = tbs_pos
     issuer_start, issuer_end, tbs_pos = _asn1_expect_tlv(cert_der, tbs_pos, _ASN1_SEQUENCE, tbs_end)
     validity_start, validity_end, tbs_pos = _asn1_expect_tlv(cert_der, tbs_pos, _ASN1_SEQUENCE, tbs_end)
+    subject_tlv_start = tbs_pos
     subject_start, subject_end, tbs_pos = _asn1_expect_tlv(cert_der, tbs_pos, _ASN1_SEQUENCE, tbs_end)
     common_name = _tls_parse_subject_common_name(cert_der, subject_start, subject_end)
     spki_start, spki_end, tbs_pos = _asn1_expect_tlv(cert_der, tbs_pos, _ASN1_SEQUENCE, tbs_end)
@@ -1129,8 +1131,11 @@ function _tls_parse_der_certificate_info(cert_der::AbstractVector{UInt8})::_TLSC
     end
     return _TLSCertificateInfo(
         Vector{UInt8}(cert_der),
-        copy(@view cert_der[subject_start:subject_end]),
-        copy(@view cert_der[issuer_start:issuer_end]),
+        # TLS CertificateRequest names include the complete DER Name, not
+        # only the SEQUENCE contents. Keep RawSubject/RawIssuer in that same
+        # representation for both chain building and client-CA selection.
+        copy(@view cert_der[subject_tlv_start:subject_end]),
+        copy(@view cert_der[issuer_tlv_start:issuer_end]),
         common_name,
         dns_names,
         ip_addresses,

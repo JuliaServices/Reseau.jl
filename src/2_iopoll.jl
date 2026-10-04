@@ -15,7 +15,7 @@ handles directly.
 """
 module IOPoll
 
-using ..Reseau: ByteMemory, MutableByteBuffer, @gcsafe_ccall
+using ..Reseau: ByteMemory, MutableByteBuffer, @gcsafe_ccall, @gcsafe_win32_ccall, @win32_cconv
 using ..Reseau.SocketOps
 
 include("iopoll/types.jl")

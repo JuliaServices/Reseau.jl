@@ -52,11 +52,13 @@ Base.read!(::Conn, ::Vector{UInt8})
 Base.readbytes!(::Conn, ::Vector{UInt8}, ::Integer)
 Base.readavailable(::Conn)
 Base.eof(::Conn)
+tryread!
 Base.isopen(::Conn)
 Base.isopen(::Listener)
 Base.write(::Conn, ::AbstractVector{UInt8})
 Base.close(::Conn)
 Base.close(::Listener)
+NetClosingError
 closeread
 Base.closewrite(::Conn)
 ```
@@ -155,6 +157,7 @@ Base.read!(::Conn, ::Vector{UInt8})
 Base.readbytes!(::Conn, ::Vector{UInt8}, ::Integer)
 Base.readavailable(::Conn)
 Base.eof(::Conn)
+tryread!
 Base.isopen(::Conn)
 Base.isopen(::Listener)
 Base.write(::Conn, ::AbstractVector{UInt8})

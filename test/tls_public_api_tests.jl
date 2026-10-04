@@ -662,16 +662,20 @@ end
                     addr = NC.addr(listener)::NC.SocketAddrV4
                     server_task = errormonitor(Threads.@spawn begin
                         server_tcp = NC.accept(listener)
-                        server_tls = TL.server(server_tcp, _tls_server_config(
-                            handshake_timeout_ns = 2_000_000_000,
-                        ))
+                        server_tls = nothing
                         try
+                            server_tls = TL.server(server_tcp, _tls_server_config(
+                                handshake_timeout_ns = 2_000_000_000,
+                            ))
                             TL.handshake!(server_tls)
                             return nothing
                         catch ex
                             return ex
                         finally
+                            # Closing the socket on any failure unblocks the
+                            # client's record read; a stranded read hangs the suite.
                             _tls_close_quiet!(server_tls)
+                            _tls_close_quiet!(server_tcp)
                         end
                     end)
 
@@ -733,14 +737,14 @@ end
                     server_task = errormonitor(Threads.@spawn begin
                         server_tcp = NC.accept(listener)
                         try
-                            record = UInt8[]
+                            record_state = TL._TLS12NativeState()
                             TL._tls_read_wire_record!(
                                 server_tcp,
-                                record,
+                                record_state,
                                 TL._TLS12_MAX_CIPHERTEXT,
                                 UInt16(0),
                             )
-                            client_hello = TL._unmarshal_client_hello(copy(@view record[6:end]))
+                            client_hello = TL._unmarshal_client_hello(copy(@view record_state.record_buffer[6:end]))
                             client_hello === nothing && error("failed to parse mixed ClientHello")
                             server_hello = TL._ServerHelloMsg()
                             server_hello.vers = TL.TLS1_2_VERSION

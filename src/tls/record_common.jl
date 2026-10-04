@@ -147,36 +147,34 @@ function _tls_write_transport!(tcp::TCP.Conn, payload::AbstractVector{UInt8})::N
     return nothing
 end
 
-function _tls_read_record_bytes!(
-        tcp::TCP.Conn,
-        ptr::Ptr{UInt8},
-        nbytes::Int,
-        allow_boundary_eof::Bool,
-        root=nothing,
-    )::Nothing
-    offset = 0
-    while offset < nbytes
+# Keep progress in the connection state so an incomplete nonblocking read can
+# be resumed by either tryread! or an ordinary blocking read.
+function _tls_fill_record!(tcp::TCP.Conn, state, target::Int, block::Bool)::Bool
+    buf = state.record_buffer
+    resize!(buf, target)
+    while state.record_received < target
+        offset = state.record_received
         n = try
-            TCP._read_some!(tcp, ptr + offset, nbytes - offset, root)
+            GC.@preserve buf begin
+                block ? TCP._read_some!(tcp, pointer(buf, offset + 1), target - offset, buf) :
+                        TCP._tryread!(tcp, pointer(buf, offset + 1), target - offset)
+            end
         catch err
-            err isa IOPoll.DeadlineExceededError &&
-                throw(_TLSTransportDeadlineError(_TLS_IO_READ, err))
+            err isa IOPoll.DeadlineExceededError && throw(_TLSTransportDeadlineError(_TLS_IO_READ, err))
             if err isa EOFError
-                allow_boundary_eof && offset == 0 && rethrow()
+                offset == 0 && rethrow()
                 throw(_TLSUnexpectedEOFError())
             end
             rethrow()
         end
-        # Stream TCP reads throw EOFError for a zero-byte peer close, but keep
-        # this helper correct for any future transport with Reader-like zero
-        # progress semantics.
+        n === nothing && return false
         if n == 0
-            allow_boundary_eof && offset == 0 && throw(EOFError())
+            offset == 0 && throw(EOFError())
             throw(_TLSUnexpectedEOFError())
         end
-        offset += n
+        state.record_received += n
     end
-    return nothing
+    return true
 end
 
 @inline function _tls_wire_record_version(negotiated_version::UInt16)::UInt16
@@ -210,30 +208,19 @@ end
 
 function _tls_read_wire_record!(
         tcp::TCP.Conn,
-        record_buffer::Vector{UInt8},
+        state,
         max_ciphertext::Int,
-        negotiated_version::UInt16,
-    )::Int
-    resize!(record_buffer, 5)
-    GC.@preserve record_buffer _tls_read_record_bytes!(
-        tcp,
-        pointer(record_buffer),
-        5,
-        true,
-        record_buffer,
-    )
+        negotiated_version::UInt16;
+        block::Bool = true,
+    )::Union{Int, Nothing}
+    if state.record_received < 5
+        _tls_fill_record!(tcp, state, 5, block) || return nothing
+    end
+    record_buffer = state.record_buffer
     _tls_validate_record_header!(record_buffer, negotiated_version)
     payload_len = (Int(record_buffer[4]) << 8) | Int(record_buffer[5])
     payload_len <= max_ciphertext || _tls_fail(_TLS_ALERT_RECORD_OVERFLOW, "tls: received oversized TLS record")
-    resize!(record_buffer, 5 + payload_len)
-    if payload_len != 0
-        GC.@preserve record_buffer _tls_read_record_bytes!(
-            tcp,
-            pointer(record_buffer, 6),
-            payload_len,
-            false,
-            record_buffer,
-        )
-    end
+    _tls_fill_record!(tcp, state, 5 + payload_len, block) || return nothing
+    state.record_received = 0
     return payload_len
 end

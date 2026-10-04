@@ -17,8 +17,9 @@ end
 const _TLS_SESSION_TICKET_KEY_NAME_LEN = 16
 const _TLS_SESSION_TICKET_KEY_SECRET_LEN = 32
 const _TLS_SESSION_TICKET_NONCE_LEN = 12
-const _TLS_SESSION_TICKET_KEY_ROTATION_NS = Int64(24 * 60 * 60 * 1_000_000_000)
-const _TLS_SESSION_TICKET_KEY_LIFETIME_NS = Int64(7 * 24 * 60 * 60 * 1_000_000_000)
+# `Int` is 32 bits on i686; the Int64 factor keeps the nanosecond product from wrapping.
+const _TLS_SESSION_TICKET_KEY_ROTATION_NS = 24 * 60 * 60 * Int64(1_000_000_000)
+const _TLS_SESSION_TICKET_KEY_LIFETIME_NS = 7 * 24 * 60 * 60 * Int64(1_000_000_000)
 
 mutable struct _TLSSessionTicketKey
     name::Vector{UInt8}

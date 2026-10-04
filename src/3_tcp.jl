@@ -37,6 +37,18 @@ underlying poller timeout type so downstream code does not need to depend on
 const DeadlineExceededError = IOPoll.DeadlineExceededError
 
 """
+    NetClosingError
+
+Raised when a TCP operation encounters a locally closed connection or listener,
+including a pending operation woken by `close` from another task.
+
+Catch `TCP.NetClosingError` during deliberate connection or listener shutdown.
+This aliases the underlying poller exception without requiring callers to use
+`Reseau.IOPoll`. Peer EOF and deadline expiry have separate error behavior.
+"""
+const NetClosingError = IOPoll.NetClosingError
+
+"""
     connect
 
 Connect a TCP client using either a concrete `SocketAddr` or a string-address
@@ -862,6 +874,42 @@ Report whether the peer has cleanly closed the read side of the connection.
 function Base.eof(conn::Conn)::Bool
     isopen(conn) || return true
     return _peek_eof(conn)
+end
+
+"""
+    tryread!(conn, buf) -> Union{Int, Nothing}
+
+Copy currently available bytes into a nonempty contiguous mutable byte buffer.
+Return the byte count, `0` at EOF (including a locally closed connection), or
+`nothing` if no bytes are ready or another reader owns the connection. Never
+wait for network input or for the read lock. A short read is not EOF.
+
+Read deadlines and transport errors apply as for ordinary reads. The caller
+owns the returned bytes; subsequent reads continue after them. Use `read!` or
+`readbytes!` when waiting for input is intended.
+"""
+function tryread!(conn::Conn, buf::MutableByteBuffer)::Union{Int, Nothing}
+    Base.require_one_based_indexing(buf)
+    isempty(buf) && throw(ArgumentError("tryread! requires a nonempty buffer"))
+    GC.@preserve buf return _tryread!(conn, pointer(buf), length(buf))
+end
+
+function _tryread!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Union{Int, Nothing}
+    isopen(conn) || return 0
+    pfd = conn.fd.pfd
+    IOPoll._fdlock_rwlock!(pfd.fdlock, true, false) || return nothing
+    try
+        IOPoll.prepareread(pfd.pd, pfd.is_file, false)
+        # All TCP descriptors, including IOCP sockets, are nonblocking. The
+        # read lock excludes overlapped reads while this synchronous recv runs.
+        n = SocketOps.recv_from!(pfd.sysfd, ptr, Csize_t(min(nbytes, 1 << 30)))
+        n >= 0 && return Int(n)
+        errno = SocketOps.last_error()
+        errno == Int32(Base.Libc.EAGAIN) && return nothing
+        throw(SystemError("recv", Int(errno)))
+    finally
+        IOPoll._fd_read_unlock!(pfd)
+    end
 end
 
 """

@@ -384,6 +384,7 @@ function _tls12_select_server_parameters!(state::_TLS12ServerHandshakeState, con
                                     client_certificates;
                                     verify_peer = true,
                                     ca_file = _effective_ca_file(config; is_server = true),
+                                    verification_time_s = config._verification_time_s,
                                 )
                             end
                         if session_compatible
@@ -576,6 +577,7 @@ function _tls12_read_client_certificate!(
             state.client_certificate.certificates;
             verify_peer,
             ca_file = _effective_ca_file(config; is_server = true),
+            verification_time_s = config._verification_time_s,
         )
     else
         _tls_parse_der_certificate_info(state.client_certificate.certificates[1]).public_key

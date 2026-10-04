@@ -1114,6 +1114,22 @@ end
         end
     end
 
+    @testset "session ticket key rotation constants are 64-bit on every platform" begin
+        @test TL12N._TLS_SESSION_TICKET_KEY_ROTATION_NS == 24 * 60 * 60 * Int64(1_000_000_000)
+        @test TL12N._TLS_SESSION_TICKET_KEY_LIFETIME_NS == 7 * 24 * 60 * 60 * Int64(1_000_000_000)
+        @test TL12N._TLS_SESSION_TICKET_KEY_ROTATION_NS > 0
+        @test TL12N._TLS_SESSION_TICKET_KEY_LIFETIME_NS > 0
+
+        # A fresh key stays active across calls; the first call creates it, the second reuses it.
+        config = _tls12_server_config()
+        first_keys = TL12N._tls_active_session_ticket_keys(config)
+        second_keys = TL12N._tls_active_session_ticket_keys(config)
+        @test length(first_keys) == 1
+        @test length(second_keys) == 1
+        @test first_keys[1].name == second_keys[1].name
+        @test first_keys[1].created_at_ns == second_keys[1].created_at_ns
+    end
+
     @testset "TLS 1.2 server refuses resumption once the original secret is too old" begin
         config = _tls12_server_config()
         now_s = UInt64(floor(time()))

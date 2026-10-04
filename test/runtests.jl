@@ -26,6 +26,7 @@ test_files = [
     "timing_semantics_tests.jl",
     "iopoll_runtime_tests.jl",
     "internal_poll_tests.jl",
+    "deadline_heap_tests.jl",
     "socket_ops_tests.jl",
     "tcp_tests.jl",
     "udp_tests.jl",
@@ -39,7 +40,9 @@ test_files = [
     "tls_native_tls12_tests.jl",
     "tls_native_tls13_tests.jl",
     "tls_config_tests.jl",
+    "tls_precompile_time_tests.jl",
     "tls_public_api_tests.jl",
+    "tryread_tests.jl",
     "trim_compile_tests.jl",
 ]
 

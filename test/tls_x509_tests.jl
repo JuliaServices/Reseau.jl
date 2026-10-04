@@ -155,6 +155,25 @@ end
         @test header_certificates[1] == certificates[1]
     end
 
+    @testset "certificate authorities use complete DER distinguished names" begin
+        client_der = TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CLIENT_CERT_PATH))[1]
+        ca_der = TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CA_PATH))[1]
+        # OpenSSL asn1parse locates the CA Name at offset 50, length 38,
+        # including the SEQUENCE tag and length. Do not derive the expected
+        # wire value from the parser under test: that hid the original bug.
+        ca_name = hex2bytes("30243122302006035504030c19526573656175204e617469766520544c532054657374204341")
+        @test client_der[51:88] == ca_name
+        @test TLX._tls_parse_der_certificate_info(client_der).issuer_raw == ca_name
+        @test TLX._tls_parse_der_certificate_info(ca_der).subject_raw == ca_name
+        @test TLX._tls_chain_signed_by_acceptable_ca([client_der], [ca_name])
+        wrong_name = copy(ca_name)
+        wrong_name[end] = UInt8('B')
+        @test !TLX._tls_chain_signed_by_acceptable_ca([client_der], [wrong_name])
+        @test !TLX._tls_chain_signed_by_acceptable_ca([client_der], [ca_name[3:end]])
+        @test TLX._tls_chain_signed_by_acceptable_ca([client_der], [wrong_name, ca_name])
+        @test TLX._tls_chain_signed_by_acceptable_ca([client_der], Vector{UInt8}[])
+    end
+
     @testset "parsed certificate info includes SAN DNS and IP data" begin
         cert = _tls_cert_info(_TLS_CERT_PATH)
         @test cert.common_name == "localhost"

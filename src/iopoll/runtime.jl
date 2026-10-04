@@ -73,6 +73,9 @@ end
 Start a detached native OS thread that runs `thread_fn(::Ptr{Cvoid})`.
 This intentionally does not keep a join handle; shutdown is coordinated via
 poller state (`running`) and backend wakeups.
+
+Throws only if no thread was started. The thread receives `arg` as a raw
+pointer, so the caller must keep `arg` rooted until the thread no longer uses it.
 """
 function _spawn_detached_thread(
         name::AbstractString,
@@ -82,13 +85,26 @@ function _spawn_detached_thread(
     _ = name
     thread_arg = arg === nothing ? C_NULL : pointer_from_objref(arg)
     @static if Sys.iswindows()
-        handle = ccall(
+        # NOTE (32-bit Windows): `LPTHREAD_START_ROUTINE` is `__stdcall`, while
+        # `@cfunction` emits a cdecl callback and cannot be asked for anything
+        # else -- codegen builds the thunk with `CallingConv::C` and discards
+        # the convention slot of `Expr(:cfunction, ...)`.
+        #
+        # This is an ABI nonconformance with no known observable effect. Both
+        # conventions pass arguments the same way on i686, so `thread_arg`
+        # arrives intact; they differ only in who pops, and the entry point
+        # returns straight into the thread-exit thunk, which never relies on the
+        # restored stack pointer. It is invoked once per thread, so nothing
+        # accumulates. Fixing it properly means not needing a stdcall callback
+        # at all -- `uv_thread_create` takes a cdecl `uv_thread_cb` and would
+        # also collapse this branch and the pthread one into a single path.
+        handle = @win32_cconv ccall(
             (:CreateThread, "kernel32"), Ptr{Cvoid},
             (Ptr{Cvoid}, Csize_t, Ptr{Cvoid}, Ptr{Cvoid}, UInt32, Ptr{UInt32}),
             C_NULL, Csize_t(0), thread_fn[], thread_arg, UInt32(0), C_NULL,
         )
         handle == C_NULL && throw(ArgumentError("error creating poller thread"))
-        _ = ccall((:CloseHandle, "kernel32"), Int32, (Ptr{Cvoid},), handle)
+        _ = @win32_cconv ccall((:CloseHandle, "kernel32"), Int32, (Ptr{Cvoid},), handle)
     else
         pthread_ref = Ref{_pthread_t}(0)
         create_ret = ccall(
@@ -97,8 +113,9 @@ function _spawn_detached_thread(
             pthread_ref, C_NULL, thread_fn[], thread_arg,
         )
         create_ret != 0 && throw(SystemError("pthread_create", Int(create_ret)))
-        detach_ret = ccall(:pthread_detach, Cint, (_pthread_t,), pthread_ref[])
-        detach_ret != 0 && throw(SystemError("pthread_detach", Int(detach_ret)))
+        # Detaching a joinable thread created just above cannot fail, and a
+        # throw here would tell callers no thread started while it is running.
+        _ = ccall(:pthread_detach, Cint, (_pthread_t,), pthread_ref[])
     end
     return nothing
 end
@@ -183,6 +200,7 @@ function shutdown!()
             append!(registrations, values(state.registrations))
             _discard_stale_time_entries_locked!(state)
             for entry in state.time_heap
+                _time_set_index!(entry, 0)
                 entry.kind == TimeEntryKind.TIMER || continue
                 push!(timers, entry.timer::TimerState)
             end
@@ -304,7 +322,10 @@ function deregister!(fd::SysFD)
     try
         (@atomic :acquire state.running) || return nothing
         registration = pop!(state.registrations, sysfd, nothing)
-        registration === nothing || delete!(state.registrations_by_token, registration.token)
+        if registration !== nothing
+            delete!(state.registrations_by_token, registration.token)
+            _remove_deadlines_locked!(state, registration.pollstate)
+        end
         errno = _backend_close_fd!(state, sysfd)
     finally
         unlock(state.lock)
@@ -345,6 +366,7 @@ function deregister!(pd::PollState)
         registered === current || return nothing
         delete!(state.registrations, pd.sysfd)
         delete!(state.registrations_by_token, current.token)
+        _remove_deadlines_locked!(state, pd)
         errno = _backend_close_fd!(state, pd.sysfd)
     finally
         unlock(state.lock)
@@ -359,8 +381,14 @@ end
 
 Backend hook invoked immediately before waiting so platforms that need explicit
 arming (such as IOCP readiness probes) can submit a wait operation.
+
+Backends that keep readiness interest armed for the life of a registration
+(epoll, kqueue) declare `_BACKEND_ARMS_WAITERS = false`, and this returns
+without touching the poller: every wait would otherwise take the shared poller
+lock and look the registration up again only to call a no-op hook.
 """
 function arm_waiter!(registration::Registration, mode::PollMode.T)
+    _BACKEND_ARMS_WAITERS || return nothing
     _mode_is_empty(mode) && return nothing
     isassigned(POLLER) || return nothing
     state = POLLER[]

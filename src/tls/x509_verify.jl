@@ -542,6 +542,7 @@ function _tls_verify_peer_certificate_chain!(
     certificates::Vector{Vector{UInt8}},
     store::_TLSTrustStore,
     purpose::AbstractString,
+    now_s::Int64 = Int64(floor(time())),
 )::_TLSCertificateInfo
     isempty(certificates) && _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: received empty certificates message")
     parsed = _TLSCertificateInfo[]
@@ -554,7 +555,6 @@ function _tls_verify_peer_certificate_chain!(
         _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: malformed X.509 certificate ($(_tls_parse_error_detail(ex)))")
     end
     leaf = parsed[1]
-    now_s = Int64(floor(time()))
     _tls_certificate_valid_now(leaf, now_s) ||
         _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: $(_tls_certificate_current_time_message(leaf))")
     _tls_certificate_usage_permitted(leaf, purpose) ||
@@ -587,6 +587,7 @@ function _tls_verify_certificate_chain(
     verify_peer::Bool,
     verify_hostname::Bool,
     ca_file::Union{Nothing, String},
+    verification_time_s::Union{Nothing, Int64} = nothing,
     purpose::AbstractString,
     peer_name::AbstractString = "",
 )::_TLSPublicKey
@@ -599,7 +600,10 @@ function _tls_verify_certificate_chain(
             ex isa _TLSAlertError && rethrow()
             _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: failed to load CA roots")
         end
-        _tls_verify_peer_certificate_chain!(certificates, store, purpose)
+        _tls_verify_peer_certificate_chain!(
+            certificates, store, purpose,
+            verification_time_s === nothing ? Int64(floor(time())) : verification_time_s,
+        )
     else
         try
             _tls_parse_der_certificate_info(certificates[1])
@@ -689,6 +693,7 @@ function _tls13_verify_certificate_chain(
     verify_peer::Bool,
     verify_hostname::Bool,
     ca_file::Union{Nothing, String},
+    verification_time_s::Union{Nothing, Int64} = nothing,
     purpose::AbstractString,
     peer_name::AbstractString = "",
 )::_TLSPublicKey
@@ -697,6 +702,7 @@ function _tls13_verify_certificate_chain(
         verify_peer,
         verify_hostname,
         ca_file,
+        verification_time_s,
         purpose,
         peer_name,
     )
@@ -708,12 +714,14 @@ function _tls13_verify_server_certificate_chain(
     verify_peer::Bool,
     verify_hostname::Bool,
     ca_file::Union{Nothing, String},
+    verification_time_s::Union{Nothing, Int64} = nothing,
 )::_TLSPublicKey
     return _tls13_verify_certificate_chain(
         certificates;
         verify_peer,
         verify_hostname,
         ca_file,
+        verification_time_s,
         purpose = "ssl_server",
         peer_name = server_name,
     )
@@ -723,12 +731,14 @@ function _tls13_verify_client_certificate_chain(
     certificates::Vector{Vector{UInt8}};
     verify_peer::Bool,
     ca_file::Union{Nothing, String},
+    verification_time_s::Union{Nothing, Int64} = nothing,
 )::_TLSPublicKey
     return _tls13_verify_certificate_chain(
         certificates;
         verify_peer,
         verify_hostname = false,
         ca_file,
+        verification_time_s,
         purpose = "ssl_client",
     )
 end

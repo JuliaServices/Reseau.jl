@@ -1,98 +1,58 @@
-# Reseau Agent Notes (Go Rewrite)
+# Reseau Agent Notes
 
-This repository is in a full rewrite state.
+Reseau implements a native networking transport stack in Julia. The public
+entrypoints are the `TCP`, `UDP`, and `TLS` modules. Keep that surface small;
+internal pollers, socket operations, and resolver machinery stay internal.
 
-- Current active code lives in `src/`.
-- Archived pre-rewrite code lives in `src_old/`.
-- Current active tests live in `test/`.
-- Archived pre-rewrite tests live in `test_old/`.
+## Architecture and contracts
 
-## Rewrite Mandate
+- Implementation lives in `src/`; tests start at `test/runtests.jl`.
+- Use Go's networking stack as the reference for ownership, call ordering,
+  wait/unblock behavior, deadlines, and poller wakeups. A local Go checkout may
+  be available at `~/golang`; the relevant source paths are `src/runtime`,
+  `src/internal/poll`, `src/net`, and `src/crypto/tls`. Check the reference version
+  when investigating a semantic difference.
+- Use Base/stdlib `IO` behavior and Sockets signatures as public API references.
+  Implement socket and name-resolution operations with native calls; keep the
+  package independent of the `Sockets` stdlib internally.
+- Preserve supported public contracts. Resolve lifecycle and ownership problems
+  at their source instead of adding legacy API shims or wrapper layers.
+- Prefer direct arguments and keywords over thin option structs. Keep hot-path
+  fields concrete and avoid `Any` or unnecessary dynamic dispatch. Use `@atomic`
+  fields on mutable structs instead of introducing `Threads.Atomic`.
+- Support `AbstractVector{UInt8}` and views in buffer APIs where the contract
+  permits. Keep comments about current behavior and the reasons behind it.
 
-Reseau is being rewritten to mirror Go's networking stack architecture and semantics.
+## Validation
 
-Required reference source:
+CI in `.github/workflows/CI.yml` defines the current Julia versions, thread
+counts, platform matrix, and test switches. It covers Linux, macOS, Windows,
+and FreeBSD. Platform work follows the change's scope; there is no macOS-first
+migration gate.
 
-- `~/golang/src/runtime`
-- `~/golang/src/internal/poll`
-- `~/golang/src/net`
-- `~/golang/src/crypto/tls`
-
-All implementation work must directly reference Go's logical flow of:
-
-- data structures and ownership
-- function boundaries and call ordering
-- wait/unblock/deadline semantics
-- event loop behavior and wake mechanisms
-
-The intended public surface should stay small and explicit:
-
-- `TCP`
-- `TLS`
-
-Treat Base/stdlib behavior as a contract reference when shaping APIs, especially for `IO`, deadlines, and buffer-handling behavior, but do not depend on `Sockets` stdlib internally.
-
-## Hard Rules
-
-- No backwards compatibility layers.
-- No API shims for legacy Reseau interfaces.
-- No partial migration tricks that preserve old behavior.
-- Prefer semantic parity with Go over preserving old package behavior.
-- Do not add or rely on `Sockets` stdlib dependency; use native socket/name-resolution calls directly.
-- Delete dead code instead of preserving cruft during rewrites.
-- Avoid abstract fields, `Any`, and hot-path dynamic dispatch in new code.
-- Prefer direct args/kwargs over thin `XOptions` structs that only shuttle a few fields around.
-- Never use `Threads.Atomic` in new code.
-- Use `@atomic` fields on `mutable struct` types instead.
-- Do not check in `Manifest.toml`.
-
-## API and Design Preferences
-
-- Keep the public API centered on `TCP` and `TLS`; do not grow internal subsystems into user-facing surface area unless there is a strong reason.
-- Favor `IO`-like contracts and Base/Sockets signature parity for public connection APIs where it improves usability.
-- Prefer buffer APIs that can work with `AbstractVector{UInt8}` and view-like inputs where the implementation can support them cleanly.
-- Prefer root-cause simplification over adding extra wrapper types, callback adapters, or compatibility scaffolding.
-- Keep internal comments and docstrings focused on the current code and behavior, not on historical merge/refactor context.
-
-## Validation and Workflow Rules
-
-- No shortcuts: do not paper over lifecycle or correctness issues with fake timeouts, fake waits, stub behavior, or production code that exists only to quiet a test/compiler path.
-- Keep precompile and `--trim=safe` validation real and focused on main public entrypoints and real transport behavior.
-- Prefer fixing the actual root cause over permanent skips, narrow hacks, or temporary debug code left behind.
-- If a Linux CI job that normally finishes in a few minutes starts running much longer, assume it is hung and debug it accordingly.
-- When Windows work is in scope, aim for real parity and real entrypoint coverage, not Windows-only behavioral compromises, unless blocked by a documented Julia/compiler issue.
-- When a change affects companion packages or shared behavior, validate downstream packages as needed instead of relying on compatibility shims.
-- Leave user-owned untracked files, local probes, and working markdown plans alone unless explicitly asked to clean them up.
-- Action-item markdown files are often local working artifacts; do not commit them unless explicitly asked.
-
-## Phase Order
-
-The rewrite is currently macOS-first.
-
-If `golang-rewrite.md` is present in the checkout, treat it as the more detailed roadmap.
-
-- Phases 1-8: macOS-only implementation (kqueue/POSIX/TLS)
-- Phase 9: Linux + Windows expansion (epoll + IOCP)
-
-Do not start Linux/Windows implementation work before macOS phase gates are complete.
-
-## Current Test Entry Point
-
-The current test entrypoint is `test/runtests.jl`.
-
-At the time these notes were updated, it includes:
-
-- IOPoll runtime tests
-- internal poll tests
-- socket ops tests
-- TCP tests
-- host resolver tests
-- TLS tests
-- trim compile tests
-
-Run from repo root:
+Run the package tests from the repository root:
 
 ```sh
-cd "$(git rev-parse --show-toplevel)"
 JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate(); Pkg.test(; coverage=false)'
 ```
+
+For a focused test file, set `RESEAU_TEST_ONLY` to an exact filename listed in
+`test/runtests.jl`. Confirm the selected test actually runs. Use the CI thread
+and platform configurations when changes affect scheduling or native calls.
+
+- Exercise real transport behavior, close/wait/deadline interactions, and the
+  public entrypoints affected by a change. Precompile and `--trim=safe` checks
+  must reach those paths too.
+- Investigate tests that stop making progress. Use bounded diagnostics to find
+  the blocked operation; avoid fake waits, permanent skips, or production stubs
+  that merely suppress a test or compiler failure.
+- Keep platform semantics consistent. Document any Julia/compiler limitation and
+  the coverage it prevents. Validate affected downstream packages when shared
+  behavior changes.
+- Report local results and CI results separately, including skipped checks and
+  platform coverage that remains unverified.
+
+## Checkout hygiene
+
+Keep `Manifest.toml` out of commits. Preserve user-owned untracked files, local
+probes, and working plans. Commit action-item markdown only when requested.

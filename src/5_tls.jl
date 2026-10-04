@@ -276,6 +276,7 @@ end
 
 """
     Config(; ...)
+    Config(cfg::Config; ...)
 
 Reusable TLS configuration for client and server sessions.
 
@@ -301,6 +302,15 @@ Keyword arguments:
   handshake is running. Existing transport deadlines still win if they are earlier.
 - `min_version` / `max_version`: TLS protocol version bounds. Only TLS 1.2 and TLS 1.3
   are supported; `nothing` leaves the bound unset.
+
+Copy an existing config with `Config(cfg::Config; kwargs...)`, passing only the settings
+above that should change. The copy shares `cfg`'s session caches, session-ticket keys,
+and loaded local identity, so a per-connection copy that only sets `server_name` or
+`handshake_timeout_ns` keeps resuming sessions; changing `cert_file` or `key_file` gives
+the copy its own identity state. Use this instead of rebuilding a `Config` field by
+field: the private fields and their order are not part of the API. The copy keywords
+take exactly the field types (`String` rather than any `AbstractString`), which keeps a
+copy built from another config's fields resolvable under `--trim`.
 
 Returns a reusable immutable `Config`.
 
@@ -328,6 +338,8 @@ struct Config
     _server_session_cache12::_TLSSessionCache{_TLS12ServerSession}
     _client_identity::_TLSLocalIdentityState
     _server_identity::_TLSLocalIdentityState
+    # Fixture-only override; `nothing` selects the wall clock at each verification.
+    _verification_time_s::Union{Nothing, Int64}
 end
 
 # `policy` records which native handshake lane a `Conn` should enter before the
@@ -341,6 +353,41 @@ const _TLS_POLICY_AUTO = UInt8(3)
 @inline _is_tls13_policy(policy::UInt8) = policy == _TLS_POLICY_TLS13
 @inline _is_tls12_policy(policy::UInt8) = policy == _TLS_POLICY_TLS12
 @inline _is_tls_auto_policy(policy::UInt8) = policy == _TLS_POLICY_AUTO
+
+# Owned `String` storage for the name and path settings so shared configs do not depend
+# on caller-owned string buffers or views. Certificate and key paths are made absolute.
+@inline function _config_owned_paths(
+        server_name::Union{Nothing, AbstractString},
+        cert_file::Union{Nothing, AbstractString},
+        key_file::Union{Nothing, AbstractString},
+        ca_file::Union{Nothing, AbstractString},
+        client_ca_file::Union{Nothing, AbstractString},
+    )
+    return (
+        server_name === nothing ? nothing : String(server_name),
+        cert_file === nothing ? nothing : abspath(String(cert_file)),
+        key_file === nothing ? nothing : abspath(String(key_file)),
+        ca_file === nothing ? nothing : String(ca_file),
+        client_ca_file === nothing ? nothing : String(client_ca_file),
+    )
+end
+
+@inline function _check_config_settings!(
+        cert_file::Union{Nothing, String},
+        key_file::Union{Nothing, String},
+        handshake_timeout_ns::Int64,
+        min_version::Union{Nothing, UInt16},
+        max_version::Union{Nothing, UInt16},
+    )
+    (cert_file === nothing) == (key_file === nothing) || throw(ConfigError("both `cert_file` and `key_file` must be set together"))
+    handshake_timeout_ns < 0 && throw(ConfigError("handshake_timeout_ns must be >= 0"))
+    min_version !== nothing && _require_supported_tls_version!("min_version", min_version::UInt16)
+    max_version !== nothing && _require_supported_tls_version!("max_version", max_version::UInt16)
+    if min_version !== nothing && max_version !== nothing
+        (min_version::UInt16) <= (max_version::UInt16) || throw(ConfigError("min_version must be <= max_version"))
+    end
+    return nothing
+end
 
 function Config(
         server_name::Union{Nothing, AbstractString},
@@ -358,23 +405,11 @@ function Config(
         max_version::Union{Nothing, UInt16},
         session_tickets_disabled::Bool,
         session_cache_capacity::Int = 64,
+        _verification_time_s::Union{Nothing, Int64} = nothing,
     )
-    # Normalize to owned `String` storage so shared configs do not depend on caller-owned
-    # string buffers or views.
-    server_name_s = server_name === nothing ? nothing : String(server_name)
-    cert_file_s = cert_file === nothing ? nothing : abspath(String(cert_file))
-    key_file_s = key_file === nothing ? nothing : abspath(String(key_file))
-    ca_file_s = ca_file === nothing ? nothing : String(ca_file)
-    client_ca_file_s = client_ca_file === nothing ? nothing : String(client_ca_file)
-    has_cert = cert_file_s !== nothing
-    has_key = key_file_s !== nothing
-    has_cert == has_key || throw(ConfigError("both `cert_file` and `key_file` must be set together"))
-    handshake_timeout_ns < 0 && throw(ConfigError("handshake_timeout_ns must be >= 0"))
-    min_version !== nothing && _require_supported_tls_version!("min_version", min_version::UInt16)
-    max_version !== nothing && _require_supported_tls_version!("max_version", max_version::UInt16)
-    if min_version !== nothing && max_version !== nothing
-        (min_version::UInt16) <= (max_version::UInt16) || throw(ConfigError("min_version must be <= max_version"))
-    end
+    server_name_s, cert_file_s, key_file_s, ca_file_s, client_ca_file_s =
+        _config_owned_paths(server_name, cert_file, key_file, ca_file, client_ca_file)
+    _check_config_settings!(cert_file_s, key_file_s, Int64(handshake_timeout_ns), min_version, max_version)
     return Config(
         server_name_s,
         verify_peer,
@@ -397,6 +432,7 @@ function Config(
         _TLSSessionCache(_TLS12ServerSession, session_cache_capacity),
         _TLSLocalIdentityState(),
         _TLSLocalIdentityState(),
+        _verification_time_s,
     )
 end
 
@@ -416,6 +452,7 @@ function Config(;
         max_version::Union{Nothing, UInt16} = nothing,
         session_tickets_disabled::Bool = false,
         session_cache_capacity::Integer = 64,
+        _verification_time_s::Union{Nothing, Int64} = nothing,
     )
     return Config(
         server_name === nothing ? nothing : String(server_name),
@@ -433,6 +470,118 @@ function Config(;
         max_version,
         session_tickets_disabled,
         Int(session_cache_capacity),
+        _verification_time_s,
+    )
+end
+
+# Everything below inlines into the keyword sorter. Keyword values are usually read
+# straight out of another config, so several of them are `Union{Nothing, String}`;
+# a non-inlined call carrying that many union-typed arguments stays a dynamic call
+# and fails `--trim=safe`. The struct constructor at the end inlines to `new`, and
+# every other call receives a concrete or narrowed value.
+@inline function Config(
+        cfg::Config;
+        server_name::Union{Nothing, String} = cfg.server_name,
+        verify_peer::Bool = cfg.verify_peer,
+        verify_hostname::Bool = cfg.verify_hostname,
+        client_auth::ClientAuthMode.T = cfg.client_auth,
+        cert_file::Union{Nothing, String} = cfg.cert_file,
+        key_file::Union{Nothing, String} = cfg.key_file,
+        ca_file::Union{Nothing, String} = cfg.ca_file,
+        client_ca_file::Union{Nothing, String} = cfg.client_ca_file,
+        alpn_protocols::Vector{String} = cfg.alpn_protocols,
+        curve_preferences::Vector{UInt16} = cfg.curve_preferences,
+        handshake_timeout_ns::Int64 = cfg.handshake_timeout_ns,
+        min_version::Union{Nothing, UInt16} = cfg.min_version,
+        max_version::Union{Nothing, UInt16} = cfg.max_version,
+        session_tickets_disabled::Bool = cfg.session_tickets_disabled,
+    )
+    # An untouched credential keyword is the very object stored in `cfg`. The loaded
+    # identity is filled lazily from `cert_file`/`key_file` and does not record which
+    # files it came from, so only a copy with the same credential objects may share it;
+    # any other copy starts from empty identity state. Session caches and ticket keys
+    # are keyed by peer and stay shared, which keeps per-connection copies resuming.
+    same_identity = cert_file === cfg.cert_file && key_file === cfg.key_file
+    cert_file_s = cert_file === nothing ? nothing : abspath(cert_file)
+    key_file_s = key_file === nothing ? nothing : abspath(key_file)
+    _check_config_settings!(cert_file_s, key_file_s, handshake_timeout_ns, min_version, max_version)
+    client_identity = same_identity ? cfg._client_identity : _TLSLocalIdentityState()
+    server_identity = same_identity ? cfg._server_identity : _TLSLocalIdentityState()
+    return Config(
+        server_name,
+        verify_peer,
+        verify_hostname,
+        client_auth,
+        cert_file_s,
+        key_file_s,
+        ca_file,
+        client_ca_file,
+        copy(alpn_protocols),
+        copy(curve_preferences),
+        handshake_timeout_ns,
+        min_version,
+        max_version,
+        session_tickets_disabled,
+        cfg._session_ticket_keys,
+        cfg._client_session_cache,
+        cfg._server_session_cache,
+        cfg._client_session_cache12,
+        cfg._server_session_cache12,
+        client_identity,
+        server_identity,
+        cfg._verification_time_s,
+    )
+end
+
+# HTTP.jl 2.6.x builds a `Config` positionally from the field list that predates
+# `_verification_time_s`. Keep that arity working, with the wall-clock default, so
+# already-released HTTP versions keep making HTTPS requests against this Reseau.
+function Config(
+        server_name::Union{Nothing, String},
+        verify_peer::Bool,
+        verify_hostname::Bool,
+        client_auth::ClientAuthMode.T,
+        cert_file::Union{Nothing, String},
+        key_file::Union{Nothing, String},
+        ca_file::Union{Nothing, String},
+        client_ca_file::Union{Nothing, String},
+        alpn_protocols::Vector{String},
+        curve_preferences::Vector{UInt16},
+        handshake_timeout_ns::Int64,
+        min_version::Union{Nothing, UInt16},
+        max_version::Union{Nothing, UInt16},
+        session_tickets_disabled::Bool,
+        session_ticket_keys::_TLSSessionTicketKeyState,
+        client_session_cache::_TLSSessionCache{_TLS13ClientSession},
+        server_session_cache::_TLSSessionCache{_TLS13ServerSession},
+        client_session_cache12::_TLSSessionCache{_TLS12ClientSession},
+        server_session_cache12::_TLSSessionCache{_TLS12ServerSession},
+        client_identity::_TLSLocalIdentityState,
+        server_identity::_TLSLocalIdentityState,
+    )
+    return Config(
+        server_name,
+        verify_peer,
+        verify_hostname,
+        client_auth,
+        cert_file,
+        key_file,
+        ca_file,
+        client_ca_file,
+        alpn_protocols,
+        curve_preferences,
+        handshake_timeout_ns,
+        min_version,
+        max_version,
+        session_tickets_disabled,
+        session_ticket_keys,
+        client_session_cache,
+        server_session_cache,
+        client_session_cache12,
+        server_session_cache12,
+        client_identity,
+        server_identity,
+        nothing,
     )
 end
 
@@ -576,8 +725,9 @@ function __init__()
     global _LIBCRYPTO_PATH = OpenSSL_jll.libcrypto_path
     global _LIBSSL_PATH = OpenSSL_jll.libssl_path
     empty!(_TLS_LOCAL_IDENTITY_CACHE)
+    # `opts` is `uint64_t` in the C prototype; Culong is 32 bits on i686 and Windows.
     _ = @gcsafe_ccall _LIBSSL_PATH.OPENSSL_init_ssl(
-        Culong(0)::Culong,
+        UInt64(0)::UInt64,
         C_NULL::Ptr{Cvoid},
     )::Cint
     _init_x25519_pkey_id!()
@@ -629,29 +779,7 @@ end
 end
 
 function _config_with_server_name(config::Config, server_name::String)::Config
-    return Config(
-        server_name,
-        config.verify_peer,
-        config.verify_hostname,
-        config.client_auth,
-        config.cert_file,
-        config.key_file,
-        config.ca_file,
-        config.client_ca_file,
-        copy(config.alpn_protocols),
-        copy(config.curve_preferences),
-        config.handshake_timeout_ns,
-        config.min_version,
-        config.max_version,
-        config.session_tickets_disabled,
-        config._session_ticket_keys,
-        config._client_session_cache,
-        config._server_session_cache,
-        config._client_session_cache12,
-        config._server_session_cache12,
-        config._client_identity,
-        config._server_identity,
-    )
+    return Config(config; server_name = server_name)
 end
 
 @inline function _tls_identity_state(config::Config; is_server::Bool)::_TLSLocalIdentityState
@@ -963,6 +1091,7 @@ function _native_tls13_certificate_verifier(config::Config)::_TLS13OpenSSLCertif
         verify_peer = config.verify_peer,
         verify_hostname = config.verify_hostname,
         ca_file = config.verify_peer ? _effective_ca_file(config; is_server = false) : nothing,
+        verification_time_s = config._verification_time_s,
     )
 end
 
@@ -988,6 +1117,7 @@ function _tls12_try_load_client_session(config::Config, cache_key::AbstractStrin
                     verify_peer = config.verify_peer,
                     verify_hostname = config.verify_hostname,
                     ca_file = config.verify_peer ? _effective_ca_file(config; is_server = false) : nothing,
+                    verification_time_s = config._verification_time_s,
                 )
             catch
                 _tls_session_cache_put!(config._client_session_cache12, cache_key, nothing, _securezero_tls12_client_session!)
@@ -1053,6 +1183,7 @@ function _tls13_try_load_client_session(config::Config, cache_key::AbstractStrin
                 verify_peer = config.verify_peer,
                 verify_hostname = config.verify_hostname,
                 ca_file = config.verify_peer ? _effective_ca_file(config; is_server = false) : nothing,
+                verification_time_s = config._verification_time_s,
             )
         catch
             _tls_session_cache_put!(config._client_session_cache, cache_key, nothing, _securezero_tls13_client_session!)
@@ -1753,28 +1884,34 @@ end
 # 2. drain any buffered plaintext,
 # 3. if necessary read more TLS records,
 # 4. translate protocol/transport failures into `TLSError`.
-function _native_tls13_fill_plaintext!(conn::Conn)::Nothing
+function _native_tls13_fill_plaintext!(conn::Conn; block::Bool = true)::Bool
     state = _native_tls13_state(conn)
+    records = 0
     while true
-        _tls13_handle_post_handshake_messages!(conn, state)
-        _tls_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos) > 0 && return nothing
+        _tls13_handle_post_handshake_messages!(conn, state; block)
+        _tls_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos) > 0 && return true
         state.peer_close_notify && throw(EOFError())
-        _tls13_read_record!(conn.tcp, state)
+        !block && records == 16 && return false
+        records += 1
+        _tls13_read_record!(conn.tcp, state; block) || return false
     end
 end
 
-function _native_tls12_fill_plaintext!(conn::Conn)::Nothing
+function _native_tls12_fill_plaintext!(conn::Conn; block::Bool = true)::Bool
     state = _native_tls12_state(conn)
+    records = 0
     while true
-        _tls_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos) > 0 && return nothing
+        _tls_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos) > 0 && return true
         state.peer_close_notify && throw(EOFError())
-        _tls12_read_record!(conn.tcp, state)
+        !block && records == 16 && return false
+        records += 1
+        _tls12_read_record!(conn.tcp, state; block) || return false
     end
 end
 
-function _native_tls13_take_plaintext!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
+function _native_tls13_take_plaintext!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int; block::Bool = true)::Union{Int, Nothing}
     nbytes == 0 && return 0
-    _native_tls13_fill_plaintext!(conn)
+    _native_tls13_fill_plaintext!(conn; block) || return nothing
     state = _native_tls13_state(conn)
     available = _tls_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos)
     n = min(nbytes, available)
@@ -1784,9 +1921,9 @@ function _native_tls13_take_plaintext!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)
     return n
 end
 
-function _native_tls12_take_plaintext!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
+function _native_tls12_take_plaintext!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int; block::Bool = true)::Union{Int, Nothing}
     nbytes == 0 && return 0
-    _native_tls12_fill_plaintext!(conn)
+    _native_tls12_fill_plaintext!(conn; block) || return nothing
     state = _native_tls12_state(conn)
     available = _tls_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos)
     n = min(nbytes, available)
@@ -1808,25 +1945,37 @@ end
     end
 end
 
-function _read_some!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
+function _read_some!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int; block::Bool = true)::Union{Int, Nothing}
     _ensure_open!(conn, "read")
-    _ensure_handshake!(conn)
+    if block
+        _ensure_handshake!(conn)
+    else
+        _handshake_complete(conn) || throw(ArgumentError("call handshake! before tryread!"))
+    end
     # Match Go's tls.Conn.Read ordering: an empty read still performs the
     # handshake for its side effect, but never waits for application data.
     nbytes == 0 && return 0
-    lock(conn.read_lock)
+    if block
+        lock(conn.read_lock)
+    else
+        trylock(conn.read_lock) || return nothing
+    end
     try
         _ensure_open!(conn, "read")
         if _active_tls13(conn)
-            return _native_tls13_take_plaintext!(conn, ptr, nbytes)
+            return _native_tls13_take_plaintext!(conn, ptr, nbytes; block)
         end
         if _active_tls12(conn)
-            return _native_tls12_take_plaintext!(conn, ptr, nbytes)
+            return _native_tls12_take_plaintext!(conn, ptr, nbytes; block)
         end
         throw(ArgumentError("tls: unsupported connection mode"))
     catch err
         ex = _as_exception(err)
-        ex isa EOFError && rethrow()
+        ex isa EOFError && (block ? rethrow() : (return 0))
+        # A failed nonblocking read must not wait to transmit a fatal alert.
+        if !block && !(ex isa _TLSTransportDeadlineError)
+            close(conn.tcp)
+        end
         ex isa TLSError && rethrow()
         if ex isa _TLSTransportDeadlineError
             throw(TLSError("read", Int32(0), "i/o timeout", (ex::_TLSTransportDeadlineError).cause))
@@ -1838,17 +1987,17 @@ function _read_some!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
         end
         if ex isa _TLSAlertError
             tls13_err = ex::_TLSAlertError
-            if _active_tls13(conn) && !tls13_err.from_peer
+            if block && _active_tls13(conn) && !tls13_err.from_peer
                 _native_tls13_try_write_fatal_alert!(conn, tls13_err.alert)
-            elseif _active_tls12(conn) && !tls13_err.from_peer
+            elseif block && _active_tls12(conn) && !tls13_err.from_peer
                 _native_tls12_try_write_fatal_alert!(conn, tls13_err.alert)
             end
             throw(TLSError("read", Int32(0), tls13_err.message, tls13_err))
         end
         if ex isa ArgumentError
-            if _active_tls13(conn)
+            if block && _active_tls13(conn)
                 _native_tls13_try_write_fatal_alert!(conn, _TLS_ALERT_INTERNAL_ERROR)
-            elseif _active_tls12(conn)
+            elseif block && _active_tls12(conn)
                 _native_tls12_try_write_fatal_alert!(conn, _TLS_ALERT_INTERNAL_ERROR)
             end
             throw(TLSError("read", Int32(0), (ex::ArgumentError).msg::String, ex))
@@ -2110,6 +2259,29 @@ function Base.eof(conn::Conn)::Bool
 end
 
 """
+    tryread!(conn, buf) -> Union{Int, Nothing}
+
+Copy available decrypted application bytes into a nonempty contiguous mutable
+byte buffer. Return a byte count, `0` at EOF (including local close), or
+`nothing` when no plaintext is returned in this attempt. An attempt processes
+at most 16 records; partial input and a busy read lock also return `nothing`.
+Call `handshake!` first. This operation does not wait for network input, acquire
+a busy read lock, or send TLS records.
+
+Incomplete encrypted records remain buffered for the next `tryread!`, `read`,
+or `eof`. Complete records are authenticated before plaintext is returned.
+TLS 1.3 key-update replies are deferred until the next ordinary read or write,
+before further application output. Protocol and transport failures throw;
+read deadlines retain their ordinary meaning.
+"""
+function tryread!(conn::Conn, buf::MutableByteBuffer)::Union{Int, Nothing}
+    Base.require_one_based_indexing(buf)
+    isempty(buf) && throw(ArgumentError("tryread! requires a nonempty buffer"))
+    isopen(conn) || return 0
+    GC.@preserve buf return _read_some!(conn, pointer(buf), length(buf); block = false)
+end
+
+"""
     isopen(conn) -> Bool
 
 Return `true` while both the TLS state and underlying TCP transport remain open.
@@ -2215,6 +2387,8 @@ end
 
 function _native_tls13_write_application!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
     state = _native_tls13_state(conn)
+    _tls13_flush_key_update!(conn, state)
+    conn.write_permanent_error === nothing || throw(conn.write_permanent_error::TLSError)
     total = 0
     while total < nbytes
         chunk_len = min(nbytes - total, _TLS13_MAX_PLAINTEXT)
