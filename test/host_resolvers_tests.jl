@@ -555,40 +555,26 @@ end
             end
         end
         @testset "system resolver worker shutdown and restart" begin
-            println("[resolver-diag] before shutdown; live=", ND._addrinfo_live_threads(), " started=", ND._ADDRINFO_STARTED_THREADS[])
-            flush(stdout)
             ND.shutdown!()
-            println("[resolver-diag] after shutdown; live=", ND._addrinfo_live_threads(), " started=", ND._ADDRINFO_STARTED_THREADS[])
-            flush(stdout)
             @test ND._addrinfo_live_threads() == 0
             try
-                println("[resolver-diag] before restarted lookup; live=", ND._addrinfo_live_threads())
-                flush(stdout)
                 @test !isempty(ND.resolve_tcp_addrs("tcp", "localhost:0"))
-                println("[resolver-diag] after restarted lookup; live=", ND._addrinfo_live_threads())
-                flush(stdout)
                 @test ND._addrinfo_live_threads() > 0
-                println("[resolver-diag] before shutdown; live=", ND._addrinfo_live_threads(), " started=", ND._ADDRINFO_STARTED_THREADS[])
-            flush(stdout)
-            ND.shutdown!()
-            println("[resolver-diag] after shutdown; live=", ND._addrinfo_live_threads(), " started=", ND._ADDRINFO_STARTED_THREADS[])
-            flush(stdout)
+                ND.shutdown!()
                 @test ND._addrinfo_live_threads() == 0
 
-                println("[resolver-diag] before restarted lookup; live=", ND._addrinfo_live_threads())
-                flush(stdout)
                 @test !isempty(ND.resolve_tcp_addrs("tcp", "localhost:0"))
-                println("[resolver-diag] after restarted lookup; live=", ND._addrinfo_live_threads())
-                flush(stdout)
                 @test ND._addrinfo_live_threads() > 0
             finally
-                println("[resolver-diag] before shutdown; live=", ND._addrinfo_live_threads(), " started=", ND._ADDRINFO_STARTED_THREADS[])
-            flush(stdout)
-            ND.shutdown!()
-            println("[resolver-diag] after shutdown; live=", ND._addrinfo_live_threads(), " started=", ND._ADDRINFO_STARTED_THREADS[])
-            flush(stdout)
+                ND.shutdown!()
             end
             @test ND._addrinfo_live_threads() == 0
+            for _ in 1:12
+                results = fetch.([Threads.@spawn ND._native_getaddrinfo("localhost") for _ in 1:8])
+                @test all(result -> !isempty(result), results)
+                ND.shutdown!()
+                @test ND._addrinfo_live_threads() == 0
+            end
         end
         @testset "replaced resolver queue outlives workers that start late" begin
             ND.shutdown!()
@@ -604,6 +590,31 @@ end
                 notify(_ND_LATE_WORKER_GATE)
             end
             @test timedwait(() -> ND._addrinfo_live_threads() == 0, 10.0) === :ok
+        end
+        @testset "resolver shutdown drains a full queue without waiting for space" begin
+            Base.reset(_ND_LATE_WORKER_GATE)
+            _ND_REAL_WORKER_ENTRY[] = ND._ADDRINFO_THREAD_ENTRY_C[]
+            ND._ADDRINFO_THREAD_ENTRY_C[] = @cfunction(_nd_late_worker_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
+            pending = Task[]
+            shutdown_task = nothing
+            try
+                _nd_start_late_workers!()
+                append!(pending, [Threads.@spawn ND._native_getaddrinfo("localhost") for _ in 1:ND._ADDRINFO_POOL_CAPACITY])
+                @test timedwait(() -> Base.n_avail(_ND_LATE_WORKER_QUEUE[].value.futures) == ND._ADDRINFO_POOL_CAPACITY, 10.0) === :ok
+                shutdown_task = Threads.@spawn ND.shutdown!(0.01)
+                @test timedwait(() -> istaskdone(shutdown_task), 10.0) === :ok
+                @test ND._addrinfo_live_threads() == ND._ADDRINFO_POOL_SIZE
+            finally
+                ND._ADDRINFO_THREAD_ENTRY_C[] = _ND_REAL_WORKER_ENTRY[]
+                notify(_ND_LATE_WORKER_GATE)
+            end
+            shutdown_task isa Task && wait(shutdown_task)
+            @test timedwait(() -> all(istaskdone, pending), 10.0) === :ok
+            @test all(task -> istaskdone(task) && !isempty(fetch(task)), pending)
+            @test timedwait(() -> ND._addrinfo_live_threads() == 0, 10.0) === :ok
+            @test !isempty(ND._native_getaddrinfo("localhost"))
+            ND.shutdown!()
+            @test ND._addrinfo_live_threads() == 0
         end
         @testset "connect/listen by address strings (ipv4)" begin
             IP.shutdown!()

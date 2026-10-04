@@ -5,12 +5,13 @@ permissions:
   contents: read
 jobs:
   diagnose:
-    name: Windows x86 resolver lifecycle attempt ${{ matrix.attempt }}
+    name: Windows x86 ${{ matrix.variant }} lifecycle attempt ${{ matrix.attempt }}
     runs-on: windows-latest
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
+        variant: [base, fixed]
         attempt: [1, 2, 3]
     env:
       JULIA_NUM_THREADS: '1'
@@ -19,6 +20,8 @@ jobs:
       RESEAU_RUN_TRIM_TESTS: '0'
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.variant == 'base' && 'cde4b553410f5a545335b547ad479bed8caf4506' || github.sha }}
       - uses: julia-actions/setup-julia@v2
         with:
           version: '1.13.1'
@@ -31,13 +34,33 @@ jobs:
           install: mingw-w64-i686-gdb
       - uses: julia-actions/cache@v2
       - uses: julia-actions/julia-buildpkg@v1
-      - name: Run suite and capture native thread stacks if blocked
+      - name: Stress resolver lifecycle and capture native thread stacks if blocked
         shell: pwsh
         env:
           GDB_EXE: ${{ steps.msys2.outputs.msys2-location }}/mingw32/bin/gdb.exe
         run: |
+          @'
+          using Reseau
+          const DiagnosticResolver = Reseau.HostResolvers
+          function resolver_lifecycle_stress()
+              for generation in 1:40
+                  println("[stress] lookup generation ", generation)
+                  flush(stdout)
+                  results = fetch.([Threads.@spawn DiagnosticResolver._native_getaddrinfo("localhost") for _ in 1:8])
+                  @assert all(result -> !isempty(result), results)
+                  println("[stress] shutdown generation ", generation)
+                  flush(stdout)
+                  DiagnosticResolver.shutdown!()
+                  @assert DiagnosticResolver._addrinfo_live_threads() == 0
+                  println("[stress] drained generation ", generation)
+                  flush(stdout)
+              end
+          end
+          resolver_lifecycle_stress()
+          include("test/runtests.jl")
+          '@ | Set-Content resolver-shutdown-stress.jl
           $juliaExe = (Get-Command julia).Source
-          $ownedProcess = Start-Process -FilePath $juliaExe -ArgumentList @('--project=.', '--startup-file=no', '--history-file=no', 'test/runtests.jl') -RedirectStandardOutput 'resolver-diagnostic-stdout.log' -RedirectStandardError 'resolver-diagnostic-stderr.log' -PassThru
+          $ownedProcess = Start-Process -FilePath $juliaExe -ArgumentList @('--project=.', '--startup-file=no', '--history-file=no', 'resolver-shutdown-stress.jl') -RedirectStandardOutput 'resolver-diagnostic-stdout.log' -RedirectStandardError 'resolver-diagnostic-stderr.log' -PassThru
           if ($ownedProcess.WaitForExit(180000)) {
             Get-Content resolver-diagnostic-stdout.log
             Get-Content resolver-diagnostic-stderr.log
@@ -57,5 +80,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: resolver-native-stacks-${{ matrix.attempt }}
+          name: resolver-native-stacks-${{ matrix.variant }}-${{ matrix.attempt }}
           path: resolver-diagnostic-*.log
