@@ -61,6 +61,7 @@ end
 @testset "TCP phase 4" begin
         @test NC.Conn <: IO
         @test NC.DeadlineExceededError === IP.DeadlineExceededError
+        @test NC.NetClosingError === IP.NetClosingError
         @testset "wildcard dial destinations follow Go local-address mapping" begin
             v4 = NC.any_addr(8080)
             v6 = NC.any_addr6(8080; scope_id = 7)
@@ -569,7 +570,7 @@ end
                 close(listener)
                 listener = nothing
                 err = fetch(accept_task)
-                @test err isa IP.NetClosingError
+                @test err isa NC.NetClosingError
             finally
                 _close_quiet!(listener)
                 IP.shutdown!()
@@ -707,7 +708,7 @@ end
                 @test close(server) === nothing
                 @test close(server) === nothing
                 err = fetch(read_task)
-                @test err isa IP.NetClosingError
+                @test err isa NC.NetClosingError
                 @test close(listener) === nothing
                 @test close(listener) === nothing
             finally

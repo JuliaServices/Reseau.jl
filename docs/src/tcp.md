@@ -86,6 +86,39 @@ The key contract is:
 - `close(conn)` and `close(listener)` are idempotent, which keeps cleanup paths safe in `finally` blocks.
 - `isopen(conn)` and `isopen(listener)` report whether the underlying socket is still live.
 
+## Closing Connections and Listeners
+
+Close the objects your application owns. Calling `close(listener)` from another
+task wakes a pending `accept`; `close(conn)` wakes pending connection I/O,
+including reads with an active deadline. Catch [`TCP.NetClosingError`](@ref)
+in these tasks when local closure is expected. Do not treat unrelated errors as
+normal shutdown. Peer EOF and deadline expiry are separate conditions.
+
+```@docs; canonical=false
+NetClosingError
+```
+
+Socket closure stops pending I/O; it does not finish application requests.
+If requests must drain, stop accepting first and let their handlers finish
+before closing their connections. Set an application policy for handlers that
+do not finish. Close only your application's objects, rather than stopping the
+shared internal poller or resolver runtime.
+
+Stop and join your accept task before taking the final snapshot of accepted
+connections to close. Otherwise a connection accepted during shutdown can
+escape cleanup. Synchronize connection tracking if handlers also modify it,
+and close each handler's connection in `finally`.
+
+For HTTP servers, use the server's own lifecycle API instead of tracking its
+transport objects: `close(server)` drains active work, while
+`HTTP.forceclose(server)` closes tracked connections immediately. Servo's
+`serve!` and `run!` return an HTTP server handle that uses the same lifecycle.
+
+`TCP.NetClosingError` identifies local closure; it does not configure process
+signal handling or guarantee delivery of `InterruptException`. See the
+[signal-handling discussion](https://github.com/JuliaServices/Reseau.jl/issues/126)
+for application-level SIGINT considerations and Julia runtime limitations.
+
 ## Deadlines, Socket Options, and Address Inspection
 
 Deadline management lives on the live connection, not in helper tasks or
