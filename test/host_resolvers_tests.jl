@@ -317,6 +317,25 @@ function _nd_services_candidate(proto::String)::Union{Nothing, Tuple{String, Int
     return nothing
 end
 
+# Holds resolver workers before they read their queue pointer, like workers the
+# OS has not scheduled yet when `shutdown!` replaces the queue.
+const _ND_LATE_WORKER_GATE = Base.Event()
+const _ND_LATE_WORKER_QUEUE = Ref(WeakRef())
+const _ND_REAL_WORKER_ENTRY = Ref{Ptr{Cvoid}}(C_NULL)
+
+function _nd_late_worker_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
+    wait(_ND_LATE_WORKER_GATE)
+    queue = _ND_LATE_WORKER_QUEUE[].value
+    # A collected queue leaves `arg` dangling; fail the test instead of crashing it.
+    queue === nothing && return C_NULL
+    return GC.@preserve queue ccall(_ND_REAL_WORKER_ENTRY[], Ptr{Cvoid}, (Ptr{Cvoid},), arg)
+end
+
+Base.@noinline function _nd_start_late_workers!()::Nothing
+    _ND_LATE_WORKER_QUEUE[] = WeakRef(ND._ensure_addrinfo_pool!())
+    return nothing
+end
+
 @testset "HostResolvers phase 5" begin
         @testset "host-port parser and joiner" begin
             host, port = ND.split_host_port("127.0.0.1:8080")
@@ -550,6 +569,21 @@ end
                 ND.shutdown!()
             end
             @test ND._addrinfo_live_threads() == 0
+        end
+        @testset "replaced resolver queue outlives workers that start late" begin
+            ND.shutdown!()
+            _ND_REAL_WORKER_ENTRY[] = ND._ADDRINFO_THREAD_ENTRY_C[]
+            ND._ADDRINFO_THREAD_ENTRY_C[] = @cfunction(_nd_late_worker_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
+            try
+                _nd_start_late_workers!()
+                ND.shutdown!(0.01)
+                GC.gc(true)
+                @test _ND_LATE_WORKER_QUEUE[].value !== nothing
+            finally
+                ND._ADDRINFO_THREAD_ENTRY_C[] = _ND_REAL_WORKER_ENTRY[]
+                notify(_ND_LATE_WORKER_GATE)
+            end
+            @test timedwait(() -> ND._addrinfo_live_threads() == 0, 10.0) === :ok
         end
         @testset "connect/listen by address strings (ipv4)" begin
             IP.shutdown!()

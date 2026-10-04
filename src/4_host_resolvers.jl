@@ -419,6 +419,10 @@ function _AddrInfoFuture(hostname::String, flags::Cint)
 end
 
 const _ADDRINFO_WORK_QUEUE = Ref{Channel{_AddrInfoFuture}}()
+# Native thread arguments are raw pointers, including before a worker enters
+# Julia. Keep every queue generation alive until its final worker exits.
+# Both these counts and _ADDRINFO_LIVE_THREADS use _ADDRINFO_EXIT_COND.
+const _ADDRINFO_QUEUE_ROOTS = IdDict{Channel{_AddrInfoFuture},Int}()
 
 @inline function _addr_info_future_result_ptr(future::_AddrInfoFuture)::Ptr{Ptr{_AddrInfo}}
     base = Ptr{UInt8}(pointer_from_objref(future))
@@ -486,9 +490,10 @@ function _run_addrinfo_future!(future::_AddrInfoFuture)::Nothing
     return nothing
 end
 
-function _addrinfo_worker_started!()::Nothing
+function _addrinfo_worker_started!(work_queue::Channel{_AddrInfoFuture})::Nothing
     lock(_ADDRINFO_EXIT_COND)
     try
+        _ADDRINFO_QUEUE_ROOTS[work_queue] = get(_ADDRINFO_QUEUE_ROOTS, work_queue, 0) + 1
         _ADDRINFO_LIVE_THREADS[] += 1
     finally
         unlock(_ADDRINFO_EXIT_COND)
@@ -496,9 +501,15 @@ function _addrinfo_worker_started!()::Nothing
     return nothing
 end
 
-function _addrinfo_worker_stopped!()::Nothing
+function _addrinfo_worker_stopped!(work_queue::Channel{_AddrInfoFuture})::Nothing
     lock(_ADDRINFO_EXIT_COND)
     try
+        remaining = _ADDRINFO_QUEUE_ROOTS[work_queue] - 1
+        if remaining == 0
+            delete!(_ADDRINFO_QUEUE_ROOTS, work_queue)
+        else
+            _ADDRINFO_QUEUE_ROOTS[work_queue] = remaining
+        end
         _ADDRINFO_LIVE_THREADS[] = max(_ADDRINFO_LIVE_THREADS[] - 1, 0)
         notify(_ADDRINFO_EXIT_COND)
     finally
@@ -524,7 +535,7 @@ function _addrinfo_worker_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
         end
     catch
     finally
-        _addrinfo_worker_stopped!()
+        _addrinfo_worker_stopped!(work_queue)
     end
     return C_NULL
 end
@@ -539,11 +550,11 @@ function _ensure_addrinfo_pool!()::Channel{_AddrInfoFuture}
         work_queue = _ADDRINFO_WORK_QUEUE[]
         while _ADDRINFO_STARTED_THREADS[] < _ADDRINFO_POOL_SIZE
             next_idx = _ADDRINFO_STARTED_THREADS[] + 1
-            _addrinfo_worker_started!()
+            _addrinfo_worker_started!(work_queue)
             try
                 IOPoll._spawn_detached_thread("reseau-getaddrinfo-$next_idx", _ADDRINFO_THREAD_ENTRY_C, work_queue)
             catch
-                _addrinfo_worker_stopped!()
+                _addrinfo_worker_stopped!(work_queue)
                 rethrow()
             end
             _ADDRINFO_STARTED_THREADS[] = next_idx
@@ -592,6 +603,7 @@ function __init__()
     _ADDRINFO_WORK_QUEUE[] = Channel{_AddrInfoFuture}(_ADDRINFO_POOL_CAPACITY)
     _ADDRINFO_STARTED_THREADS[] = 0
     _ADDRINFO_LIVE_THREADS[] = 0
+    empty!(_ADDRINFO_QUEUE_ROOTS)
 end
 
 @static if Sys.iswindows()
