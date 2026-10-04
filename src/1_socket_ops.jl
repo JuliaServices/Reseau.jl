@@ -690,4 +690,8 @@ end
 
 end
 
+@static if Sys.islinux() || Sys.isapple() || Sys.isfreebsd()
+    include("socket_ops/unix.jl")
+end
+
 end
