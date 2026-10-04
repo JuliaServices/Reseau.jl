@@ -24,6 +24,7 @@ jobs:
           version: '1.13.1'
           arch: x86
       - uses: msys2/setup-msys2@v2
+        id: msys2
         with:
           msystem: MINGW32
           update: false
@@ -32,6 +33,8 @@ jobs:
       - uses: julia-actions/julia-buildpkg@v1
       - name: Run suite and capture native thread stacks if blocked
         shell: pwsh
+        env:
+          GDB_EXE: ${{ steps.msys2.outputs.msys2-location }}/mingw32/bin/gdb.exe
         run: |
           $juliaExe = (Get-Command julia).Source
           $ownedProcess = Start-Process -FilePath $juliaExe -ArgumentList @('--project=.', '--startup-file=no', '--history-file=no', 'test/runtests.jl') -RedirectStandardOutput 'resolver-diagnostic-stdout.log' -RedirectStandardError 'resolver-diagnostic-stderr.log' -PassThru
@@ -43,8 +46,8 @@ jobs:
           Write-Output 'The owned suite stopped making progress; capturing native stacks.'
           Get-Content resolver-diagnostic-stdout.log
           Get-Content resolver-diagnostic-stderr.log
-          $gdbExe = 'C:\msys64\mingw32\bin\gdb.exe'
-          if (-not (Test-Path $gdbExe)) { throw "Missing debugger: $gdbExe" }
+          $gdbExe = $env:GDB_EXE
+          if (-not (Test-Path $gdbExe)) { Stop-Process -Id $ownedProcess.Id -Force; throw "Missing debugger: $gdbExe" }
           $debugProcess = Start-Process -FilePath $gdbExe -ArgumentList @('--batch', '-ex', '"set pagination off"', '-ex', '"info threads"', '-ex', '"thread apply all bt"', '-ex', '"detach"', '-p', $ownedProcess.Id) -RedirectStandardOutput 'resolver-diagnostic-native.log' -RedirectStandardError 'resolver-diagnostic-debugger.log' -PassThru
           if (-not $debugProcess.WaitForExit(45000)) { Stop-Process -Id $debugProcess.Id -Force }
           Get-Content resolver-diagnostic-native.log
