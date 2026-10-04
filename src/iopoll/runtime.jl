@@ -113,7 +113,7 @@ function _spawn_detached_thread(
             pthread_ref, C_NULL, thread_fn[], thread_arg,
         )
         create_ret != 0 && throw(SystemError("pthread_create", Int(create_ret)))
-        # Detaching a joinable thread created just above cannot fail, and a
+        # A detach failure does not undo thread creation, and a
         # throw here would tell callers no thread started while it is running.
         _ = ccall(:pthread_detach, Cint, (_pthread_t,), pthread_ref[])
     end
