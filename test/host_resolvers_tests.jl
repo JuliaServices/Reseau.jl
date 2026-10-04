@@ -555,18 +555,38 @@ end
             end
         end
         @testset "system resolver worker shutdown and restart" begin
+            println("[resolver-diag] before shutdown; live=", ND._addrinfo_live_threads(), " started=", ND._ADDRINFO_STARTED_THREADS[])
+            flush(stdout)
             ND.shutdown!()
+            println("[resolver-diag] after shutdown; live=", ND._addrinfo_live_threads(), " started=", ND._ADDRINFO_STARTED_THREADS[])
+            flush(stdout)
             @test ND._addrinfo_live_threads() == 0
             try
+                println("[resolver-diag] before restarted lookup; live=", ND._addrinfo_live_threads())
+                flush(stdout)
                 @test !isempty(ND.resolve_tcp_addrs("tcp", "localhost:0"))
+                println("[resolver-diag] after restarted lookup; live=", ND._addrinfo_live_threads())
+                flush(stdout)
                 @test ND._addrinfo_live_threads() > 0
-                ND.shutdown!()
+                println("[resolver-diag] before shutdown; live=", ND._addrinfo_live_threads(), " started=", ND._ADDRINFO_STARTED_THREADS[])
+            flush(stdout)
+            ND.shutdown!()
+            println("[resolver-diag] after shutdown; live=", ND._addrinfo_live_threads(), " started=", ND._ADDRINFO_STARTED_THREADS[])
+            flush(stdout)
                 @test ND._addrinfo_live_threads() == 0
 
+                println("[resolver-diag] before restarted lookup; live=", ND._addrinfo_live_threads())
+                flush(stdout)
                 @test !isempty(ND.resolve_tcp_addrs("tcp", "localhost:0"))
+                println("[resolver-diag] after restarted lookup; live=", ND._addrinfo_live_threads())
+                flush(stdout)
                 @test ND._addrinfo_live_threads() > 0
             finally
-                ND.shutdown!()
+                println("[resolver-diag] before shutdown; live=", ND._addrinfo_live_threads(), " started=", ND._ADDRINFO_STARTED_THREADS[])
+            flush(stdout)
+            ND.shutdown!()
+            println("[resolver-diag] after shutdown; live=", ND._addrinfo_live_threads(), " started=", ND._ADDRINFO_STARTED_THREADS[])
+            flush(stdout)
             end
             @test ND._addrinfo_live_threads() == 0
         end
