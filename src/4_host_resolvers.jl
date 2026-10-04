@@ -418,7 +418,44 @@ function _AddrInfoFuture(hostname::String, flags::Cint)
     return _AddrInfoFuture(Threads.Condition(), hostname, flags, Cint(0), false, nothing, C_NULL)
 end
 
-const _ADDRINFO_WORK_QUEUE = Ref{Channel{_AddrInfoFuture}}()
+mutable struct _AddrInfoWorkQueue
+    futures::Channel{_AddrInfoFuture}
+    ready::Threads.Condition
+end
+
+_AddrInfoWorkQueue() = _AddrInfoWorkQueue(Channel{_AddrInfoFuture}(_ADDRINFO_POOL_CAPACITY), Threads.Condition())
+
+function _put_addrinfo_work!(work_queue::_AddrInfoWorkQueue, future::_AddrInfoFuture)::Nothing
+    put!(work_queue.futures, future)
+    lock(work_queue.ready)
+    try
+        notify(work_queue.ready; all = false)
+    finally
+        unlock(work_queue.ready)
+    end
+    return nothing
+end
+
+function _take_addrinfo_work!(work_queue::_AddrInfoWorkQueue)::Union{Nothing,_AddrInfoFuture}
+    lock(work_queue.ready)
+    try
+        while !isready(work_queue.futures)
+            isopen(work_queue.futures) || return nothing
+            # Channel close wakes its own blocked takers by throwing. Native
+            # workers must finish normal shutdown without exception backtraces.
+            wait(work_queue.ready)
+        end
+        return take!(work_queue.futures)
+    finally
+        unlock(work_queue.ready)
+    end
+end
+
+const _ADDRINFO_WORK_QUEUE = Ref{_AddrInfoWorkQueue}()
+# Native thread arguments are raw pointers, including before a worker enters
+# Julia. Keep every queue generation alive until its final worker exits.
+# Both these counts and _ADDRINFO_LIVE_THREADS use _ADDRINFO_EXIT_COND.
+const _ADDRINFO_QUEUE_ROOTS = IdDict{_AddrInfoWorkQueue,Int}()
 
 @inline function _addr_info_future_result_ptr(future::_AddrInfoFuture)::Ptr{Ptr{_AddrInfo}}
     base = Ptr{UInt8}(pointer_from_objref(future))
@@ -486,9 +523,10 @@ function _run_addrinfo_future!(future::_AddrInfoFuture)::Nothing
     return nothing
 end
 
-function _addrinfo_worker_started!()::Nothing
+function _addrinfo_worker_started!(work_queue::_AddrInfoWorkQueue)::Nothing
     lock(_ADDRINFO_EXIT_COND)
     try
+        _ADDRINFO_QUEUE_ROOTS[work_queue] = get(_ADDRINFO_QUEUE_ROOTS, work_queue, 0) + 1
         _ADDRINFO_LIVE_THREADS[] += 1
     finally
         unlock(_ADDRINFO_EXIT_COND)
@@ -496,9 +534,15 @@ function _addrinfo_worker_started!()::Nothing
     return nothing
 end
 
-function _addrinfo_worker_stopped!()::Nothing
+function _addrinfo_worker_stopped!(work_queue::_AddrInfoWorkQueue)::Nothing
     lock(_ADDRINFO_EXIT_COND)
     try
+        remaining = _ADDRINFO_QUEUE_ROOTS[work_queue] - 1
+        if remaining == 0
+            delete!(_ADDRINFO_QUEUE_ROOTS, work_queue)
+        else
+            _ADDRINFO_QUEUE_ROOTS[work_queue] = remaining
+        end
         _ADDRINFO_LIVE_THREADS[] = max(_ADDRINFO_LIVE_THREADS[] - 1, 0)
         notify(_ADDRINFO_EXIT_COND)
     finally
@@ -517,33 +561,35 @@ function _addrinfo_live_threads()::Int
 end
 
 function _addrinfo_worker_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
-    work_queue = unsafe_pointer_to_objref(arg)::Channel{_AddrInfoFuture}
+    work_queue = unsafe_pointer_to_objref(arg)::_AddrInfoWorkQueue
     try
-        for future in work_queue
+        while true
+            future = _take_addrinfo_work!(work_queue)
+            future === nothing && break
             _run_addrinfo_future!(future)
         end
     catch
     finally
-        _addrinfo_worker_stopped!()
+        _addrinfo_worker_stopped!(work_queue)
     end
     return C_NULL
 end
 
-function _ensure_addrinfo_pool!()::Channel{_AddrInfoFuture}
+function _ensure_addrinfo_pool!()::_AddrInfoWorkQueue
     lock(_ADDRINFO_POOL_LOCK)
     try
         if !isassigned(_ADDRINFO_WORK_QUEUE)
-            _ADDRINFO_WORK_QUEUE[] = Channel{_AddrInfoFuture}(_ADDRINFO_POOL_CAPACITY)
+            _ADDRINFO_WORK_QUEUE[] = _AddrInfoWorkQueue()
             _ADDRINFO_STARTED_THREADS[] = 0
         end
         work_queue = _ADDRINFO_WORK_QUEUE[]
         while _ADDRINFO_STARTED_THREADS[] < _ADDRINFO_POOL_SIZE
             next_idx = _ADDRINFO_STARTED_THREADS[] + 1
-            _addrinfo_worker_started!()
+            _addrinfo_worker_started!(work_queue)
             try
                 IOPoll._spawn_detached_thread("reseau-getaddrinfo-$next_idx", _ADDRINFO_THREAD_ENTRY_C, work_queue)
             catch
-                _addrinfo_worker_stopped!()
+                _addrinfo_worker_stopped!(work_queue)
                 rethrow()
             end
             _ADDRINFO_STARTED_THREADS[] = next_idx
@@ -559,9 +605,15 @@ function shutdown!(timeout::Real = 5.0)::Nothing
     try
         if isassigned(_ADDRINFO_WORK_QUEUE)
             work_queue = _ADDRINFO_WORK_QUEUE[]
-            isopen(work_queue) && close(work_queue)
+            lock(work_queue.ready)
+            try
+                isopen(work_queue.futures) && close(work_queue.futures)
+                notify(work_queue.ready)
+            finally
+                unlock(work_queue.ready)
+            end
         end
-        _ADDRINFO_WORK_QUEUE[] = Channel{_AddrInfoFuture}(_ADDRINFO_POOL_CAPACITY)
+        _ADDRINFO_WORK_QUEUE[] = _AddrInfoWorkQueue()
         _ADDRINFO_STARTED_THREADS[] = 0
     finally
         unlock(_ADDRINFO_POOL_LOCK)
@@ -589,9 +641,10 @@ end
 
 function __init__()
     _ADDRINFO_THREAD_ENTRY_C[] = @cfunction(_addrinfo_worker_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
-    _ADDRINFO_WORK_QUEUE[] = Channel{_AddrInfoFuture}(_ADDRINFO_POOL_CAPACITY)
+    _ADDRINFO_WORK_QUEUE[] = _AddrInfoWorkQueue()
     _ADDRINFO_STARTED_THREADS[] = 0
     _ADDRINFO_LIVE_THREADS[] = 0
+    empty!(_ADDRINFO_QUEUE_ROOTS)
 end
 
 @static if Sys.iswindows()
@@ -805,7 +858,7 @@ function _native_getaddrinfo(hostname::AbstractString; flags::Cint = Cint(0))::V
     # `getaddrinfo` can block inside the system resolver stack. Run it on a
     # small dedicated worker pool so hostname resolution does not occupy a Julia
     # scheduler thread while callers wait on timeout/deadline machinery.
-    put!(_ensure_addrinfo_pool!(), future)
+    _put_addrinfo_work!(_ensure_addrinfo_pool!(), future)
     ret = _wait_addrinfo_future!(future)
     ret == 0 || _lookup_error("lookup failed: $(_gai_error_string(ret))", hostname_s)
     try
@@ -1497,7 +1550,7 @@ function _resolve_cached_host(
     end
     if stale_result !== nothing
         if refresh_needed
-            @async _refresh_cached_host!(resolver, key, String(network), h)
+            _spawn_task_body(@noinline () -> _refresh_cached_host!(resolver, key, String(network), h))
         end
         return stale_result::Vector{TCP.SocketEndpoint}
     end
@@ -1774,14 +1827,25 @@ end
     return IOPoll._saturating_add_ns(Int64(time_ns()), _effective_fallback_delay_ns(d))
 end
 
+# The scheduler invokes task bodies dynamically. Retain their call methods in
+# trimmed executables by giving them a static, non-inlined call edge.
+const _TRIM_TASK_CALL_EDGE = Ref(false)
+
+function _spawn_task_body(body::F)::Task where {F}
+    _TRIM_TASK_CALL_EDGE[] && body()
+    task = Task(body)
+    schedule(task)
+    return task
+end
+
 function _spawn_timer_task(f::F, deadline_ns::Int64) where {F}
     timer = IOPoll.TimerState(deadline_ns, Int64(0))
     IOPoll.schedule_timer!(timer, deadline_ns) || return nothing, nothing
-    task = @async begin
+    task = _spawn_task_body(@noinline function ()
         IOPoll.waittimer(timer) || return nothing
         f()
         return nothing
-    end
+    end)
     return timer, task
 end
 
@@ -1878,22 +1942,25 @@ function _resolve_with_deadline(
         end
         return nothing
     end
-    @async try
-        _notify_resolved_connect_addrs_future!(future, resolve_tcp_addrs(d.resolver, network, address; op = :connect, policy = d.policy))
-    catch err
-        ex = err::Exception
-        lock(future.notify)
+    _spawn_task_body(@noinline function ()
         try
-            if !future.done
-                future.result = nothing
-                future.err = ex
-                future.done = true
-                notify(future.notify)
+            _notify_resolved_connect_addrs_future!(future, resolve_tcp_addrs(d.resolver, network, address; op = :connect, policy = d.policy))
+        catch err
+            ex = err::Exception
+            lock(future.notify)
+            try
+                if !future.done
+                    future.result = nothing
+                    future.err = ex
+                    future.done = true
+                    notify(future.notify)
+                end
+            finally
+                unlock(future.notify)
             end
-        finally
-            unlock(future.notify)
         end
-    end
+        return nothing
+    end)
     try
         return _wait_resolved_connect_addrs_future!(future)
     finally
@@ -2121,11 +2188,11 @@ function _resolve_parallel(
         return nothing
     end
     function _start_racer(primary::Bool, addrs::AbstractVector{<:TCP.SocketEndpoint})
-        return @async begin
+        return _spawn_task_body(@noinline function ()
             conn, err = _resolve_serial(d, network, address, kind, addrs, deadline_ns, state)
             _emit_event!(DNSParallelResult(primary, conn, err))
             return nothing
-        end
+        end)
     end
     _start_racer(true, primaries)
     # This is the Happy Eyeballs-style stagger: start one address family first,

@@ -73,6 +73,9 @@ end
 Start a detached native OS thread that runs `thread_fn(::Ptr{Cvoid})`.
 This intentionally does not keep a join handle; shutdown is coordinated via
 poller state (`running`) and backend wakeups.
+
+Throws only if no thread was started. The thread receives `arg` as a raw
+pointer, so the caller must keep `arg` rooted until the thread no longer uses it.
 """
 function _spawn_detached_thread(
         name::AbstractString,
@@ -110,8 +113,9 @@ function _spawn_detached_thread(
             pthread_ref, C_NULL, thread_fn[], thread_arg,
         )
         create_ret != 0 && throw(SystemError("pthread_create", Int(create_ret)))
-        detach_ret = ccall(:pthread_detach, Cint, (_pthread_t,), pthread_ref[])
-        detach_ret != 0 && throw(SystemError("pthread_detach", Int(detach_ret)))
+        # A detach failure does not undo thread creation, and a
+        # throw here would tell callers no thread started while it is running.
+        _ = ccall(:pthread_detach, Cint, (_pthread_t,), pthread_ref[])
     end
     return nothing
 end
