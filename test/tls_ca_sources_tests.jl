@@ -59,7 +59,8 @@ end
     mktempdir() do dir
         roots = joinpath(dir, "roots")
         mkdir(roots)
-        cp(CA_B, joinpath(roots, "root.pem"))
+        # Installed fixtures may be read-only; these temporary CA files are modified below.
+        write(joinpath(roots, "root.pem"), read(CA_B))
         for version in (TLS.TLS1_2_VERSION, TLS.TLS1_3_VERSION), issuer in ("a", "b")
             leaf = joinpath(FIXTURES, "leaf_$issuer.crt")
             client_issuer = issuer == "a" ? "b" : "a"
@@ -114,7 +115,7 @@ end
             @test length(TLS._tls_load_trust_store(CA_A, roots).roots) == 1
             @test length(combined.roots) == 2
             bundle = joinpath(dir, "bundle.pem")
-            cp(CA_A, bundle)
+            write(bundle, read(CA_A))
             @test length(TLS._tls_load_trust_store(bundle, roots).roots) == 1
             write(bundle, read(CA_B), repeat("\n", 128))
             @test length(TLS._tls_load_trust_store(bundle, roots).roots) == 2
