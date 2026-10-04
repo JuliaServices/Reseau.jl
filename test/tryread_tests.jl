@@ -29,6 +29,30 @@ function _tryread_record(peer, payload; content_type=TL._TLS_RECORD_TYPE_APPLICA
     end
 end
 
+# Observe the complete raw fragment without consuming it. A one-byte EOF peek
+# can return before the rest of a write reaches the receiving socket.
+function _tryread_wait_raw_bytes(conn, nbytes)
+    buf = Vector{UInt8}(undef, nbytes)
+    pfd = conn.fd.pfd
+    IP._fd_read_lock!(pfd)
+    try
+        while true
+            n = GC.@preserve buf Reseau.SocketOps.recv_from!(
+                pfd.sysfd, pointer(buf), Csize_t(nbytes), Reseau.SocketOps.MSG_PEEK,
+            )
+            n == nbytes && return buf
+            n == 0 && throw(EOFError())
+            if n < 0
+                errno = Reseau.SocketOps.last_error()
+                errno == Int32(Base.Libc.EAGAIN) || throw(SystemError("recv(MSG_PEEK)", Int(errno)))
+            end
+            yield()
+        end
+    finally
+        IP._fd_read_unlock!(pfd)
+    end
+end
+
 @testset "TCP tryread!" begin
     client, server = _tryread_tcp_pair()
     try
@@ -85,6 +109,9 @@ end
                             TL.Config(verify_peer=false, server_name="localhost", min_version=version, max_version=version))
         server = fetch(task)
         try
+            # Drain post-handshake control records before injecting fragments.
+            write(server, UInt8[0x00])
+            @test read(client, UInt8) == 0x00
             buf = fill(0xff, 8)
             @test TL.tryread!(client, buf) === nothing
             for completion in (:tryread, :read, :eof)
@@ -93,6 +120,7 @@ end
                 start = 1
                 for stop in (1, 4, 5, length(wire)-1)
                     write(server.tcp, wire[start:stop])
+                    _tryread_wait_raw_bytes(client.tcp, stop - start + 1)
                     @test !eof(client.tcp) # raw arrival only; never decrypts
                     @test TL.tryread!(client, buf) === nothing
                     @test client.native_state.record_received == stop
@@ -106,6 +134,7 @@ end
                     start = stop + 1
                 end
                 write(server.tcp, wire[start:end])
+                _tryread_wait_raw_bytes(client.tcp, length(wire) - start + 1)
                 @test !eof(client.tcp)
                 if completion == :tryread
                     @test TL.tryread!(client, @view(buf[2:3])) == 2
@@ -130,6 +159,7 @@ end
                 take!(locked)
                 try
                     write(server.tcp, wire)
+                    _tryread_wait_raw_bytes(client.tcp, length(wire))
                     @test !eof(client.tcp)
                     @test TL.tryread!(client, buf) === nothing
                     @test (@atomic client.native_state.key_update_pending)
@@ -139,6 +169,8 @@ end
                     wait(writer)
                 end
                 write(server, UInt8[0x55])
+                header = _tryread_wait_raw_bytes(client.tcp, 5)
+                _tryread_wait_raw_bytes(client.tcp, 5 + ((Int(header[4]) << 8) | Int(header[5])))
                 @test !eof(client.tcp)
                 @test TL.tryread!(client, buf) == 1
                 @test buf[1] == 0x55
@@ -151,12 +183,14 @@ end
                 records = reduce(vcat, [_tryread_record(server, ticket; content_type=TL._TLS_RECORD_TYPE_HANDSHAKE) for _ in 1:16])
                 append!(records, _tryread_record(server, UInt8[0x77]))
                 write(server.tcp, records)
+                _tryread_wait_raw_bytes(client.tcp, length(records))
                 @test !eof(client.tcp)
                 @test TL.tryread!(client, buf) === nothing
                 @test read(client, UInt8) == 0x77
             end
             # Partial-record EOF is an error, not a clean end of stream.
             write(server.tcp, UInt8[0x17])
+            _tryread_wait_raw_bytes(client.tcp, 1)
             @test !eof(client.tcp)
             @test TL.tryread!(client, buf) === nothing
             close(server.tcp)
