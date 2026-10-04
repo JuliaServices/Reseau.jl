@@ -528,6 +528,10 @@ function _addrinfo_live_threads()::Int
 end
 
 function _addrinfo_worker_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
+    @static if Sys.iswindows()
+        ccall((:printf, "msvcrt"), Cint, (Cstring, Ptr{Cvoid}), "[native-worker] enter %p\n", arg)
+        ccall((:fflush, "msvcrt"), Cint, (Ptr{Cvoid},), C_NULL)
+    end
     work_queue = unsafe_pointer_to_objref(arg)::Channel{_AddrInfoFuture}
     try
         for future in work_queue
@@ -535,7 +539,15 @@ function _addrinfo_worker_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
         end
     catch
     finally
+        @static if Sys.iswindows()
+            ccall((:printf, "msvcrt"), Cint, (Cstring, Ptr{Cvoid}), "[native-worker] before stopped %p\n", arg)
+            ccall((:fflush, "msvcrt"), Cint, (Ptr{Cvoid},), C_NULL)
+        end
         _addrinfo_worker_stopped!(work_queue)
+        @static if Sys.iswindows()
+            ccall((:printf, "msvcrt"), Cint, (Cstring, Ptr{Cvoid}), "[native-worker] after stopped %p\n", arg)
+            ccall((:fflush, "msvcrt"), Cint, (Ptr{Cvoid},), C_NULL)
+        end
     end
     return C_NULL
 end

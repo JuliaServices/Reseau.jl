@@ -5,13 +5,13 @@ permissions:
   contents: read
 jobs:
   diagnose:
-    name: Julia ${{ matrix.version }} - Windows x86 resolver lifecycle
+    name: Windows x86 resolver lifecycle attempt ${{ matrix.attempt }}
     runs-on: windows-latest
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        version: ['1.10.12', '1.12.6', '1.13.1']
+        attempt: [1, 2, 3]
     env:
       JULIA_NUM_THREADS: '1'
       RESEAU_RUN_TLS_TESTS: '1'
@@ -21,8 +21,38 @@ jobs:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
         with:
-          version: ${{ matrix.version }}
+          version: '1.13.1'
           arch: x86
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW32
+          update: false
+          install: mingw-w64-i686-gdb
       - uses: julia-actions/cache@v2
       - uses: julia-actions/julia-buildpkg@v1
-      - uses: julia-actions/julia-runtest@v1
+      - name: Run suite and capture native thread stacks if blocked
+        shell: pwsh
+        run: |
+          $juliaExe = (Get-Command julia).Source
+          $ownedProcess = Start-Process -FilePath $juliaExe -ArgumentList @('--project=.', '--startup-file=no', '--history-file=no', 'test/runtests.jl') -RedirectStandardOutput 'resolver-diagnostic-stdout.log' -RedirectStandardError 'resolver-diagnostic-stderr.log' -PassThru
+          if ($ownedProcess.WaitForExit(180000)) {
+            Get-Content resolver-diagnostic-stdout.log
+            Get-Content resolver-diagnostic-stderr.log
+            exit $ownedProcess.ExitCode
+          }
+          Write-Output 'The owned suite stopped making progress; capturing native stacks.'
+          Get-Content resolver-diagnostic-stdout.log
+          Get-Content resolver-diagnostic-stderr.log
+          $gdbExe = 'C:\msys64\mingw32\bin\gdb.exe'
+          if (-not (Test-Path $gdbExe)) { throw "Missing debugger: $gdbExe" }
+          $debugProcess = Start-Process -FilePath $gdbExe -ArgumentList @('--batch', '-ex', '"set pagination off"', '-ex', '"info threads"', '-ex', '"thread apply all bt"', '-ex', '"detach"', '-p', $ownedProcess.Id) -RedirectStandardOutput 'resolver-diagnostic-native.log' -RedirectStandardError 'resolver-diagnostic-debugger.log' -PassThru
+          if (-not $debugProcess.WaitForExit(45000)) { Stop-Process -Id $debugProcess.Id -Force }
+          Get-Content resolver-diagnostic-native.log
+          Get-Content resolver-diagnostic-debugger.log
+          Stop-Process -Id $ownedProcess.Id -Force
+          exit 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: resolver-native-stacks-${{ matrix.attempt }}
+          path: resolver-diagnostic-*.log
