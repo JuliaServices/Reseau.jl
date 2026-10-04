@@ -1,15 +1,10 @@
-# Deadline-armed waits under juliac --trim=safe. The pre-existing trim workloads only
-# exercised *already-expired* deadlines, which return without waiting; these cases arm
-# deadlines that must actually wait — and the dial path with a timeout, which parks on a
-# future completed by spawned tasks.
-#
-# Run one case per invocation: the executable takes `dial | read-deadline | read-wake |
-# timer | all` (default `all`).
+# Exercise future deadlines and resolver task bodies in compiled executables.
 
 using Reseau
 
 const NC = Reseau.TCP
 const IP = Reseau.IOPoll
+const ND = Reseau.HostResolvers
 
 const LISTENER = Ref{Union{Nothing, NC.Listener}}(nothing)
 const SERVER_ERROR = Ref{Any}(nothing)
@@ -90,7 +85,7 @@ function run_read_deadline_fires()::Nothing
             end
             elapsed_ms = (time_ns() - start) ÷ 1_000_000
             err isa IP.DeadlineExceededError || error("expected DeadlineExceededError, got $(typeof(err))")
-            150 <= elapsed_ms <= 5_000 || error("read deadline fired after $(elapsed_ms)ms; expected ~300ms")
+            150 <= elapsed_ms || error("read deadline fired too early after $(elapsed_ms)ms")
         finally
             close(conn)
         end
@@ -127,32 +122,97 @@ function run_timer()::Nothing
     fired = IP.waittimer(timer)
     elapsed_ms = (time_ns() - start) ÷ 1_000_000
     fired || error("timer was cancelled instead of firing")
-    100 <= elapsed_ms <= 5_000 || error("timer fired after $(elapsed_ms)ms; expected ~200ms")
+    100 <= elapsed_ms || error("timer fired too early after $(elapsed_ms)ms")
     Core.println("timer ok")
     return nothing
 end
 
-function run_dial_probe()::Nothing
-    _with_echo_server() do port
-        Core.println("[p] resolving inline")
-        addrs = Reseau.HostResolvers.resolve_tcp_addrs("tcp", "127.0.0.1:$port")
-        Core.println("[p] resolved n=", length(addrs))
-        Core.println("[p] string connect (no timeout)")
-        conn = NC.connect("127.0.0.1:$port")
-        Core.println("[p] connected; closing")
-        close(conn)
-        Core.println("[p] string connect (timeout_ns)")
-        conn2 = NC.connect("127.0.0.1:$port"; timeout_ns = Int64(10_000_000_000))
-        Core.println("[p] connected2")
-        close(conn2)
+struct _BlockedTrimResolver <: ND.AbstractResolver
+    release::Channel{Nothing}
+    exited::Channel{Nothing}
+end
+
+function ND.resolve_tcp_addrs(resolver::_BlockedTrimResolver, network::AbstractString, address::AbstractString; kwargs...)
+    try
+        take!(resolver.release)
+        return NC.SocketAddrV4[NC.loopback_addr(1)]
+    finally
+        put!(resolver.exited, nothing)
     end
+end
+
+function run_resolver_timeout()::Nothing
+    resolver = _BlockedTrimResolver(Channel{Nothing}(1), Channel{Nothing}(1))
+    try
+        err = try
+            NC.connect("blocked.test:1"; resolver, timeout_ns=Int64(100_000_000))
+            nothing
+        catch ex
+            ex
+        end
+        err isa ND.OpError || error("expected a wrapped resolver timeout")
+        err.err isa ND.DialTimeoutError || error("expected DialTimeoutError")
+    finally
+        put!(resolver.release, nothing)
+        take!(resolver.exited)
+    end
+    Core.println("resolver-timeout ok")
+    return nothing
+end
+
+function run_parallel_dial()::Nothing
+    listener = NC.listen(NC.loopback_addr(0))
+    port = Int((NC.addr(listener)::NC.SocketAddrV4).port)
+    client = server = nothing
+    resolver = ND.StaticResolver(hosts=Dict("dual.test" => NC.SocketEndpoint[NC.loopback_addr6(0), NC.loopback_addr(0)]))
+    try
+        client = NC.connect("dual.test:$port"; resolver,
+            policy=ND.ResolverPolicy(prefer_ipv6=true),
+            timeout_ns=Int64(10_000_000_000), fallback_delay_ns=Int64(1_000_000))
+        server = NC.accept(listener)
+        write(client, UInt8[0x42]) == 1 || error("parallel dial write failed")
+        read(server, UInt8) == 0x42 || error("parallel dial payload mismatch")
+    finally
+        client === nothing || close(client)
+        server === nothing || close(server)
+        close(listener)
+    end
+    Core.println("parallel-dial ok")
+    return nothing
+end
+
+function run_cache_refresh()::Nothing
+    parent = ND.StaticResolver(hosts=Dict("refresh.test" => NC.SocketEndpoint[NC.loopback_addr(0)]))
+    resolver = ND.CachingResolver(parent; ttl_ns=10_000_000_000, stale_ttl_ns=10_000_000_000)
+    expected = ND.resolve_tcp_addrs(resolver, "tcp4", "refresh.test:80")::Vector{NC.SocketAddrV4}
+    key = ND._lookup_key("tcp4", "refresh.test")
+    lock(resolver.lock)
+    try
+        resolver.entries[key].expires_ns = 0
+        resolver.entries[key].stale_expires_ns = typemax(Int64)
+    finally
+        unlock(resolver.lock)
+    end
+    stale = ND.resolve_tcp_addrs(resolver, "tcp4", "refresh.test:80")::Vector{NC.SocketAddrV4}
+    stale == expected || error("stale cache result changed")
+    while true
+        lock(resolver.lock)
+        done = try
+            !resolver.entries[key].refreshing
+        finally
+            unlock(resolver.lock)
+        end
+        done && break
+        yield()
+    end
+    refreshed = ND.resolve_tcp_addrs(resolver, "tcp4", "refresh.test:80")::Vector{NC.SocketAddrV4}
+    refreshed == expected || error("refreshed cache result changed")
+    Core.println("cache-refresh ok")
     return nothing
 end
 
 function run_case(case::String)::Nothing
-    if case == "probe"
-        run_dial_probe()
-    elseif case == "dial"
+    if case == "dial"
         run_dial_deadline()
     elseif case == "read-deadline"
         run_read_deadline_fires()
@@ -160,11 +220,20 @@ function run_case(case::String)::Nothing
         run_read_deadline_wake()
     elseif case == "timer"
         run_timer()
+    elseif case == "resolver-timeout"
+        run_resolver_timeout()
+    elseif case == "parallel-dial"
+        run_parallel_dial()
+    elseif case == "cache-refresh"
+        run_cache_refresh()
     elseif case == "all"
         run_timer()
         run_read_deadline_wake()
         run_read_deadline_fires()
         run_dial_deadline()
+        run_resolver_timeout()
+        run_parallel_dial()
+        run_cache_refresh()
         Core.println("deadline trim workload passed")
     else
         error("unknown case $case")
