@@ -20,7 +20,6 @@ jobs:
             revision: 50ca2655561fff36f2dca6c5987b110e3d829c7b
     env:
       JULIA_NUM_THREADS: ${{ matrix.threads }}
-      JULIA_DEPOT_PATH: ${{ runner.temp }}/reseau136-depot
       JULIA_PKG_PRECOMPILE_AUTO: '1'
       RESEAU_PRECOMPILE_ONLY: ''
       RESEAU_RUN_TLS_TESTS: '1'
@@ -35,6 +34,8 @@ jobs:
           version: '1.12.6'
           arch: x64
       - name: Reproduce fresh-depot installation, strict precompile and full tests
+        env:
+          JULIA_DEPOT_PATH: ${{ runner.temp }}/reseau136-depot
         shell: julia --color=yes --startup-file=no --history-file=no {0}
         run: |
           using Pkg, UUIDs
