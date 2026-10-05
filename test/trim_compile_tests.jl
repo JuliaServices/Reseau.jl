@@ -28,7 +28,9 @@ function _run_trim_command(cmd::Cmd)
     exit_code = -1
     try
         proc = run(pipeline(ignorestatus(cmd), stdout = out, stderr = out))
-        exit_code = something(proc.exitcode, -1)
+        # A process killed by a signal reports exitcode 0; report it the way
+        # a shell does so it cannot count as success.
+        exit_code = proc.termsignal == 0 ? Int(proc.exitcode) : 128 + Int(proc.termsignal)
     finally
         close(out)
     end

@@ -22,7 +22,10 @@ const IP = Reseau.IOPoll
     Base.Experimental.entrypoint(_unix_trim_deadline_read, ())
 
     function run_unix_trim_sample()::Nothing
-        mktempdir("/tmp"; prefix = "reseau-unix-trim-") do dir
+        # Not `mktempdir(f)`: on Julia 1.12 its cleanup iterates `walkdir`,
+        # which never finishes in a trimmed executable.
+        dir = mktempdir("/tmp"; prefix = "reseau-unix-trim-", cleanup = false)
+        try
             path = joinpath(dir, "s")
             listener = UnixTestHelpers.listener(path)
             client::Union{Nothing, U.Conn} = nothing
@@ -65,6 +68,8 @@ const IP = Reseau.IOPoll
                 client === nothing || close(client)
                 close(listener)
             end
+        finally
+            rm(dir; recursive = true)
         end
         return nothing
     end
