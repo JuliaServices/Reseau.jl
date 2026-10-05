@@ -1287,4 +1287,25 @@ end
 
         close(listener)
     end
+
+    @testset "finalizer leaves descriptors to the OS once exit begins" begin
+        # Julia runs every remaining finalizer at exit, live sockets included.
+        # A close task scheduled then would start while the runtime is being
+        # torn down. This hook is registered before Reseau loads, so it runs
+        # after Reseau's own exit hook (hooks run last in, first out).
+        script = """
+        atexit() do
+            finalize(Main.conn.fd.pfd)
+            timedwait(() -> !isopen(Main.conn), 2.0; pollint = 0.01)
+            print(isopen(Main.conn) ? "open" : "closed")
+        end
+        using Reseau
+        const TCP = Reseau.TCP
+        listener = TCP.listen(TCP.loopback_addr(0))
+        const conn = TCP.connect(TCP.addr(listener))
+        server = TCP.accept(listener)
+        """
+        cmd = `$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) -e $script`
+        @test readchomp(cmd) == "open"
+    end
 end
