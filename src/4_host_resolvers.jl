@@ -1509,7 +1509,7 @@ function _resolve_cached_host(
     end
     if stale_result !== nothing
         if refresh_needed
-            @async _refresh_cached_host!(resolver, key, String(network), h)
+            _spawn_task_body(@noinline () -> _refresh_cached_host!(resolver, key, String(network), h))
         end
         return stale_result::Vector{TCP.SocketEndpoint}
     end
@@ -1786,14 +1786,25 @@ end
     return IOPoll._saturating_add_ns(Int64(time_ns()), _effective_fallback_delay_ns(d))
 end
 
+# The scheduler invokes task bodies dynamically. Retain their call methods in
+# trimmed executables by giving them a static, non-inlined call edge.
+const _TRIM_TASK_CALL_EDGE = Ref(false)
+
+function _spawn_task_body(body::F)::Task where {F}
+    _TRIM_TASK_CALL_EDGE[] && body()
+    task = Task(body)
+    schedule(task)
+    return task
+end
+
 function _spawn_timer_task(f::F, deadline_ns::Int64) where {F}
     timer = IOPoll.TimerState(deadline_ns, Int64(0))
     IOPoll.schedule_timer!(timer, deadline_ns) || return nothing, nothing
-    task = @async begin
+    task = _spawn_task_body(@noinline function ()
         IOPoll.waittimer(timer) || return nothing
         f()
         return nothing
-    end
+    end)
     return timer, task
 end
 
@@ -1890,22 +1901,25 @@ function _resolve_with_deadline(
         end
         return nothing
     end
-    @async try
-        _notify_resolved_connect_addrs_future!(future, resolve_tcp_addrs(d.resolver, network, address; op = :connect, policy = d.policy))
-    catch err
-        ex = err::Exception
-        lock(future.notify)
+    _spawn_task_body(@noinline function ()
         try
-            if !future.done
-                future.result = nothing
-                future.err = ex
-                future.done = true
-                notify(future.notify)
+            _notify_resolved_connect_addrs_future!(future, resolve_tcp_addrs(d.resolver, network, address; op = :connect, policy = d.policy))
+        catch err
+            ex = err::Exception
+            lock(future.notify)
+            try
+                if !future.done
+                    future.result = nothing
+                    future.err = ex
+                    future.done = true
+                    notify(future.notify)
+                end
+            finally
+                unlock(future.notify)
             end
-        finally
-            unlock(future.notify)
         end
-    end
+        return nothing
+    end)
     try
         return _wait_resolved_connect_addrs_future!(future)
     finally
@@ -2133,11 +2147,11 @@ function _resolve_parallel(
         return nothing
     end
     function _start_racer(primary::Bool, addrs::AbstractVector{<:TCP.SocketEndpoint})
-        return @async begin
+        return _spawn_task_body(@noinline function ()
             conn, err = _resolve_serial(d, network, address, kind, addrs, deadline_ns, state)
             _emit_event!(DNSParallelResult(primary, conn, err))
             return nothing
-        end
+        end)
     end
     _start_racer(true, primaries)
     # This is the Happy Eyeballs-style stagger: start one address family first,
