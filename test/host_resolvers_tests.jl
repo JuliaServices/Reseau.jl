@@ -879,6 +879,19 @@ end
             if timeout_err isa ND.OpError
                 @test timeout_err.err isa ND.DialTimeoutError
             end
+            lookup_error = ND.LookupError("lookup failed", "failure.local")
+            failing_resolver = _ErrorResolver(lookup_error)
+            resolver_error = try
+                NC.connect("tcp", "failure.local:80"; timeout_ns = 5_000_000_000, resolver = failing_resolver)
+                nothing
+            catch ex
+                ex
+            end
+            @test resolver_error isa ND.OpError
+            if resolver_error isa ND.OpError
+                @test resolver_error.err === lookup_error
+            end
+            @test failing_resolver.calls == 1
             empty_net_err = try
                 ND.resolve_tcp_addrs("", "127.0.0.1:1")
                 nothing
