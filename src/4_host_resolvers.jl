@@ -418,11 +418,44 @@ function _AddrInfoFuture(hostname::String, flags::Cint)
     return _AddrInfoFuture(Threads.Condition(), hostname, flags, Cint(0), false, nothing, C_NULL)
 end
 
-const _ADDRINFO_WORK_QUEUE = Ref{Channel{_AddrInfoFuture}}()
+mutable struct _AddrInfoWorkQueue
+    futures::Channel{_AddrInfoFuture}
+    ready::Threads.Condition
+end
+
+_AddrInfoWorkQueue() = _AddrInfoWorkQueue(Channel{_AddrInfoFuture}(_ADDRINFO_POOL_CAPACITY), Threads.Condition())
+
+function _put_addrinfo_work!(work_queue::_AddrInfoWorkQueue, future::_AddrInfoFuture)::Nothing
+    put!(work_queue.futures, future)
+    lock(work_queue.ready)
+    try
+        notify(work_queue.ready; all = false)
+    finally
+        unlock(work_queue.ready)
+    end
+    return nothing
+end
+
+function _take_addrinfo_work!(work_queue::_AddrInfoWorkQueue)::Union{Nothing,_AddrInfoFuture}
+    lock(work_queue.ready)
+    try
+        while !isready(work_queue.futures)
+            isopen(work_queue.futures) || return nothing
+            # Channel close wakes its own blocked takers by throwing. Native
+            # workers must finish normal shutdown without exception backtraces.
+            wait(work_queue.ready)
+        end
+        return take!(work_queue.futures)
+    finally
+        unlock(work_queue.ready)
+    end
+end
+
+const _ADDRINFO_WORK_QUEUE = Ref{_AddrInfoWorkQueue}()
 # Native thread arguments are raw pointers, including before a worker enters
 # Julia. Keep every queue generation alive until its final worker exits.
 # Both these counts and _ADDRINFO_LIVE_THREADS use _ADDRINFO_EXIT_COND.
-const _ADDRINFO_QUEUE_ROOTS = IdDict{Channel{_AddrInfoFuture},Int}()
+const _ADDRINFO_QUEUE_ROOTS = IdDict{_AddrInfoWorkQueue,Int}()
 
 @inline function _addr_info_future_result_ptr(future::_AddrInfoFuture)::Ptr{Ptr{_AddrInfo}}
     base = Ptr{UInt8}(pointer_from_objref(future))
@@ -490,7 +523,7 @@ function _run_addrinfo_future!(future::_AddrInfoFuture)::Nothing
     return nothing
 end
 
-function _addrinfo_worker_started!(work_queue::Channel{_AddrInfoFuture})::Nothing
+function _addrinfo_worker_started!(work_queue::_AddrInfoWorkQueue)::Nothing
     lock(_ADDRINFO_EXIT_COND)
     try
         _ADDRINFO_QUEUE_ROOTS[work_queue] = get(_ADDRINFO_QUEUE_ROOTS, work_queue, 0) + 1
@@ -501,7 +534,7 @@ function _addrinfo_worker_started!(work_queue::Channel{_AddrInfoFuture})::Nothin
     return nothing
 end
 
-function _addrinfo_worker_stopped!(work_queue::Channel{_AddrInfoFuture})::Nothing
+function _addrinfo_worker_stopped!(work_queue::_AddrInfoWorkQueue)::Nothing
     lock(_ADDRINFO_EXIT_COND)
     try
         remaining = _ADDRINFO_QUEUE_ROOTS[work_queue] - 1
@@ -528,9 +561,11 @@ function _addrinfo_live_threads()::Int
 end
 
 function _addrinfo_worker_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
-    work_queue = unsafe_pointer_to_objref(arg)::Channel{_AddrInfoFuture}
+    work_queue = unsafe_pointer_to_objref(arg)::_AddrInfoWorkQueue
     try
-        for future in work_queue
+        while true
+            future = _take_addrinfo_work!(work_queue)
+            future === nothing && break
             _run_addrinfo_future!(future)
         end
     catch
@@ -540,11 +575,11 @@ function _addrinfo_worker_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
     return C_NULL
 end
 
-function _ensure_addrinfo_pool!()::Channel{_AddrInfoFuture}
+function _ensure_addrinfo_pool!()::_AddrInfoWorkQueue
     lock(_ADDRINFO_POOL_LOCK)
     try
         if !isassigned(_ADDRINFO_WORK_QUEUE)
-            _ADDRINFO_WORK_QUEUE[] = Channel{_AddrInfoFuture}(_ADDRINFO_POOL_CAPACITY)
+            _ADDRINFO_WORK_QUEUE[] = _AddrInfoWorkQueue()
             _ADDRINFO_STARTED_THREADS[] = 0
         end
         work_queue = _ADDRINFO_WORK_QUEUE[]
@@ -570,9 +605,15 @@ function shutdown!(timeout::Real = 5.0)::Nothing
     try
         if isassigned(_ADDRINFO_WORK_QUEUE)
             work_queue = _ADDRINFO_WORK_QUEUE[]
-            isopen(work_queue) && close(work_queue)
+            lock(work_queue.ready)
+            try
+                isopen(work_queue.futures) && close(work_queue.futures)
+                notify(work_queue.ready)
+            finally
+                unlock(work_queue.ready)
+            end
         end
-        _ADDRINFO_WORK_QUEUE[] = Channel{_AddrInfoFuture}(_ADDRINFO_POOL_CAPACITY)
+        _ADDRINFO_WORK_QUEUE[] = _AddrInfoWorkQueue()
         _ADDRINFO_STARTED_THREADS[] = 0
     finally
         unlock(_ADDRINFO_POOL_LOCK)
@@ -600,7 +641,7 @@ end
 
 function __init__()
     _ADDRINFO_THREAD_ENTRY_C[] = @cfunction(_addrinfo_worker_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
-    _ADDRINFO_WORK_QUEUE[] = Channel{_AddrInfoFuture}(_ADDRINFO_POOL_CAPACITY)
+    _ADDRINFO_WORK_QUEUE[] = _AddrInfoWorkQueue()
     _ADDRINFO_STARTED_THREADS[] = 0
     _ADDRINFO_LIVE_THREADS[] = 0
     empty!(_ADDRINFO_QUEUE_ROOTS)
@@ -817,7 +858,7 @@ function _native_getaddrinfo(hostname::AbstractString; flags::Cint = Cint(0))::V
     # `getaddrinfo` can block inside the system resolver stack. Run it on a
     # small dedicated worker pool so hostname resolution does not occupy a Julia
     # scheduler thread while callers wait on timeout/deadline machinery.
-    put!(_ensure_addrinfo_pool!(), future)
+    _put_addrinfo_work!(_ensure_addrinfo_pool!(), future)
     ret = _wait_addrinfo_future!(future)
     ret == 0 || _lookup_error("lookup failed: $(_gai_error_string(ret))", hostname_s)
     try
