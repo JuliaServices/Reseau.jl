@@ -132,10 +132,6 @@ end
 Park the current Julia task until the waiter is notified.
 Concurrent waits on the same `PollWaiter` are forbidden.
 
-While parked the task is temporarily pinned to the thread it parks on, so the
-notifier's wake is delivered to that thread's run queue instead of the shared
-one. The task's previous stickiness is restored before this function returns.
-
 Returns the `PollWakeReason` that woke the waiter.
 
 Throws `ArgumentError` if two tasks try to wait on the same waiter
@@ -143,17 +139,16 @@ simultaneously, or if the waiter state machine is observed in an invalid state.
 """
 function pollwait!(waiter::PollWaiter)::PollWakeReason.T
     task = current_task()
+    # Preserve the caller's scheduling choice. A migratable waiter must stay
+    # on the shared queue when notified: its previous worker may be busy until
+    # this waiter finishes. Restoring stickiness after wait() resumes is too
+    # late to let another worker run it. Worker wake policy belongs to Julia's
+    # scheduler, which can see the queued work and available workers.
+    #
     # Consume an already-latched wake without parking, or claim the empty slot
     # by publishing this task in the word. Publishing the task IS the park
     # commitment: from here on any notifier that swaps it for a token owns
     # exactly one `schedule` of this task.
-    #
-    # While parked, adopt stickiness so the poller's `schedule(task)` lands on
-    # this thread's local queue. Waking a migratable task drops it on the shared
-    # run queue instead, and every polling thread goes looking for it; under a
-    # paced load that costs about half a core per interactive thread. Stickiness
-    # is restored on every wake, so a runnable task is migratable again by the
-    # time it leaves here and idle threads can still steal it.
     while true
         state = @atomic :acquire waiter.state
         if state === nothing
@@ -166,12 +161,9 @@ function pollwait!(waiter::PollWaiter)::PollWakeReason.T
             throw(ArgumentError("concurrent wait on PollWaiter"))
         end
     end
-    was_sticky = task.sticky
     try
         while true
-            task.sticky = true
             wait()
-            task.sticky = was_sticky
             # The token carries its reason in the same atomic word, so consuming
             # it cannot race a separate reason publication. A failed consume can
             # only mean the CANCELED→READY upgrade landed mid-consume: re-read
@@ -192,7 +184,6 @@ function pollwait!(waiter::PollWaiter)::PollWakeReason.T
             end
         end
     catch
-        task.sticky = was_sticky
         _abort_pollwait!(waiter, task)
         rethrow()
     end

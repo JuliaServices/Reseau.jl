@@ -6,6 +6,11 @@ const IP = Reseau.IOPoll
 const SO = Reseau.SocketOps
 const _EL_EWOULDBLOCK = @static isdefined(Base.Libc, :EWOULDBLOCK) ? Int32(getfield(Base.Libc, :EWOULDBLOCK)) : Int32(Base.Libc.EAGAIN)
 
+mutable struct _PollWaitSchedulingGates
+    @atomic busy::Bool
+    @atomic finished::Bool
+end
+
 function _el_socketpair_stream()
     listener = SO.INVALID_SOCKET
     client = SO.INVALID_SOCKET
@@ -203,8 +208,7 @@ end
             end
             schedule(interrupted_task, InterruptException(); error = true)
             @test_throws TaskFailedException fetch(interrupted_task)
-            # The interrupt unwinds through the park's catch, which must put
-            # the caller's stickiness back before rethrowing.
+            # An interrupted wait also preserves the caller's scheduling choice.
             @test !interrupted_task.sticky
             @test (@atomic :acquire interrupted_waiter.state) === nothing
             @test !NP.pollnotify!(interrupted_waiter, NP.PollWakeReason.READY)
@@ -259,29 +263,57 @@ end
         _el_log_test_progress("DONE: pollwait wake reason precedence")
         _el_log_test_progress("START: pollwait parking preserves caller scheduling")
         @testset "pollwait parking preserves caller scheduling" begin
-            # A migratable waiter adopts stickiness only while parked, so the
-            # poller's wake lands on the thread it parked on. Once woken it has
-            # to be migratable again.
             waiter = NP.PollWaiter()
-            waiter_task = Threads.@spawn begin
-                before = Threads.threadid()
-                reason = NP.pollwait!(waiter)
-                (reason, before, Threads.threadid())
-            end
+            waiter_task = Threads.@spawn NP.pollwait!(waiter)
             while !((@atomic :acquire waiter.state) isa Task) && !istaskdone(waiter_task)
                 yield()
             end
-            # A regression that never adopts stickiness spins here; the CI job
-            # timeout is the guard, as in the lost-wakeup loop above.
-            while !waiter_task.sticky && !istaskdone(waiter_task)
-                yield()
-            end
-            @test waiter_task.sticky
-            @test NP.pollnotify!(waiter, NP.PollWakeReason.READY)
-            reason, before, after = fetch(waiter_task)
-            @test reason == NP.PollWakeReason.READY
-            @test before == after
             @test !waiter_task.sticky
+            @test NP.pollnotify!(waiter, NP.PollWakeReason.READY)
+            @test fetch(waiter_task) == NP.PollWakeReason.READY
+            @test !waiter_task.sticky
+
+            # A ready waiter must finish on a free worker while its old worker
+            # waits for that completion without yielding. Pin only the blocker.
+            if Threads.nthreads() > 1
+                for wake_reason in (NP.PollWakeReason.READY, NP.PollWakeReason.CANCELED)
+                    waiter = NP.PollWaiter()
+                    gates = _PollWaitSchedulingGates(false, false)
+                    blocker_ref = Ref{Task}()
+                    notifier = errormonitor(Threads.@spawn begin
+                        while !(@atomic :acquire gates.busy)
+                            yield()
+                        end
+                        NP.pollnotify!(waiter, wake_reason)
+                    end)
+                    waiter_task = errormonitor(Threads.@spawn begin
+                        task = current_task()
+                        origin = Threads.threadid()
+                        blocker = Task(() -> begin
+                            @atomic :release gates.busy = true
+                            while !(@atomic :acquire gates.finished)
+                                GC.safepoint()
+                            end
+                        end)
+                        blocker_ref[] = blocker
+                        original_sticky = task.sticky
+                        schedule(blocker)
+                        task.sticky = original_sticky
+                        try
+                            reason = NP.pollwait!(waiter)
+                            (reason, origin, Threads.threadid(), task.sticky)
+                        finally
+                            @atomic :release gates.finished = true
+                        end
+                    end)
+                    reason, origin, resumed, sticky = fetch(waiter_task)
+                    @test fetch(notifier)
+                    fetch(blocker_ref[])
+                    @test reason == wake_reason
+                    @test origin != resumed
+                    @test !sticky
+                end
+            end
 
             # A caller that asked for stickiness keeps it. The park must not
             # hand back a different scheduling choice than the task started

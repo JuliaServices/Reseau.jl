@@ -28,7 +28,9 @@ function _run_trim_command(cmd::Cmd)
     exit_code = -1
     try
         proc = run(pipeline(ignorestatus(cmd), stdout = out, stderr = out))
-        exit_code = something(proc.exitcode, -1)
+        # A signal can leave exitcode == 0. Check the full process status so a
+        # terminated executable cannot count as a passing runtime check.
+        exit_code = success(proc) ? 0 : max(1, something(proc.exitcode, -1))
     finally
         close(out)
     end
@@ -143,6 +145,11 @@ function _parse_trim_verify_totals(output::String)
 end
 
 @testset "Trim compile" begin
+    @static if Sys.isunix()
+        @test first(_run_trim_command(Cmd(["sh", "-c", "exit 0"]))) == 0
+        @test first(_run_trim_command(Cmd(["sh", "-c", "exit 3"]))) == 3
+        @test first(_run_trim_command(Cmd(["sh", "-c", raw"kill -TERM $$"]))) != 0
+    end
     if !Base.get_bool_env("RESEAU_RUN_TRIM_TESTS", true)
         println("[trim] skip RESEAU_RUN_TRIM_TESTS=false: user requested to skip trim compilation tests")
         @test true

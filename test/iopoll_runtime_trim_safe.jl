@@ -68,6 +68,23 @@ function _write_byte(fd::SO.SocketFD, b::UInt8)::Nothing
     throw(ArgumentError("timed out writing byte"))
 end
 
+struct _TrimParkWriter
+    fd::SO.SocketFD
+    waiter::IP.PollWaiter
+end
+
+function (writer::_TrimParkWriter)()::Nothing
+    while !((@atomic :acquire writer.waiter.state) isa Task)
+        yield()
+    end
+    _write_byte(writer.fd, 0x44)
+    return nothing
+end
+
+# Task entry happens through the runtime, so retain its callable method when
+# trimming, independently of the synchronous main entrypoint.
+Base.Experimental.entrypoint(Tuple{_TrimParkWriter})
+
 function run_iopoll_runtime_trim_sample()::Nothing
     fd0, fd1 = _stream_pair()
     ipfd = IP.FD(fd0)
@@ -83,9 +100,13 @@ function run_iopoll_runtime_trim_sample()::Nothing
             err isa IP.DeadlineExceededError || rethrow(err)
         end
         IP.set_read_deadline!(ipfd, Int64(0))
-        _write_byte(fd1, 0x44)
+        # Force the compiled read through arm_waiter! and pollwait! before the
+        # peer writes, so this sample also checks the parked readiness path.
+        waiter = IP._poll_registration(ipfd.pd).read_waiter
+        writer = schedule(Task(_TrimParkWriter(fd1, waiter)))
         buf = Vector{UInt8}(undef, 1)
         nread = IP.read!(ipfd, buf)
+        wait(writer)
         nread == 1 || error("expected one-byte iopoll read")
         buf[1] == 0x44 || error("unexpected iopoll read byte")
     finally

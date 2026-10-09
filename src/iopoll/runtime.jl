@@ -361,6 +361,12 @@ Backend hook invoked immediately before waiting so platforms that need explicit
 arming (such as IOCP readiness probes) can submit a wait operation.
 """
 function arm_waiter!(registration::Registration, mode::PollMode.T)
+    # epoll and kqueue stay armed after registration. Their backend hook is a
+    # no-op, so avoid taking the shared poller lock on every Unix wait. IOCP
+    # still needs the locked lifetime checks before it submits a probe.
+    @static if Sys.islinux() || Sys.isbsd()
+        return nothing
+    end
     _mode_is_empty(mode) && return nothing
     isassigned(POLLER) || return nothing
     state = POLLER[]
