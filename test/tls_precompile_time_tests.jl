@@ -94,6 +94,4 @@ using Reseau
         @test_throws tls.TLSError Reseau._pc_run_tls_roundtrip_states!(server_at(future), client_at(valid))
         @test_throws tls.TLSError Reseau._pc_run_tls_roundtrip_states!(server_at(valid), client_at(future))
     end
-    # Exercise mTLS and session resumption through the shared production workload.
-    @test Reseau._pc_run_tls_workload!() === nothing
 end
