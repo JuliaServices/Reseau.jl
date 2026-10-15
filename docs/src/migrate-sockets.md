@@ -24,6 +24,7 @@ Depth = 2:3
 | `listen(ip"127.0.0.1", port)` | `TCP.listen(TCP.loopback_addr(port))` |
 | `connect(ip"127.0.0.1", port)` | `TCP.connect(TCP.loopback_addr(port))` |
 | `connect("example.com", port)` | `TCP.connect("example.com:$port")` |
+| `connect("/tmp/app.sock")` | `Reseau.Unix.connect("/tmp/app.sock")` |
 | `accept(server)` | `TCP.accept(listener)` |
 | `read!(sock, buf)` | `read!(conn, buf)` |
 | `write(sock, buf)` | `write(conn, buf)` |
@@ -31,6 +32,9 @@ Depth = 2:3
 | `getsockname(sock)` | `TCP.local_addr(conn)` |
 | `getpeername(sock)` | `TCP.remote_addr(conn)` |
 | external TLS wrapper | `TLS.connect`, `TLS.listen`, `TLS.client`, `TLS.server` |
+
+`Reseau.Unix` only connects to filesystem sockets, on Linux, macOS and FreeBSD.
+Keep `Sockets` for Unix-socket servers and Windows named pipes.
 
 ## TCP Server Shape
 
