@@ -6,8 +6,8 @@ Description = "Documentation for Reseau.jl's pure-Julia TCP and TLS transport st
 
 `Reseau.jl` is a pure-Julia networking transport stack with deadline-aware TCP,
 hostname-aware dialing, and TLS in one package. The public surface is
-deliberately small: plain TCP lives under [`Reseau.TCP`](@ref) and TLS lives
-under [`Reseau.TLS`](@ref). String-address dialing uses the same entrypoints,
+deliberately small: plain TCP lives under [`Reseau.TCP`](@ref), datagrams under
+[`Reseau.UDP`](@ref), and TLS under [`Reseau.TLS`](@ref). String-address dialing uses the same entrypoints,
 while the advanced resolver types behind that behavior are documented
 separately in [Name Resolution](@ref name-resolution-manual).
 Filesystem Unix socket clients are available through [`Reseau.Unix`](@ref).
@@ -17,6 +17,7 @@ Pages = [
     "index.md",
     "tcp.md",
     "unix.md",
+    "udp.md",
     "tls.md",
     "resolution.md",
     "migrate-sockets.md",
@@ -40,6 +41,7 @@ the qualified `Reseau.Unix` namespace:
 ```@docs; canonical=false
 Reseau.TCP
 Reseau.Unix
+Reseau.UDP
 Reseau.TLS
 ```
 
@@ -93,6 +95,7 @@ reply
 
 - Read [TCP](@ref tcp-manual) for plain connections, address constructors, deadlines, I/O semantics, and socket options.
 - Read [Unix Socket Clients](@ref unix-manual) for local filesystem connections.
+- Read [UDP](@ref udp-manual) for connected and unconnected datagram sockets.
 - Read [TLS](@ref tls-manual) for `TLS.Config`, client/server wrappers, lazy handshakes, and connection-state inspection.
 - Read [Name Resolution](@ref name-resolution-manual) for advanced resolver controls behind the string-address entrypoints.
 - Read [Migrating from `Sockets` to Reseau](@ref sockets-migration-manual) if you are porting code from Julia's stdlib `Sockets`.

@@ -136,9 +136,10 @@ remote_addr
 addr
 ```
 
-Use absolute monotonic nanoseconds from `time_ns()` for deadline APIs. Setting
-a deadline to `0` clears it, while setting it to a time in the past makes the
-next blocking wait time out immediately.
+Deadlines are absolute `time_ns()` timestamps, and `0` clears one. Once a
+deadline passes, reads or writes in that direction fail even when data is
+ready, until the deadline is cleared or moved. A deadline in the past applies
+immediately.
 
 Deadline expiry is surfaced as [`TCP.DeadlineExceededError`](@ref). Catch that
 alias instead of reaching into `Reseau.IOPoll` directly:
