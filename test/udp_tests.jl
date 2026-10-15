@@ -57,6 +57,21 @@ end
         close(b)
     end
 
+    @testset "allocating receives keep only the datagram's bytes" begin
+        a, b = _udp_pair()
+        UDP.send(b, "tiny")
+        data = UDP.recv(a)
+        UDP.sendto(a, "tiny", UDP.local_addr(b))
+        data2, _ = UDP.recvfrom(b)
+        @test data == data2 == b"tiny"
+        @static if VERSION >= v"1.11"
+            # Not the 64 KiB receive buffer shrunk with `resize!`.
+            @test length(data.ref.mem) == length(data2.ref.mem) == 4
+        end
+        close(a)
+        close(b)
+    end
+
     @testset "connected/unconnected guards" begin
         a, b = _udp_pair()
         @test_throws ArgumentError UDP.sendto(b, "x", UDP.local_addr(a))
