@@ -57,6 +57,9 @@ using Reseau
         client = Reseau._pc_tls_client_config(;
             verify_peer = true, ca_file = expired, min_version = version, max_version = version,
         )
+        # The handshake includes first-call compilation, so it gets the same
+        # generous budget as every other workload step.
+        @test server.handshake_timeout_ns == client.handshake_timeout_ns == Reseau._PC_OP_TIMEOUT_NS
         renamed = tls._config_with_server_name(client, "localhost")
         @test renamed._verification_time_s == Reseau._PC_TLS_VERIFICATION_TIME_S
         states = Reseau._pc_run_tls_roundtrip_states!(server, renamed)
