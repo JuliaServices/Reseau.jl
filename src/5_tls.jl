@@ -2360,12 +2360,24 @@ function _native_tls13_write_alert!(conn::Conn, alert_level::UInt8, alert_desc::
     return nothing
 end
 
+# Fatal alerts are sealed with the write cipher, so callers hold `write_lock`.
+# As in Go's `sendAlertLocked`, nothing more may be written after one.
+function _fail_writes_after_fatal_alert!(conn::Conn, alert_desc::UInt8)::Nothing
+    conn.write_permanent_error === nothing || return nothing
+    conn.write_permanent_error = TLSError("write", Int32(0), "tls: local error: sent fatal alert $(Int(alert_desc))", nothing)
+    return nothing
+end
+
 function _native_tls13_try_write_fatal_alert!(conn::Conn, alert_desc::UInt8)::Nothing
     _is_closed(conn) && return nothing
     !(conn.native_state isa _TLS13NativeClientState) && return nothing
+    lock(conn.write_lock)
     try
         _native_tls13_write_alert!(conn, _TLS_ALERT_LEVEL_FATAL, alert_desc)
     catch
+    finally
+        _fail_writes_after_fatal_alert!(conn, alert_desc)
+        unlock(conn.write_lock)
     end
     return nothing
 end
@@ -2383,9 +2395,13 @@ end
 function _native_tls12_try_write_fatal_alert!(conn::Conn, alert_desc::UInt8)::Nothing
     _is_closed(conn) && return nothing
     !(conn.native_state isa _TLS12NativeState) && return nothing
+    lock(conn.write_lock)
     try
         _native_tls12_write_alert!(conn, _TLS_ALERT_LEVEL_FATAL, alert_desc)
     catch
+    finally
+        _fail_writes_after_fatal_alert!(conn, alert_desc)
+        unlock(conn.write_lock)
     end
     return nothing
 end
@@ -2395,6 +2411,7 @@ function _native_auto_try_write_fatal_alert!(conn::Conn, alert_desc::UInt8)::Not
     !_is_tls_auto_policy(conn.policy) && return nothing
     native_state = conn.native_state
     native_state === nothing && return nothing
+    lock(conn.write_lock)
     try
         if native_state isa _TLS13NativeClientState
             _tls13_write_record!(
@@ -2412,6 +2429,9 @@ function _native_auto_try_write_fatal_alert!(conn::Conn, alert_desc::UInt8)::Not
             )
         end
     catch
+    finally
+        _fail_writes_after_fatal_alert!(conn, alert_desc)
+        unlock(conn.write_lock)
     end
     return nothing
 end
