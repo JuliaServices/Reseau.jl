@@ -6,6 +6,27 @@ const IP = Reseau.IOPoll
 const SO = Reseau.SocketOps
 
 # Deadlocks surface as a suite hang; the CI job timeout is the final guard.
+# A string whose `cconvert(Ptr{UInt8}, s)` returns a fresh buffer that is
+# overwritten with 'Z' when collected, like strings that materialize a
+# temporary `String` to expose a pointer.
+struct _TempPtrString <: AbstractString
+    s::String
+end
+Base.ncodeunits(s::_TempPtrString) = ncodeunits(s.s)
+Base.codeunit(::_TempPtrString) = UInt8
+Base.codeunit(s::_TempPtrString, i::Integer) = codeunit(s.s, i)
+Base.isvalid(s::_TempPtrString, i::Integer) = isvalid(s.s, i)
+Base.iterate(s::_TempPtrString, i::Int = 1) = iterate(s.s, i)
+mutable struct _TempPtrBuf
+    data::Vector{UInt8}
+end
+function Base.cconvert(::Type{Ptr{UInt8}}, s::_TempPtrString)
+    b = _TempPtrBuf(Vector{UInt8}(s.s))
+    finalizer(x -> fill!(x.data, UInt8('Z')), b)
+    return b
+end
+Base.unsafe_convert(::Type{Ptr{UInt8}}, b::_TempPtrBuf) = pointer(b.data)
+
 function _nc_wait_task_done(task::Task)
     # Status-only wait: a task that failed is still "done" here, matching the
     # polling helper this replaced; callers inspect results via fetch.
@@ -1307,5 +1328,44 @@ end
         """
         cmd = `$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) -e $script`
         @test readchomp(cmd) == "open"
+    end
+end
+
+@static if VERSION >= v"1.11"
+    @testset "write(conn, codeunits(s)) keeps converted bytes alive" begin
+        listener = nothing
+        client = nothing
+        server = nothing
+        try
+            listener = NC.listen(NC.loopback_addr(0); backlog = 4)
+            laddr = NC.addr(listener)::NC.SocketAddrV4
+            accept_task = errormonitor(@async NC.accept(listener))
+            client = NC.connect(NC.loopback_addr(Int(laddr.port)))
+            server = fetch(accept_task)
+            # Park a writer on a full socket so the next write queues behind it.
+            big = fill(UInt8('B'), 16 << 20)
+            blocker = errormonitor(@async write(client, big))
+            waiter = IP.current_registration(client.fd.pfd.pd).write_waiter
+            while !istaskdone(blocker) && !((@atomic :acquire waiter.state) isa Task)
+                yield()
+            end
+            payload = repeat("A", 1000)
+            victim = errormonitor(@async write(client, codeunits(_TempPtrString(payload))))
+            waitq = client.fd.pfd.fdlock.wsema.cond.waitq
+            while !istaskdone(victim) && !any(t -> t === victim, waitq)
+                yield()
+            end
+            # Collects the converted bytes unless the queued write keeps them alive.
+            GC.gc(true)
+            got = Vector{UInt8}(undef, length(big) + ncodeunits(payload))
+            read!(server, got)
+            @test fetch(blocker) == length(big)
+            @test fetch(victim) == ncodeunits(payload)
+            @test String(got[(length(big) + 1):end]) == payload
+        finally
+            _close_quiet!(server)
+            _close_quiet!(client)
+            _close_quiet!(listener)
+        end
     end
 end

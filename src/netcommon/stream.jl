@@ -349,7 +349,10 @@ function Base.write(conn::_StreamConn, buf::StridedVector{UInt8})::Int
 end
 
 function Base.write(conn::_StreamConn, buf::Base.CodeUnits{UInt8,<:AbstractString})::Int
-    return GC.@preserve buf _write_rooted!(conn, pointer(buf), length(buf), buf)
+    # For some string types the pointer refers to a temporary made by `cconvert`
+    # (a materialized `String`, say); keep that temporary alive, not just `buf`.
+    x = Base.cconvert(Ptr{UInt8}, buf)
+    return GC.@preserve x _write_rooted!(conn, Base.unsafe_convert(Ptr{UInt8}, x), length(buf), x)
 end
 
 # Specialize Base's String write (which funnels through `unsafe_write`) so the
