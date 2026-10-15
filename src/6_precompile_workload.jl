@@ -25,7 +25,7 @@ const _PC_EWOULDBLOCK = @static isdefined(Base.Libc, :EWOULDBLOCK) ? Int32(getfi
 # hangs `Pkg.add` itself. The budget bounds each individual step, not the
 # whole workload, and is deliberately generous: during precompilation a
 # step's first execution includes its own JIT compilation, and a spurious
-# timeout aborts precompilation outright.
+# timeout skips the rest of the workload.
 const _PC_OP_TIMEOUT_NS = Int64(30_000_000_000)
 
 @inline _pc_deadline_ns()::Int64 = IP._saturating_add_ns(Int64(time_ns()), _PC_OP_TIMEOUT_NS)
@@ -182,8 +182,6 @@ function _pc_workload_enabled(name::AbstractString)::Bool
 end
 
 function _pc_run_eventloops_workload!()
-    IP.__init__()
-    @assert isassigned(IP.POLLER)
     waiter = IP.PollWaiter()
     IP.pollnotify!(waiter)
     IP.pollwait!(waiter)
@@ -889,7 +887,14 @@ end
 function _pc_run_precompile_workloads!()::Nothing
     IP.__init__()
     @assert isassigned(IP.POLLER)
-    _pc_run_selected_workloads!()
+    try
+        _pc_run_selected_workloads!()
+    catch err
+        # The workloads only warm the compiler. A machine where loopback I/O is
+        # blocked or too slow must still be able to load Reseau and the packages
+        # that depend on it; the skipped calls compile on first use instead.
+        @warn "Reseau precompile workload failed; skipping the rest of it" exception = (err, catch_backtrace())
+    end
     _pc_compile_unbounded_dials!()
     return nothing
 end
