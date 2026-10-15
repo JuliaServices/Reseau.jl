@@ -111,11 +111,12 @@ connection_state
 addr
 ```
 
-Two details matter in practice:
+Details that matter in practice:
 
 - `read!(conn, buf)` fills `buf` or throws `EOFError`; use `readbytes!` or `readavailable` when you want short-read behavior.
-- TLS deadlines are delegated to the wrapped TCP transport, so the timeout
-  model matches [TCP](@ref tcp-manual) exactly.
+- TLS deadlines apply to the wrapped TCP transport and follow the
+  [TCP](@ref tcp-manual) model, except that plaintext already decrypted is
+  still returned after the read deadline passes.
 - A timed-out TLS write is treated as a permanent write failure because partial
   record emission leaves future writes unsafe.
 - `close(conn)` and `close(listener)` are idempotent, and `isopen` is available

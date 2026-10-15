@@ -435,15 +435,12 @@ end
 """
     set_deadline!(conn, deadline_ns)
 
-Set both read and write deadlines on `conn`.
+Set both the read and write deadline of `conn` to `deadline_ns`, an absolute
+timestamp on the `time_ns()` clock. `0` clears them.
 
-- `deadline_ns` is an absolute monotonic timestamp in nanoseconds, using the
-  same clock as `time_ns()`.
-- `deadline_ns == 0` disables both deadlines.
-- `deadline_ns <= time_ns()` marks both sides as immediately timed out.
-
-After the deadline is reached, blocking `read!`/`write` operations fail with
-`DeadlineExceededError` until the deadline is cleared or moved forward.
+Once a deadline passes, pending and later reads and writes throw
+`DeadlineExceededError`, even when data is ready, until the deadline is
+cleared or moved. A deadline at or before `time_ns()` applies immediately.
 """
 function set_deadline!(conn::_StreamConn, deadline_ns::Integer)
     IOPoll.set_deadline!(conn.fd.pfd, deadline_ns)
@@ -453,13 +450,10 @@ end
 """
     set_read_deadline!(conn, deadline_ns)
 
-Set only the read deadline on `conn`.
-
-- Uses absolute monotonic nanoseconds (`time_ns()` clock).
-- `deadline_ns == 0` disables read timeouts.
-- `deadline_ns <= time_ns()` causes read waits to time out immediately.
-
-This affects `read!` wait paths only.
+Set the read deadline of `conn` (absolute, `time_ns()` clock; `0` clears it).
+Once it passes, pending and later reads, including `tryread!` and `eof`, throw
+`DeadlineExceededError` even when data is ready, until the deadline is cleared
+or moved.
 """
 function set_read_deadline!(conn::_StreamConn, deadline_ns::Integer)
     IOPoll.set_read_deadline!(conn.fd.pfd, deadline_ns)
@@ -469,13 +463,9 @@ end
 """
     set_write_deadline!(conn, deadline_ns)
 
-Set only the write deadline on `conn`.
-
-- Uses absolute monotonic nanoseconds (`time_ns()` clock).
-- `deadline_ns == 0` disables write timeouts.
-- `deadline_ns <= time_ns()` causes write waits to time out immediately.
-
-This affects `write` wait paths only.
+Set the write deadline of `conn` (absolute, `time_ns()` clock; `0` clears it).
+Once it passes, pending and later writes throw `DeadlineExceededError`, even
+when the socket could accept data, until the deadline is cleared or moved.
 """
 function set_write_deadline!(conn::_StreamConn, deadline_ns::Integer)
     IOPoll.set_write_deadline!(conn.fd.pfd, deadline_ns)

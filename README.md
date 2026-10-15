@@ -10,9 +10,10 @@ Reseau provides:
 
 - TCP connections and listeners
 - UDP datagram sockets, connected and unconnected
+- filesystem Unix socket clients
 - hostname-aware dialing and listening through the `TCP` and `TLS` entrypoints
 - TLS clients and listeners
-- integrated readiness, deadline, and timer handling across macOS, Linux, and Windows
+- integrated readiness, deadline, and timer handling across Linux, macOS, Windows, and FreeBSD
 - precompile and `--trim=safe` validation in the test suite
 
 ## Installation
@@ -24,11 +25,13 @@ Pkg.add("Reseau")
 
 ## Main Entry Points
 
-The supported public entry points are the exported `TCP` and `TLS` modules:
+The public entry points are the exported `TCP`, `UDP`, and `TLS` modules, plus
+`Reseau.Unix`:
 
 - `TCP` for TCP connections, listeners, deadlines, and string-address dialing
 - `UDP` for datagram sockets with the same deadline and readiness model
 - `TLS` for TLS clients and listeners
+- `Reseau.Unix` for filesystem Unix socket clients (Linux, macOS, FreeBSD)
 
 ## Quick Start
 
@@ -181,7 +184,7 @@ config = TLS.Config(
 
 ## Internal Architecture
 
-`TCP` and `TLS` are the intended public surfaces. Reseau also contains internal
+`TCP`, `UDP`, `TLS`, and `Reseau.Unix` are the public surfaces. Reseau also contains internal
 support layers such as `Reseau.SocketOps`, `Reseau.IOPoll`, and
 `Reseau.HostResolvers` that power the transport stack but are not the primary
 API entrypoints.
@@ -191,6 +194,8 @@ API entrypoints.
 - [Stable docs](https://juliaservices.github.io/Reseau.jl/stable)
 - [Dev docs](https://juliaservices.github.io/Reseau.jl/dev)
 - [TCP](https://juliaservices.github.io/Reseau.jl/stable/tcp/)
+- [Unix Socket Clients](https://juliaservices.github.io/Reseau.jl/stable/unix/)
+- [UDP](https://juliaservices.github.io/Reseau.jl/stable/udp/)
 - [TLS](https://juliaservices.github.io/Reseau.jl/stable/tls/)
 - [Name Resolution](https://juliaservices.github.io/Reseau.jl/stable/resolution/)
 - [Sockets Migration Guide](https://juliaservices.github.io/Reseau.jl/stable/migrate-sockets/)
