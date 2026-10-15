@@ -243,6 +243,17 @@ end
     return err.errnum == Int(Base.Libc.ENOTCONN) || err.errnum == Int(Base.Libc.EINVAL)
 end
 
+mutable struct _ExitState
+    @atomic exiting::Bool
+end
+
+const _EXIT_STATE = _ExitState(false)
+
+function __init__()
+    atexit(() -> (@atomic :release _EXIT_STATE.exiting = true; nothing))
+    return nothing
+end
+
 function _finalizer_close!(pfd::IOPoll.FD)
     try
         Base.close(pfd)
@@ -260,7 +271,14 @@ end
 # unlock/decref, so the safety net cannot close a descriptor that is still in
 # use after the wrapper's last field access. Explicit `close` remains the
 # documented path — this only reclaims descriptors the program forgot.
+#
+# Once the process starts exiting, the finalizer does nothing: the OS releases
+# every descriptor at exit. Julia runs all remaining finalizers during exit
+# (live descriptors included) and then tears the runtime down without stopping
+# threads that are compiling code, so a close task started then can crash the
+# process inside the JIT.
 function _netfd_finalizer(pfd::IOPoll.FD)
+    (@atomic :acquire _EXIT_STATE.exiting) && return nothing
     IOPoll._fdlock_closing(pfd.fdlock) && return nothing
     t = Task(() -> _finalizer_close!(pfd))
     t.sticky = false
