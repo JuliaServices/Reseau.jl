@@ -959,6 +959,54 @@ end
         end
     end
 
+    @testset "post-handshake messages cannot span a key change or flood one record" begin
+        key_update = UInt8[UInt8(24), 0x00, 0x00, 0x01, 0x00]
+        function zero_lifetime_ticket()
+            ticket = TLN._NewSessionTicketMsgTLS13()
+            ticket.lifetime = UInt32(0)
+            ticket.age_add = UInt32(1)
+            ticket.nonce = UInt8[0x01]
+            ticket.label = UInt8[0xa0]
+            return TLN._marshal_handshake_message(ticket)
+        end
+        cases = (
+            # The second KeyUpdate was sealed under the key the first one retires.
+            (vcat(key_update, key_update), TLN._TLS_ALERT_UNEXPECTED_MESSAGE),
+            # Every message counts, including tickets that are not stored.
+            (reduce(vcat, [zero_lifetime_ticket() for _ in 1:(TLN._TLS_MAX_USELESS_RECORDS + 1)]),
+                TLN._TLS_ALERT_UNEXPECTED_MESSAGE),
+        )
+        for (record, expected_alert) in cases
+            IPN.shutdown!()
+            listener = nothing
+            client_tcp = nothing
+            server_tcp = nothing
+            client_state = nothing
+            server_state = nothing
+            try
+                listener, client_tcp, server_tcp = _open_tcp_pair()
+                client_state, server_state, _, _ = _tls13_record_state_pair()
+                TLN._tls13_write_record!(server_tcp, server_state, TLN._TLS_RECORD_TYPE_HANDSHAKE, record)
+                TLN._tls13_read_record!(client_tcp, client_state)
+                err = try
+                    TLN._tls13_handle_post_handshake_messages!((; is_server = false), client_state; block = false)
+                    nothing
+                catch ex
+                    ex
+                end
+                @test err isa TLN._TLSAlertError
+                err isa TLN._TLSAlertError && @test err.alert == expected_alert
+            finally
+                client_state isa TLN._TLS13NativeClientState && TLN._securezero_tls13_native_client_state!(client_state)
+                server_state isa TLN._TLS13NativeClientState && TLN._securezero_tls13_native_client_state!(server_state)
+                _tls_native_close_quiet!(server_tcp)
+                _tls_native_close_quiet!(client_tcp)
+                _tls_native_close_quiet!(listener)
+                IPN.shutdown!()
+            end
+        end
+    end
+
     @testset "post-handshake key update rotates read and write traffic secrets" begin
         IPN.shutdown!()
         listener = nothing

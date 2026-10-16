@@ -177,6 +177,10 @@ function _securezero_tls13_native_client_state!(state::_TLS13NativeClientState):
 end
 
 function _tls13_set_read_cipher!(state::_TLS13NativeClientState, spec::_TLS13CipherSpec, traffic_secret::AbstractVector{UInt8})::Nothing
+    # Handshake messages must not span a key change (RFC 8446, section 5.1):
+    # bytes still buffered here arrived under the old key.
+    _tls_buffer_available(state.handshake_buffer, state.handshake_buffer_pos) == 0 ||
+        _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: handshake message spans a key change")
     if state.read_cipher !== nothing
         _securezero_tls13_record_cipher!(state.read_cipher::_TLS13RecordCipherState)
     end
@@ -660,8 +664,8 @@ function _tls13_handle_post_handshake_messages!(conn, state::_TLS13NativeClientS
         if handshake_type == _HANDSHAKE_TYPE_NEW_SESSION_TICKET
             conn.is_server && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: unexpected post-handshake TLS 1.3 message")
             msg = _tls13_validate_new_session_ticket(raw)
-            msg.lifetime == 0x00000000 && continue
             _tls_note_useless_record!(state, "tls: too many non-advancing TLS 1.3 records")
+            msg.lifetime == 0x00000000 && continue
             _tls13_store_new_session_ticket!(conn, msg)
             continue
         end
