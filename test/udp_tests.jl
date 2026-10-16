@@ -19,10 +19,12 @@ function _udp_recv_bang_allocs(conn, buf)
     return out[], allocs
 end
 
-# What copying an n-byte result out of a larger buffer allocates.
+# What copying an n-byte result out of a larger buffer allocates (stored, so
+# the compiler cannot drop the result).
 function _udp_copy_allocs(n)
     src = zeros(UInt8, 16)
-    return @allocated src[1:n]
+    out = Ref{Vector{UInt8}}()
+    return @allocated(out[] = src[1:n])
 end
 
 function _udp_pair()
