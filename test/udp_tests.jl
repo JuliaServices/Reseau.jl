@@ -5,6 +5,26 @@
 # logic after the sends are already queued in the loopback socket buffer, or
 # rely on blocking recv calls that complete exactly when the datagram arrives.
 
+# Bytes allocated by one call; results go into preallocated `Ref`s so the
+# measurement sees only the call itself.
+function _udp_recv_allocs(conn)
+    out = Ref{Vector{UInt8}}()
+    allocs = @allocated(out[] = UDP.recv(conn))
+    return out[], allocs
+end
+
+function _udp_recv_bang_allocs(conn, buf)
+    out = Ref(0)
+    allocs = @allocated(out[] = UDP.recv!(conn, buf))
+    return out[], allocs
+end
+
+# What copying an n-byte result out of a larger buffer allocates.
+function _udp_copy_allocs(n)
+    src = zeros(UInt8, 16)
+    return @allocated src[1:n]
+end
+
 function _udp_pair()
     a = UDP.listen(UDP.loopback_addr(0))
     b = UDP.connect(UDP.local_addr(a))
@@ -70,6 +90,49 @@ end
         end
         close(a)
         close(b)
+    end
+
+    @testset "allocating receives reuse the socket's buffer" begin
+        a, b = _udp_pair()
+        buf = zeros(UInt8, 16)
+        _udp_copy_allocs(3)
+        for round in 1:2 # the first round compiles the measured calls
+            UDP.send(b, "abc")
+            n, bang_allocs = _udp_recv_bang_allocs(a, buf)
+            @test n == 3
+            UDP.send(b, "xyz")
+            data, recv_allocs = _udp_recv_allocs(a)
+            @test data == b"xyz"
+            # At most the result on top of what recv! allocates: no 64 KiB buffer.
+            round == 2 && @test recv_allocs <= bang_allocs + _udp_copy_allocs(3)
+        end
+        close(a)
+        close(b)
+    end
+
+    @testset "concurrent allocating receives never share the buffer" begin
+        a, b = _udp_pair()
+        UDP.send(b, "warm")
+        @test UDP.recv(a) == b"warm"
+        @test a.fd.recv_scratch isa Vector{UInt8}
+        first = errormonitor(@async UDP.recv(a))
+        waiter = Reseau.IOPoll.current_registration(a.fd.pfd.pd).read_waiter
+        while !istaskdone(first) && !((@atomic :acquire waiter.state) isa Task)
+            yield()
+        end
+        # The parked receive owns the buffer, so this one must use its own.
+        @test a.fd.recv_scratch === nothing
+        second = errormonitor(@async UDP.recv(a))
+        UDP.send(b, "one")
+        @test fetch(first) == b"one"
+        UDP.send(b, "two")
+        @test fetch(second) == b"two"
+        @test a.fd.recv_scratch isa Vector{UInt8}
+        close(a)
+        close(b)
+        # Closing drops the buffer.
+        @test a.fd.recv_scratch === nothing
+        @test_throws ArgumentError UDP.recv(a; maxsize = -1)
     end
 
     @testset "connected/unconnected guards" begin
