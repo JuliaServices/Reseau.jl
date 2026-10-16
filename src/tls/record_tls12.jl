@@ -281,12 +281,13 @@ function _tls12_write_record!(
         )
         ciphertext_len == payload_len + _TLS12_GCM_TAG_SIZE ||
             throw(ArgumentError("tls: TLS 1.2 AEAD produced an unexpected ciphertext length"))
-        _tls_write_transport!(tcp, outbuf)
+        # The nonce is spent once the record is sealed, even if the write fails.
         if cipher_state.seq == typemax(UInt64)
             cipher_state.exhausted = true
         else
             cipher_state.seq += UInt64(1)
         end
+        _tls_write_transport!(tcp, outbuf)
     finally
         _securezero!(cipher_state.nonce_buf)
         _securezero!(cipher_state.additional_data_buf)

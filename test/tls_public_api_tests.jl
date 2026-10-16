@@ -2177,4 +2177,59 @@ end
                 IP.shutdown!()
             end
         end
+
+        @testset "fatal alerts from the read path never reuse a write nonce ($(version == TL.TLS1_3_VERSION ? "TLS 1.3" : "TLS 1.2"))" for version in (TL.TLS1_3_VERSION, TL.TLS1_2_VERSION)
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            try
+                listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(; min_version = version, max_version = version); backlog = 8)
+                laddr = TL.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn begin
+                    conn = TL.accept(listener)
+                    TL.handshake!(conn)
+                    return conn
+                end)
+                client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
+                    verify_peer = false,
+                    server_name = "localhost",
+                    min_version = version,
+                    max_version = version,
+                ))
+                server = fetch(accept_task)
+                cipher = client.native_state.write_cipher
+                seq0 = cipher.seq
+                # A record that fails authentication makes the reader send a fatal
+                # alert, sealed with the same write state as application data.
+                write(server.tcp, vcat(UInt8[0x17, 0x03, 0x03, 0x00, 0x20], fill(0xaa, 0x20)))
+                lock(client.write_lock) # stands in for an in-flight application write
+                reader = errormonitor(Threads.@spawn try
+                    read(client, 1)
+                catch err
+                    err
+                end)
+                while !istaskdone(reader) && isempty(client.write_lock.cond_wait.waitq)
+                    yield()
+                end
+                @test !istaskdone(reader)
+                @test cipher.seq == seq0
+                unlock(client.write_lock)
+                @test fetch(reader) isa TL.TLSError
+                @test cipher.seq == seq0 + 1
+                @test_throws TL.TLSError write(client, UInt8[0x01])
+                # A sealed record spends its sequence number even if the write fails.
+                seq1 = cipher.seq
+                close(client.tcp)
+                @test_throws Exception (version == TL.TLS1_3_VERSION ?
+                    TL._tls13_write_record!(client.tcp, client.native_state, TL._TLS_RECORD_TYPE_APPLICATION_DATA, UInt8[0x01]) :
+                    TL._tls12_write_record!(client.tcp, client.native_state, TL._TLS_RECORD_TYPE_APPLICATION_DATA, UInt8[0x01]))
+                @test cipher.seq == seq1 + 1
+            finally
+                _tls_close_quiet!(server)
+                _tls_close_quiet!(client)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
     end
