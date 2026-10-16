@@ -19,12 +19,20 @@ function _udp_recv_bang_allocs(conn, buf)
     return out[], allocs
 end
 
-# What copying an n-byte result out of a larger buffer allocates (stored, so
-# the compiler cannot drop the result).
-function _udp_copy_allocs(n)
-    src = zeros(UInt8, 16)
-    out = Ref{Vector{UInt8}}()
-    return @allocated(out[] = src[1:n])
+# What an n-byte result vector costs.
+_udp_vector_allocs(n) = @allocated Vector{UInt8}(undef, n)
+
+# Waits, without consuming it, until a datagram is queued on `conn`, so a
+# measured receive does not park. The peek buffer is larger than the test
+# datagrams: Windows fails a truncated peek with WSAEMSGSIZE.
+function _udp_wait_queued(conn)
+    peek = zeros(UInt8, 16)
+    while GC.@preserve(peek, Reseau.SocketOps.recv_from!(
+        conn.fd.pfd.sysfd, pointer(peek), Csize_t(length(peek)), Reseau.SocketOps.MSG_PEEK,
+    )) < 0
+        yield()
+    end
+    return nothing
 end
 
 function _udp_pair()
@@ -97,17 +105,26 @@ end
     @testset "allocating receives reuse the socket's buffer" begin
         a, b = _udp_pair()
         buf = zeros(UInt8, 16)
-        _udp_copy_allocs(3)
-        for round in 1:2 # the first round compiles the measured calls
+        _udp_vector_allocs(3)
+        bang_allocs = typemax(Int)
+        recv_allocs = typemax(Int)
+        # Each datagram is queued before the measured call, so neither call
+        # parks. The minimum over the rounds drops allocations made by other
+        # threads; the first round also compiles the measured calls.
+        for _ in 1:5
             UDP.send(b, "abc")
-            n, bang_allocs = _udp_recv_bang_allocs(a, buf)
+            _udp_wait_queued(a)
+            n, allocs = _udp_recv_bang_allocs(a, buf)
             @test n == 3
+            bang_allocs = min(bang_allocs, allocs)
             UDP.send(b, "xyz")
-            data, recv_allocs = _udp_recv_allocs(a)
+            _udp_wait_queued(a)
+            data, allocs = _udp_recv_allocs(a)
             @test data == b"xyz"
-            # At most the result on top of what recv! allocates: no 64 KiB buffer.
-            round == 2 && @test recv_allocs <= bang_allocs + _udp_copy_allocs(3)
+            recv_allocs = min(recv_allocs, allocs)
         end
+        # Only the result on top of what recv! allocates: no 64 KiB buffer.
+        @test recv_allocs <= bang_allocs + _udp_vector_allocs(3)
         close(a)
         close(b)
     end
