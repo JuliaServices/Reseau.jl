@@ -34,7 +34,9 @@ function _peek_eof(conn::_StreamConn)::Bool
     end
     try
         while true
-            IOPoll.prepareread(pfd.pd, pfd.is_file)
+            # Like the read path, skip the poller-lock refresh of the backend
+            # error bit; `waitread` refreshes it before parking.
+            IOPoll.prepareread(pfd.pd, pfd.is_file, false)
             n = GC.@preserve pref SocketOps.recv_from!(
                 pfd.sysfd,
                 Base.unsafe_convert(Ptr{UInt8}, pref),
@@ -52,6 +54,10 @@ function _peek_eof(conn::_StreamConn)::Bool
             end
             throw(SystemError("recv(MSG_PEEK)", Int(errno)))
         end
+    catch err
+        # A local close while waiting for data also reports EOF.
+        err isa IOPoll.NetClosingError || rethrow()
+        return true
     finally
         IOPoll._fd_read_unlock!(pfd)
     end
