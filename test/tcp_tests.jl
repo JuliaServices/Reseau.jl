@@ -1016,6 +1016,51 @@ end
         end
     end
 
+@testset "eof while waiting" begin
+    listener = nothing
+    client = nothing
+    server = nothing
+    try
+        listener = NC.listen(NC.loopback_addr(0); backlog = 4)
+        laddr = NC.addr(listener)::NC.SocketAddrV4
+        accept_task = errormonitor(@async NC.accept(listener))
+        client = NC.connect(NC.loopback_addr(Int(laddr.port)))
+        server = fetch(accept_task)
+        # Ready data needs no poller lock: hold it and eof must still finish.
+        write(client, UInt8[0x01])
+        state = IP.POLLER[]
+        lock(state.lock)
+        eof_task = try
+            t = errormonitor(@async eof(server))
+            while !istaskdone(t) && isempty(state.lock.cond_wait.waitq)
+                yield()
+            end
+            @test istaskdone(t)
+            t
+        finally
+            unlock(state.lock)
+        end
+        @test fetch(eof_task) === false
+        @test read(server, UInt8) == 0x01
+        # A local close while eof waits for data reports EOF, as in Base.
+        eof_task = errormonitor(@async try
+            eof(server)
+        catch err
+            err
+        end)
+        waiter = IP.current_registration(server.fd.pfd.pd).read_waiter
+        while !istaskdone(eof_task) && !((@atomic :acquire waiter.state) isa Task)
+            yield()
+        end
+        close(server)
+        @test fetch(eof_task) === true
+    finally
+        _close_quiet!(server)
+        _close_quiet!(client)
+        _close_quiet!(listener)
+    end
+end
+
 @testset "TCP stdlib-parity additions" begin
     @testset "platform socket constants and layouts" begin
         @test Reseau.SocketOps.IPPROTO_TCP == 6
