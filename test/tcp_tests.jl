@@ -79,6 +79,30 @@ function _read_until_close(conn::NC.Conn)::Vector{UInt8}
     return out
 end
 
+@static if VERSION >= v"1.11"
+    @testset "readavailable returns right-sized vectors" begin
+        listener = nothing
+        client = nothing
+        server = nothing
+        try
+            listener = NC.listen(NC.loopback_addr(0); backlog = 4)
+            laddr = NC.addr(listener)::NC.SocketAddrV4
+            accept_task = errormonitor(@async NC.accept(listener))
+            client = NC.connect(NC.loopback_addr(Int(laddr.port)))
+            server = fetch(accept_task)
+            write(client, UInt8[0x01, 0x02, 0x03])
+            data = readavailable(server)
+            @test data == UInt8[0x01, 0x02, 0x03]
+            # Not the 64 KiB read buffer shrunk with `resize!`.
+            @test length(data.ref.mem) < 1024
+        finally
+            _close_quiet!(server)
+            _close_quiet!(client)
+            _close_quiet!(listener)
+        end
+    end
+end
+
 @testset "TCP phase 4" begin
         @test NC.Conn <: IO
         @test NC.DeadlineExceededError === IP.DeadlineExceededError
