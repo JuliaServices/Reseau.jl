@@ -220,7 +220,8 @@ function Base.readavailable(conn::_StreamConn)::Vector{UInt8}
         ex isa EOFError || rethrow(ex)
         return UInt8[]
     end
-    return resize!(buf, n)
+    # Shrink: a short read would otherwise keep the whole 64 KiB buffer alive.
+    return sizehint!(resize!(buf, n), n)
 end
 
 # The `Ref` roots the Windows overlapped op (mirroring `write(conn, ::UInt8)`)

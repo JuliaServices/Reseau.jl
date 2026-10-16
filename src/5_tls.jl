@@ -2270,7 +2270,8 @@ function Base.readavailable(conn::Conn)::Vector{UInt8}
         ex isa EOFError || rethrow(ex)
         return UInt8[]
     end
-    return resize!(buf, n)
+    # Shrink: a short read would otherwise keep the whole 64 KiB buffer alive.
+    return sizehint!(resize!(buf, n), n)
 end
 
 function Base.read(conn::Conn, ::Type{UInt8})::UInt8
