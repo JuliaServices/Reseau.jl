@@ -400,8 +400,8 @@ longer datagrams.
 function recvfrom(conn::Conn; maxsize::Integer = 65535)::Tuple{Vector{UInt8}, Union{Nothing, SocketEndpoint}}
     buf = Vector{UInt8}(undef, Int(maxsize))
     n, addr = _recv_datagram!(conn, buf, false)
-    resize!(buf, n)
-    return buf, addr
+    # Copy out: `resize!` would keep the whole `maxsize` buffer alive with the result.
+    return buf[1:n], addr
 end
 
 """
@@ -413,8 +413,8 @@ the sender address. See [`recvfrom`](@ref) for `maxsize` semantics.
 function recv(conn::Conn; maxsize::Integer = 65535)::Vector{UInt8}
     buf = Vector{UInt8}(undef, Int(maxsize))
     n, _ = _recv_datagram!(conn, buf, false)
-    resize!(buf, n)
-    return buf
+    # Copy out: `resize!` would keep the whole `maxsize` buffer alive with the result.
+    return buf[1:n]
 end
 
 ##########################
