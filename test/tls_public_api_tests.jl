@@ -1413,6 +1413,39 @@ end
                 IP.shutdown!()
             end
         end
+        @static if VERSION >= v"1.11"
+            @testset "readavailable returns right-sized vectors" begin
+                IP.shutdown!()
+                listener = nothing
+                client = nothing
+                server = nothing
+                try
+                    listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(); backlog = 8)
+                    laddr = TL.addr(listener)::NC.SocketAddrV4
+                    accept_task = errormonitor(Threads.@spawn begin
+                        conn = TL.accept(listener)
+                        TL.handshake!(conn)
+                        return conn
+                    end)
+                    client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
+                        verify_peer = false,
+                        server_name = "localhost",
+                    ))
+                    server = fetch(accept_task)
+                    write(server, UInt8[0x01, 0x02, 0x03])
+                    data = readavailable(client)
+                    @test data == UInt8[0x01, 0x02, 0x03]
+                    # Not the 64 KiB read buffer shrunk with `resize!`.
+                    @test length(data.ref.mem) < 1024
+                finally
+                    _tls_close_quiet!(server)
+                    _tls_close_quiet!(client)
+                    _tls_close_quiet!(listener)
+                    IP.shutdown!()
+                end
+            end
+        end
+
         @testset "write accepts string codeunits buffers" begin
             IP.shutdown!()
             listener = nothing
