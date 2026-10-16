@@ -1948,7 +1948,12 @@ function _native_tls13_take_plaintext!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int;
     n = min(nbytes, available)
     unsafe_copyto!(ptr, pointer(state.plaintext_buffer, state.plaintext_buffer_pos), n)
     state.plaintext_buffer_pos += n
-    state.plaintext_buffer_pos = _tls_compact_buffer!(state.plaintext_buffer, state.plaintext_buffer_pos)
+    # Records are appended only once the buffer drains, so reset it then
+    # instead of shifting the unread bytes after every partial read.
+    if state.plaintext_buffer_pos > length(state.plaintext_buffer)
+        empty!(state.plaintext_buffer)
+        state.plaintext_buffer_pos = 1
+    end
     return n
 end
 
@@ -1960,7 +1965,12 @@ function _native_tls12_take_plaintext!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int;
     n = min(nbytes, available)
     unsafe_copyto!(ptr, pointer(state.plaintext_buffer, state.plaintext_buffer_pos), n)
     state.plaintext_buffer_pos += n
-    state.plaintext_buffer_pos = _tls_compact_buffer!(state.plaintext_buffer, state.plaintext_buffer_pos)
+    # Records are appended only once the buffer drains, so reset it then
+    # instead of shifting the unread bytes after every partial read.
+    if state.plaintext_buffer_pos > length(state.plaintext_buffer)
+        empty!(state.plaintext_buffer)
+        state.plaintext_buffer_pos = 1
+    end
     return n
 end
 
