@@ -13,10 +13,6 @@ const TL = TLS
 # Freeze only X.509 verification time, never deadlines or session-ticket age.
 const _PC_TLS_VERIFICATION_TIME_S = Int64(1_777_593_600)
 
-@inline function _pc_runtime_supported()::Bool
-    return Sys.isapple() || Sys.islinux() || Sys.iswindows()
-end
-
 const _PC_EWOULDBLOCK = @static isdefined(Base.Libc, :EWOULDBLOCK) ? Int32(getfield(Base.Libc, :EWOULDBLOCK)) : Int32(Base.Libc.EAGAIN)
 
 # Every blocking step in this workload must carry an explicit deadline:
@@ -185,7 +181,7 @@ function _pc_run_eventloops_workload!()
     waiter = IP.PollWaiter()
     IP.pollnotify!(waiter)
     IP.pollwait!(waiter)
-    _pc_runtime_supported() || return nothing
+    IP._runtime_supported() || return nothing
     state = IP.Poller()
     fd0 = SO.INVALID_SOCKET
     fd1 = SO.INVALID_SOCKET
@@ -230,7 +226,7 @@ function _pc_run_eventloops_workload!()
 end
 
 function _pc_run_internal_poll_workload!()
-    _pc_runtime_supported() || return nothing
+    IP._runtime_supported() || return nothing
     fd0, fd1 = _pc_stream_pair()
     ipfd = IP.FD(fd0)
     fd0 = SO.INVALID_SOCKET
@@ -257,7 +253,7 @@ function _pc_run_internal_poll_workload!()
 end
 
 function _pc_run_socket_ops_workload!()
-    _pc_runtime_supported() || return nothing
+    IP._runtime_supported() || return nothing
     listener = SO.INVALID_SOCKET
     client = SO.INVALID_SOCKET
     accepted = SO.INVALID_SOCKET
@@ -287,7 +283,7 @@ function _pc_run_socket_ops_workload!()
 end
 
 function _pc_run_udp_workload!()
-    _pc_runtime_supported() || return nothing
+    IP._runtime_supported() || return nothing
     receiver = nothing
     sender = nothing
     try
@@ -319,7 +315,7 @@ function _pc_run_udp_workload!()
 end
 
 function _pc_run_tcp_workload!()
-    _pc_runtime_supported() || return nothing
+    IP._runtime_supported() || return nothing
     listener = nothing
     client = nothing
     server = nothing
@@ -364,7 +360,7 @@ function _pc_run_tcp_workload!()
 end
 
 function _pc_run_host_resolvers_workload!()
-    _pc_runtime_supported() || return nothing
+    IP._runtime_supported() || return nothing
     listener = nothing
     client = nothing
     server = nothing
@@ -712,7 +708,7 @@ Keeping this workload source-owned means trim/precompile coverage evolves with
 the actual supported public API rather than drifting into a test-only harness.
 """
 function _pc_run_tls_workload!()
-    _pc_runtime_supported() || return nothing
+    IP._runtime_supported() || return nothing
     paths = _pc_tls12_paths()
     paths === nothing && return nothing
     # Start with the "normal" modern config that allows both TLS 1.2 and TLS
