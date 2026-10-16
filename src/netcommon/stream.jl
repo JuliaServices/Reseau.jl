@@ -56,7 +56,7 @@ function _peek_eof(conn::_StreamConn)::Bool
         end
     catch err
         # A local close while waiting for data also reports EOF.
-        (err::Exception) isa IOPoll.NetClosingError || rethrow()
+        err isa IOPoll.NetClosingError || rethrow()
         return true
     finally
         IOPoll._fd_read_unlock!(pfd)

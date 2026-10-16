@@ -1026,22 +1026,15 @@ end
         accept_task = errormonitor(@async NC.accept(listener))
         client = NC.connect(NC.loopback_addr(Int(laddr.port)))
         server = fetch(accept_task)
-        # Ready data needs no poller lock: hold it and eof must still finish.
-        write(client, UInt8[0x01])
-        state = IP.POLLER[]
-        lock(state.lock)
-        eof_task = try
-            t = errormonitor(@async eof(server))
-            while !istaskdone(t) && isempty(state.lock.cond_wait.waitq)
-                yield()
-            end
-            @test istaskdone(t)
-            t
-        finally
-            unlock(state.lock)
-        end
-        @test fetch(eof_task) === false
+        # With data ready, eof answers from the socket without first syncing
+        # the backend error bit through the global poller lock.
+        write(client, UInt8[0x01, 0x02])
         @test read(server, UInt8) == 0x01
+        registration = IP.current_registration(server.fd.pfd.pd)
+        @atomic registration.event_err = true
+        @test eof(server) === false
+        @atomic registration.event_err = false
+        @test read(server, UInt8) == 0x02
         # A local close while eof waits for data reports EOF, as in Base.
         eof_task = errormonitor(@async try
             eof(server)
