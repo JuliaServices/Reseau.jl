@@ -2013,6 +2013,46 @@ end
                 IP.shutdown!()
             end
         end
+        @testset "partial reads consume plaintext in place ($(version == TL.TLS1_3_VERSION ? "TLS 1.3" : "TLS 1.2"))" for version in (TL.TLS1_3_VERSION, TL.TLS1_2_VERSION)
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            try
+                listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(; min_version = version, max_version = version); backlog = 8)
+                laddr = TL.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn begin
+                    conn = TL.accept(listener)
+                    TL.handshake!(conn)
+                    return conn
+                end)
+                client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
+                    verify_peer = false,
+                    server_name = "localhost",
+                    min_version = version,
+                    max_version = version,
+                ))
+                server = fetch(accept_task)
+                payload = UInt8[UInt8(i % 251) for i in 1:16384]
+                write(server, payload)
+                state = client.native_state
+                @test read(client, UInt8) == payload[1]
+                # One byte consumed without shifting the other 16383.
+                @test state.plaintext_buffer_pos == 2
+                @test length(state.plaintext_buffer) == 16384
+                @test read(client, 16383) == payload[2:end]
+                @test state.plaintext_buffer_pos == 1
+                @test isempty(state.plaintext_buffer)
+                write(server, UInt8[0x01, 0x02, 0x03])
+                @test read(client, 3) == UInt8[0x01, 0x02, 0x03]
+            finally
+                _tls_close_quiet!(server)
+                _tls_close_quiet!(client)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
+
         @testset "readbytes! and read support single-read mode" begin
             IP.shutdown!()
             listener = nothing
