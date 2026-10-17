@@ -5,6 +5,36 @@
 # logic after the sends are already queued in the loopback socket buffer, or
 # rely on blocking recv calls that complete exactly when the datagram arrives.
 
+# Bytes allocated by one call; results go into preallocated `Ref`s so the
+# measurement sees only the call itself.
+function _udp_recv_allocs(conn)
+    out = Ref{Vector{UInt8}}()
+    allocs = @allocated(out[] = UDP.recv(conn))
+    return out[], allocs
+end
+
+function _udp_recv_bang_allocs(conn, buf)
+    out = Ref(0)
+    allocs = @allocated(out[] = UDP.recv!(conn, buf))
+    return out[], allocs
+end
+
+# What an n-byte result vector costs.
+_udp_vector_allocs(n) = @allocated Vector{UInt8}(undef, n)
+
+# Waits, without consuming it, until a datagram is queued on `conn`, so a
+# measured receive does not park. The peek buffer is larger than the test
+# datagrams: Windows fails a truncated peek with WSAEMSGSIZE.
+function _udp_wait_queued(conn)
+    peek = zeros(UInt8, 16)
+    while GC.@preserve(peek, Reseau.SocketOps.recv_from!(
+        conn.fd.pfd.sysfd, pointer(peek), Csize_t(length(peek)), Reseau.SocketOps.MSG_PEEK,
+    )) < 0
+        yield()
+    end
+    return nothing
+end
+
 function _udp_pair()
     a = UDP.listen(UDP.loopback_addr(0))
     b = UDP.connect(UDP.local_addr(a))
@@ -70,6 +100,58 @@ end
         end
         close(a)
         close(b)
+    end
+
+    @testset "allocating receives reuse the socket's buffer" begin
+        a, b = _udp_pair()
+        buf = zeros(UInt8, 16)
+        _udp_vector_allocs(3)
+        bang_allocs = typemax(Int)
+        recv_allocs = typemax(Int)
+        # Each datagram is queued before the measured call, so neither call
+        # parks. The minimum over the rounds drops allocations made by other
+        # threads; the first round also compiles the measured calls.
+        for _ in 1:5
+            UDP.send(b, "abc")
+            _udp_wait_queued(a)
+            n, allocs = _udp_recv_bang_allocs(a, buf)
+            @test n == 3
+            bang_allocs = min(bang_allocs, allocs)
+            UDP.send(b, "xyz")
+            _udp_wait_queued(a)
+            data, allocs = _udp_recv_allocs(a)
+            @test data == b"xyz"
+            recv_allocs = min(recv_allocs, allocs)
+        end
+        # Only the result on top of what recv! allocates: no 64 KiB buffer.
+        @test recv_allocs <= bang_allocs + _udp_vector_allocs(3)
+        close(a)
+        close(b)
+    end
+
+    @testset "concurrent allocating receives never share the buffer" begin
+        a, b = _udp_pair()
+        UDP.send(b, "warm")
+        @test UDP.recv(a) == b"warm"
+        @test a.fd.recv_scratch isa Vector{UInt8}
+        first = errormonitor(@async UDP.recv(a))
+        waiter = Reseau.IOPoll.current_registration(a.fd.pfd.pd).read_waiter
+        while !istaskdone(first) && !((@atomic :acquire waiter.state) isa Task)
+            yield()
+        end
+        # The parked receive owns the buffer, so this one must use its own.
+        @test a.fd.recv_scratch === nothing
+        second = errormonitor(@async UDP.recv(a))
+        UDP.send(b, "one")
+        @test fetch(first) == b"one"
+        UDP.send(b, "two")
+        @test fetch(second) == b"two"
+        @test a.fd.recv_scratch isa Vector{UInt8}
+        close(a)
+        close(b)
+        # Closing drops the buffer.
+        @test a.fd.recv_scratch === nothing
+        @test_throws ArgumentError UDP.recv(a; maxsize = -1)
     end
 
     @testset "connected/unconnected guards" begin

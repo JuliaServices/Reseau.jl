@@ -214,6 +214,9 @@ mutable struct FD
     @atomic is_connected::Bool
     laddr::Union{Nothing, SocketAddr}
     raddr::Union{Nothing, SocketAddr}
+    # Receive buffer reused by UDP's allocating `recv`/`recvfrom`; allocated on
+    # first use. A receive swaps it out while it owns it.
+    @atomic recv_scratch::Union{Nothing, Vector{UInt8}}
 end
 
 @inline _addr_family(::SocketAddrV4)::Cint = SocketOps.AF_INET
@@ -298,7 +301,7 @@ function _new_netfd(
     is_stream = sotype == SocketOps.SOCK_STREAM
     pfd = IOPoll.FD(sysfd; is_stream = is_stream, zero_read_is_eof = is_stream, is_file = false)
     finalizer(_netfd_finalizer, pfd)
-    return FD(pfd, family, sotype, net, is_connected, nothing, nothing)
+    return FD(pfd, family, sotype, net, is_connected, nothing, nothing, nothing)
 end
 
 """

@@ -343,17 +343,36 @@ end
 @inline _peer_endpoint(sa::SocketOps.SockAddrIn)::Union{Nothing, SocketEndpoint} = _from_sockaddr(sa)
 @inline _peer_endpoint(sa::SocketOps.SockAddrIn6)::Union{Nothing, SocketEndpoint} = _from_sockaddr(sa)
 
-function _recv_datagram!(conn::Conn, buf::MutableByteBuffer, allow_truncate::Bool)
+function _recv_datagram!(conn::Conn, buf::MutableByteBuffer, allow_truncate::Bool, nbytes::Int = length(buf))
     n, peer, truncated = GC.@preserve buf IOPoll.recvfrom_ptr!(
         conn.fd.pfd,
         Base.unsafe_convert(Ptr{UInt8}, buf),
-        length(buf),
+        nbytes,
         buf,
     )
     if truncated && !allow_truncate
         throw(TruncatedDatagramError(n))
     end
     return n, _peer_endpoint(peer)
+end
+
+const _RECV_SCRATCH_BYTES = 65535
+
+# Calls `f(buf, maxsize)` with a buffer of at least `maxsize` bytes to receive
+# into. It is the socket's scratch buffer, swapped out for the whole call, so a
+# concurrent receive on the same socket never shares it (it allocates its own).
+function _with_recv_buffer(f::F, conn::Conn, maxsize::Int) where {F}
+    maxsize >= 0 || throw(ArgumentError("maxsize must be >= 0"))
+    maxsize > _RECV_SCRATCH_BYTES && return f(Vector{UInt8}(undef, maxsize), maxsize)
+    fd = conn.fd
+    scratch = @atomicswap fd.recv_scratch = nothing
+    scratch === nothing && (scratch = Vector{UInt8}(undef, _RECV_SCRATCH_BYTES))
+    try
+        return f(scratch, maxsize)
+    finally
+        # `close` drops the buffer; do not hand it back to a closed socket.
+        IOPoll._fdlock_closing(fd.pfd.fdlock) || (@atomic fd.recv_scratch = scratch)
+    end
 end
 
 """
@@ -398,10 +417,10 @@ truncates. A smaller `maxsize` throws [`TruncatedDatagramError`](@ref) for
 longer datagrams.
 """
 function recvfrom(conn::Conn; maxsize::Integer = 65535)::Tuple{Vector{UInt8}, Union{Nothing, SocketEndpoint}}
-    buf = Vector{UInt8}(undef, Int(maxsize))
-    n, addr = _recv_datagram!(conn, buf, false)
-    # Copy out: `resize!` would keep the whole `maxsize` buffer alive with the result.
-    return buf[1:n], addr
+    return _with_recv_buffer(conn, Int(maxsize)) do buf, nbytes
+        n, addr = _recv_datagram!(conn, buf, false, nbytes)
+        (buf[1:n], addr)
+    end
 end
 
 """
@@ -411,10 +430,10 @@ Receive one datagram, allocating a right-sized result vector and discarding
 the sender address. See [`recvfrom`](@ref) for `maxsize` semantics.
 """
 function recv(conn::Conn; maxsize::Integer = 65535)::Vector{UInt8}
-    buf = Vector{UInt8}(undef, Int(maxsize))
-    n, _ = _recv_datagram!(conn, buf, false)
-    # Copy out: `resize!` would keep the whole `maxsize` buffer alive with the result.
-    return buf[1:n]
+    return _with_recv_buffer(conn, Int(maxsize)) do buf, nbytes
+        n, _ = _recv_datagram!(conn, buf, false, nbytes)
+        buf[1:n]
+    end
 end
 
 ##########################
@@ -546,6 +565,7 @@ function Base.close(conn::Conn)
         ex = err::Exception
         ex isa IOPoll.NetClosingError || rethrow(ex)
     end
+    @atomic conn.fd.recv_scratch = nothing
     return nothing
 end
 
