@@ -16,6 +16,16 @@ function _tls_public_read_record(conn::NC.Conn)::Tuple{Vector{UInt8}, Vector{UIn
     return header, payload
 end
 
+# Bytes allocated by one `readavailable(conn)` call; the result is stored in a
+# preallocated `Ref` so the measurement sees only the call itself.
+function _measured_readavailable(conn)
+    out = Ref{Vector{UInt8}}()
+    allocs = @allocated(out[] = readavailable(conn))
+    return out[], allocs
+end
+
+_vector_alloc_bytes(n) = @allocated Vector{UInt8}(undef, n)
+
 @testset "TLS public API" begin
         @testset "direct socket-address connect/listen passthroughs" begin
             if Sys.iswindows() && VERSION < v"1.11.0"
@@ -1413,36 +1423,48 @@ end
                 IP.shutdown!()
             end
         end
-        @static if VERSION >= v"1.11"
-            @testset "readavailable returns right-sized vectors" begin
-                IP.shutdown!()
-                listener = nothing
-                client = nothing
-                server = nothing
-                try
-                    listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(); backlog = 8)
-                    laddr = TL.addr(listener)::NC.SocketAddrV4
-                    accept_task = errormonitor(Threads.@spawn begin
-                        conn = TL.accept(listener)
-                        TL.handshake!(conn)
-                        return conn
-                    end)
-                    client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
-                        verify_peer = false,
-                        server_name = "localhost",
-                    ))
-                    server = fetch(accept_task)
-                    write(server, UInt8[0x01, 0x02, 0x03])
-                    data = readavailable(client)
-                    @test data == UInt8[0x01, 0x02, 0x03]
-                    # Not the 64 KiB read buffer shrunk with `resize!`.
-                    @test length(data.ref.mem) < 1024
-                finally
-                    _tls_close_quiet!(server)
-                    _tls_close_quiet!(client)
-                    _tls_close_quiet!(listener)
-                    IP.shutdown!()
+        @testset "readavailable allocates only its result ($(version == TL.TLS1_3_VERSION ? "TLS 1.3" : "TLS 1.2"))" for version in (TL.TLS1_3_VERSION, TL.TLS1_2_VERSION)
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            try
+                listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(; min_version = version, max_version = version); backlog = 8)
+                laddr = TL.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn begin
+                    conn = TL.accept(listener)
+                    TL.handshake!(conn)
+                    return conn
+                end)
+                client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
+                    verify_peer = false,
+                    server_name = "localhost",
+                    min_version = version,
+                    max_version = version,
+                ))
+                server = fetch(accept_task)
+                write(server, UInt8[0x01, 0x02, 0x03])
+                data = readavailable(client)
+                @test data == UInt8[0x01, 0x02, 0x03]
+                @static if VERSION >= v"1.11"
+                    @test length(data.ref.mem) == 3
                 end
+                _vector_alloc_bytes(3)
+                for round in 0x01:0x02 # the first round compiles the measured path
+                    write(server, UInt8[0x04, 0x05, round])
+                    # The record is in the socket but not yet decrypted.
+                    @test !eof(client.tcp)
+                    data, allocs = _measured_readavailable(client)
+                    @test data == UInt8[0x04, 0x05, round]
+                    round == 0x02 && @test allocs == _vector_alloc_bytes(3)
+                end
+                close(server)
+                @test readavailable(client) == UInt8[]
+            finally
+                _tls_close_quiet!(server)
+                _tls_close_quiet!(client)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
             end
         end
 

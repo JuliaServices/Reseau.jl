@@ -2013,40 +2013,47 @@ function _read_some!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int; block::Bool = tru
     catch err
         ex = _as_exception(err)
         ex isa EOFError && (block ? rethrow() : (return 0))
-        # A failed nonblocking read must not wait to transmit a fatal alert.
-        if !block && !(ex isa _TLSTransportDeadlineError)
-            close(conn.tcp)
-        end
-        ex isa TLSError && rethrow()
-        if ex isa _TLSTransportDeadlineError
-            throw(TLSError("read", Int32(0), "i/o timeout", (ex::_TLSTransportDeadlineError).cause))
-        end
-        ex isa _TLSUnexpectedEOFError && throw(TLSError("read", Int32(0), "unexpected EOF", ex))
-        ex isa _TLSRecordHeaderError && throw(TLSError("read", Int32(0), (ex::_TLSRecordHeaderError).message, ex))
-        if ex isa IOPoll.NetClosingError || _is_closed(conn)
-            throw(_closed_error("read", ex))
-        end
-        if ex isa _TLSAlertError
-            tls13_err = ex::_TLSAlertError
-            if block && _active_tls13(conn) && !tls13_err.from_peer
-                _native_tls13_try_write_fatal_alert!(conn, tls13_err.alert)
-            elseif block && _active_tls12(conn) && !tls13_err.from_peer
-                _native_tls12_try_write_fatal_alert!(conn, tls13_err.alert)
-            end
-            throw(TLSError("read", Int32(0), tls13_err.message, tls13_err))
-        end
-        if ex isa ArgumentError
-            if block && _active_tls13(conn)
-                _native_tls13_try_write_fatal_alert!(conn, _TLS_ALERT_INTERNAL_ERROR)
-            elseif block && _active_tls12(conn)
-                _native_tls12_try_write_fatal_alert!(conn, _TLS_ALERT_INTERNAL_ERROR)
-            end
-            throw(TLSError("read", Int32(0), (ex::ArgumentError).msg::String, ex))
-        end
-        throw(TLSError("read", Int32(0), "unexpected TLS failure", ex))
+        _throw_tls_read_error(conn, ex, block)
     finally
         unlock(conn.read_lock)
     end
+end
+
+# Maps a failure on the read path to the public error, sending the fatal alert
+# a local protocol error calls for. Call it from the `catch` of a read that
+# holds `read_lock`; it always throws.
+function _throw_tls_read_error(conn::Conn, ex::Exception, block::Bool)
+    # A failed nonblocking read must not wait to transmit a fatal alert.
+    if !block && !(ex isa _TLSTransportDeadlineError)
+        close(conn.tcp)
+    end
+    ex isa TLSError && rethrow()
+    if ex isa _TLSTransportDeadlineError
+        throw(TLSError("read", Int32(0), "i/o timeout", (ex::_TLSTransportDeadlineError).cause))
+    end
+    ex isa _TLSUnexpectedEOFError && throw(TLSError("read", Int32(0), "unexpected EOF", ex))
+    ex isa _TLSRecordHeaderError && throw(TLSError("read", Int32(0), (ex::_TLSRecordHeaderError).message, ex))
+    if ex isa IOPoll.NetClosingError || _is_closed(conn)
+        throw(_closed_error("read", ex))
+    end
+    if ex isa _TLSAlertError
+        tls13_err = ex::_TLSAlertError
+        if block && _active_tls13(conn) && !tls13_err.from_peer
+            _native_tls13_try_write_fatal_alert!(conn, tls13_err.alert)
+        elseif block && _active_tls12(conn) && !tls13_err.from_peer
+            _native_tls12_try_write_fatal_alert!(conn, tls13_err.alert)
+        end
+        throw(TLSError("read", Int32(0), tls13_err.message, tls13_err))
+    end
+    if ex isa ArgumentError
+        if block && _active_tls13(conn)
+            _native_tls13_try_write_fatal_alert!(conn, _TLS_ALERT_INTERNAL_ERROR)
+        elseif block && _active_tls12(conn)
+            _native_tls12_try_write_fatal_alert!(conn, _TLS_ALERT_INTERNAL_ERROR)
+        end
+        throw(TLSError("read", Int32(0), (ex::ArgumentError).msg::String, ex))
+    end
+    throw(TLSError("read", Int32(0), "unexpected TLS failure", ex))
 end
 
 function _grow_readbytes_target!(buf::Vector{UInt8}, current::Int, nb::Int)::Int
@@ -2264,24 +2271,29 @@ full-buffer exact read.
 """
 function Base.readavailable(conn::Conn)::Vector{UInt8}
     _ensure_open!(conn, "read")
-    if _handshake_complete(conn)
-        pending = _pending_plaintext(conn)
-        if pending > 0
-            buf = Vector{UInt8}(undef, pending)
-            n = _read_some!(conn, buf)
-            return resize!(buf, n)
+    _ensure_handshake!(conn)
+    lock(conn.read_lock)
+    try
+        _ensure_open!(conn, "read")
+        # Wait for decrypted plaintext (or EOF), then copy out exactly what is
+        # buffered: the result is the only allocation.
+        tls13 = _active_tls13(conn)
+        tls13 || _active_tls12(conn) || throw(ArgumentError("tls: unsupported connection mode"))
+        tls13 ? _native_tls13_fill_plaintext!(conn) : _native_tls12_fill_plaintext!(conn)
+        n = _pending_plaintext(conn)
+        buf = Vector{UInt8}(undef, n)
+        GC.@preserve buf begin
+            tls13 ? _native_tls13_take_plaintext!(conn, pointer(buf), n) :
+                _native_tls12_take_plaintext!(conn, pointer(buf), n)
         end
-    end
-    buf = Vector{UInt8}(undef, Base.SZ_UNBUFFERED_IO)
-    n = try
-        _read_some!(conn, buf)
+        return buf
     catch err
-        ex = err::Exception
-        ex isa EOFError || rethrow(ex)
-        return UInt8[]
+        ex = _as_exception(err)
+        ex isa EOFError && return UInt8[]
+        _throw_tls_read_error(conn, ex, true)
+    finally
+        unlock(conn.read_lock)
     end
-    # Shrink: a short read would otherwise keep the whole 64 KiB buffer alive.
-    return sizehint!(resize!(buf, n), n)
 end
 
 function Base.read(conn::Conn, ::Type{UInt8})::UInt8
