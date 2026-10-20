@@ -212,7 +212,29 @@ function _run_combined_ca_trim!(version::UInt16)::Nothing
     return nothing
 end
 
+function _run_distrusted_ca_trim!()::Nothing
+    fixtures = joinpath(@__DIR__, "resources", "emudhra")
+    certs = TL._tls_decode_pem_certificates(TL._read_tls_file_bytes(
+        joinpath(fixtures, "dv-g3b-aaa-emudhra.we-have-a-problem.com.pem"),
+    ))
+    rejected = false
+    try
+        TL._tls13_verify_server_certificate_chain(
+            certs, "dv-g3b-aaa-emudhra.we-have-a-problem.com";
+            verify_peer = true, verify_hostname = true,
+            ca_file = joinpath(fixtures, "roots.pem"),
+            verification_time_s = Int64(1792497600),
+        )
+    catch err
+        err isa TL._TLSAlertError || rethrow()
+        rejected = true
+    end
+    rejected || error("compromised CA accepted in trim executable")
+    return nothing
+end
+
 function run_tls_trim_sample()::Nothing
+    _run_distrusted_ca_trim!()
     _run_combined_ca_trim!(TL.TLS1_2_VERSION)
     _run_combined_ca_trim!(TL.TLS1_3_VERSION)
     _run_tls_roundtrip!(_TLS_MIXED_SERVER_CONFIG, _tls_client_config(), "TLSv1.3", true)

@@ -73,6 +73,7 @@ struct _TLSCertificateInfo
     permitted_email_addresses::Vector{String}
     excluded_email_addresses::Vector{String}
     tbs_der::Vector{UInt8}
+    spki_sha256::NTuple{32, UInt8}
     public_key::_TLSPublicKey
     signature_verify_spec::_TLSSignatureVerifySpec
     signature::Vector{UInt8}
@@ -1041,7 +1042,12 @@ function _tls_parse_der_certificate_info(cert_der::AbstractVector{UInt8})::_TLSC
     subject_tlv_start = tbs_pos
     subject_start, subject_end, tbs_pos = _asn1_expect_tlv(cert_der, tbs_pos, _ASN1_SEQUENCE, tbs_end)
     common_name = _tls_parse_subject_common_name(cert_der, subject_start, subject_end)
+    spki_tlv_start = tbs_pos
     spki_start, spki_end, tbs_pos = _asn1_expect_tlv(cert_der, tbs_pos, _ASN1_SEQUENCE, tbs_end)
+    # Hash the complete DER SubjectPublicKeyInfo, including its tag and length.
+    # Cross-signed certificates retain this identity even when issuer/serial differ.
+    spki_digest = SHA.sha256(@view cert_der[spki_tlv_start:spki_end])
+    spki_sha256 = ntuple(i -> spki_digest[i], Val(32))
     public_key = _tls_parse_subject_public_key_info(cert_der, spki_start, spki_end)
     dns_names = String[]
     ip_addresses = Vector{Vector{UInt8}}()
@@ -1162,6 +1168,7 @@ function _tls_parse_der_certificate_info(cert_der::AbstractVector{UInt8})::_TLSC
         permitted_email_addresses,
         excluded_email_addresses,
         tbs_der,
+        spki_sha256,
         public_key,
         outer_sig_spec,
         signature,
