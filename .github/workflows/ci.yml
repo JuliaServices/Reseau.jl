@@ -16,7 +16,9 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 20 || 15 }}
+    # Ten native trim builds plus cold setup can exceed 15 minutes while still
+    # making progress. Preserve every workload with bounded compilation headroom.
+    timeout-minutes: 25
     env:
       JULIA_NUM_THREADS: ${{ matrix.threads }}
       RESEAU_RUN_TLS_TESTS: '1'
