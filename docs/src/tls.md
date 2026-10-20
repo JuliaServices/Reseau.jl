@@ -62,6 +62,12 @@ Providing either explicit source replaces the default roots. To add a directory 
 the system bundle, pass the bundle path as `ca_file` too. Config copies retain both
 paths. Resumed sessions are checked against the current configured roots.
 
+Certificate verification also rejects the eight eMudhra CA public keys compromised
+in October 2026, including their cross-signed certificates. This built-in distrust
+applies to leaves, intermediates, and trust anchors, including explicit CA sources
+and resumed sessions. It is a local key denylist, not general CRL or OCSP checking;
+keep Reseau and the configured CA bundle updated.
+
 ## Client and Server Construction
 
 You can either dial and handshake a client in one step from a concrete
