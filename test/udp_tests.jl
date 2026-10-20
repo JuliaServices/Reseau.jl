@@ -19,8 +19,13 @@ function _udp_recv_bang_allocs(conn, buf)
     return out[], allocs
 end
 
-# What an n-byte result vector costs.
-_udp_vector_allocs(n) = @allocated Vector{UInt8}(undef, n)
+# What an n-byte result vector costs. Keep the result, as the receive helper
+# does, so escape analysis cannot eliminate its array header from the baseline.
+function _udp_vector_allocs(n)
+    out = Ref{Vector{UInt8}}()
+    allocs = @allocated(out[] = Vector{UInt8}(undef, n))
+    return out[], allocs
+end
 
 # Waits, without consuming it, until a datagram is queued on `conn`, so a
 # measured receive does not park. The peek buffer is larger than the test
@@ -124,7 +129,9 @@ end
             recv_allocs = min(recv_allocs, allocs)
         end
         # Only the result on top of what recv! allocates: no 64 KiB buffer.
-        @test recv_allocs <= bang_allocs + _udp_vector_allocs(3)
+        result, result_allocs = _udp_vector_allocs(3)
+        @test length(result) == 3
+        @test recv_allocs <= bang_allocs + result_allocs
         close(a)
         close(b)
     end

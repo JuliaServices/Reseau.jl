@@ -1413,8 +1413,10 @@ end
             end
             payload = repeat("A", 1000)
             victim = errormonitor(@async write(client, codeunits(_TempPtrString(payload))))
-            waitq = client.fd.pfd.fdlock.wsema.cond.waitq
-            while !istaskdone(victim) && !any(t -> t === victim, waitq)
+            # Observe Reseau's queued-writer count rather than Base's private
+            # condition wait queue, whose representation changes across Julia versions.
+            fdlock = client.fd.pfd.fdlock
+            while !istaskdone(victim) && ((@atomic :acquire fdlock.state) & IP._MUTEX_WMASK) == 0
                 yield()
             end
             # Collects the converted bytes unless the queued write keeps them alive.
