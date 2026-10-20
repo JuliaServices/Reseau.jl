@@ -7,23 +7,9 @@
 
 # Bytes allocated by one call; results go into preallocated `Ref`s so the
 # measurement sees only the call itself.
-function _udp_recv_allocs(conn)
+function _udp_recv_allocs(conn, maxsize = 65535)
     out = Ref{Vector{UInt8}}()
-    allocs = @allocated(out[] = UDP.recv(conn))
-    return out[], allocs
-end
-
-function _udp_recv_bang_allocs(conn, buf)
-    out = Ref(0)
-    allocs = @allocated(out[] = UDP.recv!(conn, buf))
-    return out[], allocs
-end
-
-# What an n-byte result vector costs. Keep the result, as the receive helper
-# does, so escape analysis cannot eliminate its array header from the baseline.
-function _udp_vector_allocs(n)
-    out = Ref{Vector{UInt8}}()
-    allocs = @allocated(out[] = Vector{UInt8}(undef, n))
+    allocs = @allocated(out[] = UDP.recv(conn; maxsize))
     return out[], allocs
 end
 
@@ -109,29 +95,32 @@ end
 
     @testset "allocating receives reuse the socket's buffer" begin
         a, b = _udp_pair()
-        buf = zeros(UInt8, 16)
-        _udp_vector_allocs(3)
-        bang_allocs = typemax(Int)
-        recv_allocs = typemax(Int)
-        # Each datagram is queued before the measured call, so neither call
-        # parks. The minimum over the rounds drops allocations made by other
-        # threads; the first round also compiles the measured calls.
+        UDP.send(b, "warm")
+        @test UDP.recv(a) == b"warm"
+        scratch = @atomic a.fd.recv_scratch
+        @test scratch isa Vector{UInt8}
+        reused_allocs = typemax(Int)
+        fresh_allocs = typemax(Int)
+        # Compare the same receive API with a reusable buffer and a request one
+        # byte larger, which requires a fresh buffer. recv! follows a different
+        # compiled path and its small allocation overhead need not match recv.
+        # Queue each datagram first; the minimum drops compilation and unrelated
+        # allocations without requiring byte-exact platform-specific overhead.
         for _ in 1:5
             UDP.send(b, "abc")
             _udp_wait_queued(a)
-            n, allocs = _udp_recv_bang_allocs(a, buf)
-            @test n == 3
-            bang_allocs = min(bang_allocs, allocs)
+            data, allocs = _udp_recv_allocs(a, length(scratch))
+            @test data == b"abc"
+            @test (@atomic a.fd.recv_scratch) === scratch
+            reused_allocs = min(reused_allocs, allocs)
             UDP.send(b, "xyz")
             _udp_wait_queued(a)
-            data, allocs = _udp_recv_allocs(a)
+            data, allocs = _udp_recv_allocs(a, length(scratch) + 1)
             @test data == b"xyz"
-            recv_allocs = min(recv_allocs, allocs)
+            fresh_allocs = min(fresh_allocs, allocs)
         end
-        # Only the result on top of what recv! allocates: no 64 KiB buffer.
-        result, result_allocs = _udp_vector_allocs(3)
-        @test length(result) == 3
-        @test recv_allocs <= bang_allocs + result_allocs
+        # Reuse must save at least the full scratch buffer's payload allocation.
+        @test reused_allocs + length(scratch) <= fresh_allocs
         close(a)
         close(b)
     end
