@@ -213,6 +213,15 @@ end
         @test ca_cert.extended_key_usage == 0x00
     end
 
+    @testset "BMPString and UniversalString names hold only Unicode scalar values" begin
+        dirstr(tag, bytes) = TLX._asn1_directory_string(bytes, tag, 1, length(bytes))
+        @test dirstr(TLX._ASN1_BMP_STRING, UInt8[0x00, 0xe9]) == "é"
+        @test dirstr(TLX._ASN1_UNIVERSAL_STRING, UInt8[0x00, 0x10, 0xff, 0xff]) == "\U10ffff"
+        @test_throws ArgumentError dirstr(TLX._ASN1_BMP_STRING, UInt8[0xd8, 0x00])
+        for bad in (UInt8[0x00, 0x00, 0xdf, 0xff], UInt8[0x00, 0x11, 0x00, 0x00], UInt8[0x00, 0x20, 0x00, 0x00], UInt8[0xff, 0xff, 0xff, 0xff])
+            @test_throws ArgumentError dirstr(TLX._ASN1_UNIVERSAL_STRING, bad)
+        end
+    end
     @testset "extended key usage parsing preserves unknown restrictions" begin
         unknown_oid = _der_tlv(TLX._ASN1_OBJECT_IDENTIFIER, UInt8[0x2a, 0x03, 0x04])
         server_oid = _der_tlv(

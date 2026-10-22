@@ -630,6 +630,8 @@ function _asn1_bmp_string(bytes::AbstractVector{UInt8}, value_start::Int, value_
     pos = value_start
     @inbounds while pos <= value_end
         codepoint = (UInt32(bytes[pos]) << 8) | UInt32(bytes[pos + 1])
+        # UCS-2 has no surrogates; one would make an invalid String.
+        0xd800 <= codepoint <= 0xdfff && throw(ArgumentError("tls: malformed BMPString value"))
         push!(chars, Char(codepoint))
         pos += 2
     end
@@ -646,6 +648,9 @@ function _asn1_universal_string(bytes::AbstractVector{UInt8}, value_start::Int, 
                     (UInt32(bytes[pos + 1]) << 16) |
                     (UInt32(bytes[pos + 2]) << 8) |
                     UInt32(bytes[pos + 3])
+        # UCS-4 holds Unicode scalar values only; `Char` throws above 0x1fffff.
+        (codepoint > 0x10ffff || 0xd800 <= codepoint <= 0xdfff) &&
+            throw(ArgumentError("tls: malformed UniversalString value"))
         push!(chars, Char(codepoint))
         pos += 4
     end
