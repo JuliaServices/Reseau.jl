@@ -342,6 +342,18 @@ function _tls13_server_key_share!(state::_TLS13ServerHandshakeState, group::UInt
     return server_share
 end
 
+# RFC 8446 §4.1.2: after a HelloRetryRequest the client may drop early_data,
+# add a cookie, replace key_share, update or drop pre_shared_key (when its PSKs
+# do not fit the selected cipher suite), and resize padding (type 21). Every
+# other extension must stay as it was.
+@inline function _tls13_hrr_fixed_extension(extension::UInt16)::Bool
+    return !(extension == UInt16(21) ||
+        extension == _HANDSHAKE_EXTENSION_PRE_SHARED_KEY ||
+        extension == _HANDSHAKE_EXTENSION_EARLY_DATA ||
+        extension == _HANDSHAKE_EXTENSION_COOKIE ||
+        extension == _HANDSHAKE_EXTENSION_KEY_SHARE)
+end
+
 function _tls13_illegal_client_hello_change(client_hello::_ClientHelloMsg, first_hello::_ClientHelloMsg)::Bool
     return client_hello.vers != first_hello.vers ||
         client_hello.random != first_hello.random ||
@@ -365,7 +377,8 @@ function _tls13_illegal_client_hello_change(client_hello::_ClientHelloMsg, first
         client_hello.psk_modes != first_hello.psk_modes ||
         client_hello.quic_transport_parameters != first_hello.quic_transport_parameters ||
         client_hello.encrypted_client_hello != first_hello.encrypted_client_hello ||
-        client_hello.extensions != first_hello.extensions
+        filter(_tls13_hrr_fixed_extension, client_hello.extensions) !=
+            filter(_tls13_hrr_fixed_extension, first_hello.extensions)
 end
 
 function _tls13_set_client_hello!(state::_TLS13ServerHandshakeState, raw::Vector{UInt8})::Nothing

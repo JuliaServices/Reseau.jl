@@ -1643,6 +1643,72 @@ end
         end
     end
 
+    @testset "native server accepts a second ClientHello that drops pre_shared_key" begin
+        # RFC 8446 §4.1.2 lets a client drop PSKs that do not fit the cipher
+        # suite chosen in the HelloRetryRequest; Go and OpenSSL clients do.
+        function hello(shares; psk::Bool)
+            ch = TLN._ClientHelloMsg()
+            ch.vers = 0x0303
+            ch.random = fill(0x11, 32)
+            ch.session_id = fill(0x22, 32)
+            ch.cipher_suites = UInt16[0x1301, 0x1302]
+            ch.supported_versions = UInt16[TLN.TLS1_3_VERSION]
+            ch.supported_curves = UInt16[TLN.X25519]
+            ch.supported_signature_algorithms = UInt16[0x0804, 0x0403]
+            ch.key_shares = shares
+            ch.psk_modes = UInt8[0x01]
+            if psk
+                ch.psk_identities = [TLN._TLSPSKIdentity(fill(0x33, 64), 0x01020304)]
+                ch.psk_binders = [fill(0x44, 48)]
+            end
+            raw = TLN._marshal_client_hello(ch)
+            return vcat(UInt8[0x16, 0x03, 0x03, UInt8(length(raw) >> 8), UInt8(length(raw) & 0xff)], raw)
+        end
+        function record_kind(conn)
+            header = read(conn, 5)
+            body = read(conn, (Int(header[4]) << 8) | Int(header[5]))
+            header[1] == 0x15 && return :alert
+            header[1] == 0x14 && return :ccs
+            header[1] == 0x16 && body[1] == 0x02 &&
+                return body[7:38] == TLN._HELLO_RETRY_REQUEST_RANDOM ? :hrr : :server_hello
+            return :other
+        end
+        IPN.shutdown!()
+        listener = nothing
+        conn = nothing
+        server_task = nothing
+        try
+            listener = TLN.listen("tcp", "127.0.0.1:0", TLN.Config(
+                verify_peer = false,
+                cert_file = _TLS_NATIVE_MTLS_SERVER_CERT_PATH,
+                key_file = _TLS_NATIVE_MTLS_SERVER_KEY_PATH,
+                min_version = TLN.TLS1_3_VERSION,
+            ))
+            server_task = errormonitor(Threads.@spawn begin
+                server = TLN.accept(listener)
+                try
+                    TLN.handshake!(server)
+                catch
+                finally
+                    close(server)
+                end
+            end)
+            conn = NCN.connect(NCN.loopback_addr(Int(TLN.addr(listener).port)))
+            # No usable key share, so the server asks again.
+            write(conn, hello([TLN._TLSKeyShare(0x1234, fill(0x55, 32))]; psk = true))
+            @test record_kind(conn) == :hrr
+            @test record_kind(conn) == :ccs
+            private_key = TLN._tls13_x25519_generate_private_key()
+            write(conn, hello([TLN._TLSKeyShare(TLN.X25519, TLN._tls13_x25519_public_key(private_key))]; psk = false))
+            @test record_kind(conn) == :server_hello
+        finally
+            _tls_native_close_quiet!(conn)
+            server_task === nothing || _tls_native_wait_task(server_task)
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+    end
+
     @testset "live native TLS fragments large application payloads" begin
         IPN.shutdown!()
         listener = nothing
