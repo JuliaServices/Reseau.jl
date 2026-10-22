@@ -100,6 +100,32 @@ function ND.resolve_tcp_addrs(
     throw(:resolver_gave_up)
 end
 
+# The first lookup waits for `gate`, then fails as a dropped system lookup
+# would; later lookups answer `addrs`.
+mutable struct _DropOnceResolver <: ND.AbstractResolver
+    gate::Base.Event
+    addrs::Vector{NC.SocketEndpoint}
+    @atomic calls::Int
+end
+
+function ND.resolve_tcp_addrs(
+        resolver::_DropOnceResolver,
+        network::AbstractString,
+        address::AbstractString;
+        op::Symbol = :connect,
+        policy::ND.ResolverPolicy = ND.ResolverPolicy(),
+    )::ND.ResolvedConnectAddrs
+    _ = network
+    _ = address
+    _ = op
+    _ = policy
+    if (@atomic resolver.calls += 1) == 1
+        wait(resolver.gate)
+        throw(ND._LookupAbandonedError())
+    end
+    return copy(resolver.addrs)
+end
+
 mutable struct _FlappingResolver <: ND.AbstractResolver
     responses::Vector{Vector{NC.SocketEndpoint}}
     lock::ReentrantLock
@@ -709,7 +735,8 @@ end
                 @test timedwait(() -> Base.n_avail(_ND_LATE_WORKER_QUEUE[].value.futures) == ND._ADDRINFO_POOL_CAPACITY, 10.0) === :ok
                 shutdown_task = Threads.@spawn ND.shutdown!(0.01)
                 @test timedwait(() -> istaskdone(shutdown_task), 10.0) === :ok
-                @test ND._addrinfo_live_threads() == ND._ADDRINFO_POOL_SIZE
+                # Queued lookups found no idle worker, so the pool also grew.
+                @test ND._ADDRINFO_POOL_SIZE <= ND._addrinfo_live_threads() <= ND._ADDRINFO_POOL_MAX
             finally
                 ND._ADDRINFO_THREAD_ENTRY_C[] = _ND_REAL_WORKER_ENTRY[]
                 notify(_ND_LATE_WORKER_GATE)
@@ -721,6 +748,55 @@ end
             @test !isempty(ND._native_getaddrinfo("localhost"))
             ND.shutdown!()
             @test ND._addrinfo_live_threads() == 0
+        end
+        @testset "a dial resolves while every resolver worker is busy" begin
+            # Gated workers stand in for workers stuck in a slow getaddrinfo.
+            ND.shutdown!()
+            Base.reset(_ND_LATE_WORKER_GATE)
+            _ND_REAL_WORKER_ENTRY[] = ND._ADDRINFO_THREAD_ENTRY_C[]
+            ND._ADDRINFO_THREAD_ENTRY_C[] = @cfunction(_nd_late_worker_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
+            listener = NC.listen(NC.loopback_addr(0))
+            port = Int((NC.addr(listener)::NC.SocketAddrV4).port)
+            try
+                _nd_start_late_workers!()
+                ND._ADDRINFO_THREAD_ENTRY_C[] = _ND_REAL_WORKER_ENTRY[]
+                close(NC.connect("tcp", "localhost:$port"; timeout_ns = 10_000_000_000))
+                @test ND._ADDRINFO_STARTED_THREADS[] == ND._ADDRINFO_POOL_SIZE + 1
+            finally
+                ND._ADDRINFO_THREAD_ENTRY_C[] = _ND_REAL_WORKER_ENTRY[]
+                notify(_ND_LATE_WORKER_GATE)
+                close(listener)
+            end
+            ND.shutdown!()
+            @test ND._addrinfo_live_threads() == 0
+        end
+        @testset "a queued lookup whose caller left is dropped unless shared" begin
+            ctx = ND._LookupContext()
+            @atomic ctx.abandoned = true
+            @test_throws ND._LookupAbandonedError ND._native_getaddrinfo("localhost"; ctx = ctx)
+            @atomic ctx.shared = true
+            @test !isempty(ND._native_getaddrinfo("localhost"; ctx = ctx))
+            @test !isempty(ND._native_getaddrinfo("localhost"; ctx = ND._LookupContext()))
+            ND.shutdown!()
+        end
+        @testset "a singleflight follower retries a lookup dropped for its leader" begin
+            addrs = NC.SocketEndpoint[NC.loopback_addr(0)]
+            parent = _DropOnceResolver(Base.Event(), addrs, 0)
+            resolver = ND.SingleflightResolver(parent)
+            leader_ctx = ND._LookupContext()
+            leader = Threads.@spawn try
+                ND._resolve_host_ips(resolver, "tcp", "dropped.test", leader_ctx)
+            catch ex
+                ex
+            end
+            @test timedwait(() -> (@atomic parent.calls) == 1, 10.0) === :ok
+            follower = Threads.@spawn ND._resolve_host_ips(resolver, "tcp", "dropped.test")
+            @test timedwait(() -> (@atomic resolver.shared_hits) == 1, 10.0) === :ok
+            @test @atomic leader_ctx.shared
+            notify(parent.gate)
+            @test fetch(leader) isa ND._LookupAbandonedError
+            @test fetch(follower) == addrs
+            @test (@atomic parent.calls) == 2
         end
         @testset "connect/listen by address strings (ipv4)" begin
             IP.shutdown!()
