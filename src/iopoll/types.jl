@@ -280,12 +280,17 @@ It holds registration identity (`sysfd`, `token`), coarse descriptor state
 their sequence numbers. Sequence counters reject callbacks already removed from
 the heap before a deadline changed. The two heap indices are protected by the
 poller's lock; zero means absent, and equal nonzero indices identify one combined
-read/write entry.
+read/write entry. `registration` is the live `Registration` that owns this
+state, or `nothing`; the poller sets and clears it under its lock, so readers
+can load it without taking that lock.
 """
+abstract type _AbstractRegistration end
+
 mutable struct PollState
     lock::ReentrantLock
     sysfd::SysFD
     token::UInt64
+    @atomic registration::Union{Nothing, _AbstractRegistration}
     @atomic pollable::Bool
     @atomic closing::Bool
     @atomic event_err::Bool
@@ -300,6 +305,7 @@ mutable struct PollState
             ReentrantLock(),
             sysfd,
             token,
+            nothing,
             false,
             false,
             false,
@@ -324,7 +330,7 @@ Each active OS descriptor has one `Registration`, which is the home for:
 - any backend-discovered persistent event error
 - the `PollState` consumed by higher layers
 """
-mutable struct Registration
+mutable struct Registration <: _AbstractRegistration
     fd::SysFD
     token::UInt64
     mode::PollMode.T

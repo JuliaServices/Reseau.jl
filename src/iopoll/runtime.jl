@@ -30,27 +30,16 @@ end
     current_registration(pd)
 
 Return the active `Registration` corresponding to `pd`, or `nothing` if `pd`
-has been deregistered or replaced.
+has been deregistered or its poller shut down.
 
-This extra indirection is what lets higher layers validate descriptor identity
-without trusting a cached registration reference through close/re-register
-races.
+The poller publishes and clears `pd.registration` under its lock together with
+its registration maps, so this read takes no lock. A `PollState` belongs to at
+most one registration, so it never aliases one registered for a reused fd.
 """
-function current_registration(pd::PollState)
-    isassigned(POLLER) || return nothing
-    state = POLLER[]
-    lock(state.lock)
-    try
-        registration = get(() -> nothing, state.registrations_by_token, pd.token)
-        if registration === nothing
-            return nothing
-        end
-        registration.fd == pd.sysfd || return nothing
-        registration.pollstate === pd || return nothing
-        return registration
-    finally
-        unlock(state.lock)
-    end
+function current_registration(pd::PollState)::Union{Nothing, Registration}
+    registration = @atomic :acquire pd.registration
+    registration === nothing && return nothing
+    return registration::Registration
 end
 
 function _notify_registration!(
@@ -198,6 +187,9 @@ function shutdown!()
         lock(state.lock)
         try
             append!(registrations, values(state.registrations))
+            for registration in registrations
+                @atomic :release registration.pollstate.registration = nothing
+            end
             _discard_stale_time_entries_locked!(state)
             for entry in state.time_heap
                 _time_set_index!(entry, 0)
@@ -293,6 +285,7 @@ function register!(fd::SysFD; mode::PollMode.T = PollMode.READWRITE, pollstate::
             registration.pollstate.token = token
             state.registrations[sysfd] = registration
             state.registrations_by_token[token] = registration
+            @atomic :release registration.pollstate.registration = registration
         end
     finally
         unlock(state.lock)
@@ -324,6 +317,7 @@ function deregister!(fd::SysFD)
         registration = pop!(state.registrations, sysfd, nothing)
         if registration !== nothing
             delete!(state.registrations_by_token, registration.token)
+            @atomic :release registration.pollstate.registration = nothing
             _remove_deadlines_locked!(state, registration.pollstate)
         end
         errno = _backend_close_fd!(state, sysfd)
@@ -366,6 +360,7 @@ function deregister!(pd::PollState)
         registered === current || return nothing
         delete!(state.registrations, pd.sysfd)
         delete!(state.registrations_by_token, current.token)
+        @atomic :release pd.registration = nothing
         _remove_deadlines_locked!(state, pd)
         errno = _backend_close_fd!(state, pd.sysfd)
     finally
