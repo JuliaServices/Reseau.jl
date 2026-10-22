@@ -2067,7 +2067,8 @@ function _grow_readbytes_target!(buf::Vector{UInt8}, current::Int, nb::Int)::Int
 end
 
 function _peek_eof(conn::Conn)::Bool
-    _ensure_open!(conn, "peek")
+    # A close that lands after `eof`'s `isopen` check reports EOF, as for TCP.
+    _is_closed(conn) && return true
     _ensure_handshake!(conn)
     lock(conn.read_lock)
     try
@@ -2092,15 +2093,15 @@ function _peek_eof(conn::Conn)::Bool
         throw(ArgumentError("tls: unsupported connection mode"))
     catch err
         ex = _as_exception(err)
+        # A transport EOF at a record boundary ends the stream, as in `read`; a
+        # local close while waiting reports EOF, as for TCP.
+        (ex isa EOFError || ex isa IOPoll.NetClosingError || _is_closed(conn)) && return true
         ex isa TLSError && rethrow()
         if ex isa _TLSTransportDeadlineError
             throw(TLSError("peek", Int32(0), "i/o timeout", (ex::_TLSTransportDeadlineError).cause))
         end
         ex isa _TLSUnexpectedEOFError && throw(TLSError("peek", Int32(0), "unexpected EOF", ex))
         ex isa _TLSRecordHeaderError && throw(TLSError("peek", Int32(0), (ex::_TLSRecordHeaderError).message, ex))
-        if ex isa IOPoll.NetClosingError || _is_closed(conn)
-            throw(_closed_error("peek", ex))
-        end
         if ex isa _TLSAlertError
             tls13_err = ex::_TLSAlertError
             if _active_tls13(conn) && !tls13_err.from_peer
@@ -2305,7 +2306,10 @@ end
 """
     eof(conn) -> Bool
 
-Report whether the peer has cleanly finished the TLS stream.
+Wait until decrypted data is available or the stream has ended, and return `true`
+if it has ended: the peer sent `close_notify`, the transport reached EOF at a
+record boundary (as `read` treats it), or `conn` was closed locally, including
+while waiting. A record cut off by EOF throws `TLSError`.
 """
 function Base.eof(conn::Conn)::Bool
     isopen(conn) || return true
