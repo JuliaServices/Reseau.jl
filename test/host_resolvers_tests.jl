@@ -80,6 +80,26 @@ function ND.resolve_tcp_addrs(
     return copy(resolver.addrs)
 end
 
+# Waits for `gate`, then throws a value that is not an `Exception`.
+struct _ThrowsValueResolver <: ND.AbstractResolver
+    gate::Base.Event
+end
+
+function ND.resolve_tcp_addrs(
+        resolver::_ThrowsValueResolver,
+        network::AbstractString,
+        address::AbstractString;
+        op::Symbol = :connect,
+        policy::ND.ResolverPolicy = ND.ResolverPolicy(),
+    )::ND.ResolvedConnectAddrs
+    _ = network
+    _ = address
+    _ = op
+    _ = policy
+    wait(resolver.gate)
+    throw(:resolver_gave_up)
+end
+
 mutable struct _FlappingResolver <: ND.AbstractResolver
     responses::Vector{Vector{NC.SocketEndpoint}}
     lock::ReentrantLock
@@ -1247,6 +1267,52 @@ end
             finally
                 unlock(refresh_cache.lock)
             end
+        end
+        @testset "a singleflight leader's own failure does not reach its followers" begin
+            caught(f) = try
+                f()
+            catch ex
+                ex
+            end
+            # A non-Exception value from the parent used to leave the flight
+            # unfinished: the follower and every later caller hung.
+            value_resolver = ND.SingleflightResolver(_ThrowsValueResolver(Base.Event()))
+            leader = @async caught(() -> ND._resolve_host_ips(value_resolver, "tcp", "value.test"))
+            @test timedwait(() -> !isempty(lock(() -> copy(value_resolver.inflight), value_resolver.lock)), 10.0) === :ok
+            follower = @async caught(() -> ND._resolve_host_ips(value_resolver, "tcp", "value.test"))
+            @test timedwait(() -> (@atomic value_resolver.shared_hits) == 1, 10.0) === :ok
+            notify(value_resolver.parent.gate)
+            @test timedwait(() -> istaskdone(leader) && istaskdone(follower), 10.0) === :ok
+            @test istaskdone(leader) && fetch(leader) === :resolver_gave_up
+            @test istaskdone(follower) && fetch(follower) === :resolver_gave_up
+            later = @async caught(() -> ND._resolve_host_ips(value_resolver, "tcp", "value.test"))
+            @test timedwait(() -> istaskdone(later), 10.0) === :ok
+            @test istaskdone(later) && fetch(later) === :resolver_gave_up
+            @test isempty(value_resolver.inflight)
+
+            # Interrupting the leader fails only the leader; the follower retries.
+            addrs = NC.SocketEndpoint[NC.loopback_addr(0)]
+            gate = Base.Event()
+            counting = _CountingResolver(addrs; gate = gate)
+            interrupt_resolver = ND.SingleflightResolver(counting)
+            leader = @async ND._resolve_host_ips(interrupt_resolver, "tcp", "interrupt.test")
+            @test timedwait(() -> lock(() -> counting.calls, counting.lock) == 1, 10.0) === :ok
+            follower = @async caught(() -> ND._resolve_host_ips(interrupt_resolver, "tcp", "interrupt.test"))
+            @test timedwait(() -> (@atomic interrupt_resolver.shared_hits) == 1, 10.0) === :ok
+            schedule(leader, InterruptException(); error = true)
+            @test timedwait(() -> istaskdone(leader), 10.0) === :ok
+            @test caught(() -> fetch(leader)).task.exception isa InterruptException
+            @test timedwait(() -> lock(() -> counting.calls, counting.lock) == 2, 10.0) === :ok
+            notify(gate)
+            @test fetch(follower) == addrs
+
+            # Caching and dial paths pass a non-Exception value through unchanged.
+            cache = ND.CachingResolver(_ThrowsValueResolver(Base.Event()); ttl_ns = 1_000_000_000)
+            notify(cache.parent.gate)
+            @test caught(() -> ND.resolve_tcp_addrs(cache, "tcp", "value.test:80")) === :resolver_gave_up
+            dialer = ND.HostResolver(timeout_ns = 10_000_000_000, resolver = ND.SingleflightResolver(_ThrowsValueResolver(gate)))
+            dial_err = caught(() -> ND.connect(dialer, "tcp", "value.test:80"))
+            @test dial_err isa ND.OpError && dial_err.err isa CapturedException
         end
         @testset "DNS race wait registration helpers" begin
             fd = nothing
