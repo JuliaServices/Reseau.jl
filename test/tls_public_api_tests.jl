@@ -748,13 +748,13 @@ _vector_alloc_bytes(n) = @allocated Vector{UInt8}(undef, n)
                         server_tcp = NC.accept(listener)
                         try
                             record_state = TL._TLS12NativeState()
-                            TL._tls_read_wire_record!(
+                            payload_len = TL._tls_read_wire_record!(
                                 server_tcp,
                                 record_state,
                                 TL._TLS12_MAX_CIPHERTEXT,
                                 UInt16(0),
                             )
-                            client_hello = TL._unmarshal_client_hello(copy(@view record_state.record_buffer[6:end]))
+                            client_hello = TL._unmarshal_client_hello(copy(@view record_state.record_buffer[6:(5 + payload_len)]))
                             client_hello === nothing && error("failed to parse mixed ClientHello")
                             server_hello = TL._ServerHelloMsg()
                             server_hello.vers = TL.TLS1_2_VERSION

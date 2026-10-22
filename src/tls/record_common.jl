@@ -147,17 +147,24 @@ function _tls_write_transport!(tcp::TCP.Conn, payload::AbstractVector{UInt8})::N
     return nothing
 end
 
-# Keep progress in the connection state so an incomplete nonblocking read can
-# be resumed by either tryread! or an ordinary blocking read.
+# Extra bytes each record read asks for, as in Go's `readFromUntil`: one read
+# then usually returns a whole small record, or the rest of a record plus the
+# next header, instead of a header read followed by a payload read.
+const _TLS_RECORD_READ_AHEAD = 512
+
+# Reads until `record_buffer[1:target]` is filled; bytes beyond `target` stay
+# buffered for the next record. Keep progress in the connection state so an
+# incomplete nonblocking read can be resumed by either tryread! or an ordinary
+# blocking read.
 function _tls_fill_record!(tcp::TCP.Conn, state, target::Int, block::Bool)::Bool
     buf = state.record_buffer
-    resize!(buf, target)
+    length(buf) < target + _TLS_RECORD_READ_AHEAD && resize!(buf, target + _TLS_RECORD_READ_AHEAD)
     while state.record_received < target
         offset = state.record_received
         n = try
             GC.@preserve buf begin
-                block ? TCP._read_some!(tcp, pointer(buf, offset + 1), target - offset, buf) :
-                        TCP._tryread!(tcp, pointer(buf, offset + 1), target - offset)
+                block ? TCP._read_some!(tcp, pointer(buf, offset + 1), length(buf) - offset, buf) :
+                        TCP._tryread!(tcp, pointer(buf, offset + 1), length(buf) - offset)
             end
         catch err
             err isa IOPoll.DeadlineExceededError && throw(_TLSTransportDeadlineError(_TLS_IO_READ, err))
@@ -206,6 +213,20 @@ function _tls_validate_record_header!(record_buffer::Vector{UInt8}, negotiated_v
     return nothing
 end
 
+# Drops the previous record from the front of `record_buffer`, keeping any
+# bytes read ahead of it.
+@inline function _tls_discard_consumed_record!(state)::Nothing
+    consumed = state.record_consumed
+    consumed == 0 && return nothing
+    remaining = state.record_received - consumed
+    remaining > 0 && copyto!(state.record_buffer, 1, state.record_buffer, consumed + 1, remaining)
+    state.record_received = remaining
+    state.record_consumed = 0
+    return nothing
+end
+
+# Returns the payload length of the next record, which occupies
+# `record_buffer[1:5 + payload_len]` until the next call.
 function _tls_read_wire_record!(
         tcp::TCP.Conn,
         state,
@@ -213,6 +234,7 @@ function _tls_read_wire_record!(
         negotiated_version::UInt16;
         block::Bool = true,
     )::Union{Int, Nothing}
+    _tls_discard_consumed_record!(state)
     if state.record_received < 5
         _tls_fill_record!(tcp, state, 5, block) || return nothing
     end
@@ -221,6 +243,6 @@ function _tls_read_wire_record!(
     payload_len = (Int(record_buffer[4]) << 8) | Int(record_buffer[5])
     payload_len <= max_ciphertext || _tls_fail(_TLS_ALERT_RECORD_OVERFLOW, "tls: received oversized TLS record")
     _tls_fill_record!(tcp, state, 5 + payload_len, block) || return nothing
-    state.record_received = 0
+    state.record_consumed = 5 + payload_len
     return payload_len
 end

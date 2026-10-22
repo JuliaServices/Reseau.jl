@@ -1414,6 +1414,8 @@ function _tls12_copy_initial_state(state13::_TLS13NativeClientState)::_TLS12Nati
     state12 = _TLS12NativeState()
     state12.version = state13.version
     state12.record_buffer = copy(state13.record_buffer)
+    state12.record_received = state13.record_received
+    state12.record_consumed = state13.record_consumed
     state12.handshake_buffer = copy(state13.handshake_buffer)
     state12.handshake_buffer_pos = state13.handshake_buffer_pos
     state12.plaintext_buffer = copy(state13.plaintext_buffer)
