@@ -252,13 +252,14 @@ function schedule_deadlines!(
                 end
             end
         end
+        # Once the poller has committed to a sleep horizon, a newly earlier
+        # wakeup must actively wake it so the blocking syscall can be retried
+        # with a shorter timeout. Waking under the lock, with the registration
+        # still live, keeps the wake ahead of `shutdown!` closing the backend.
+        _maybe_wake_for_earlier_time!(state, new_earliest)
     finally
         unlock(state.lock)
     end
-    # Once the poller has committed to a sleep horizon, a newly earlier wakeup
-    # must actively wake it so the blocking syscall can be retried with a
-    # shorter timeout.
-    _maybe_wake_for_earlier_time!(state, new_earliest)
     return nothing
 end
 
@@ -292,6 +293,9 @@ function schedule_timer!(timer::TimerState, deadline_ns::Int64)::Bool
             _time_push_locked!(state, entry::TimeEntry)
             new_earliest = entry.deadline_ns
             armed = true
+            # Under the lock with `running` set, `shutdown!` has not closed
+            # the backend yet.
+            _maybe_wake_for_earlier_time!(state, new_earliest)
         end
     finally
         unlock(state.lock)
@@ -307,7 +311,6 @@ function schedule_timer!(timer::TimerState, deadline_ns::Int64)::Bool
         end
         return false
     end
-    _maybe_wake_for_earlier_time!(state, new_earliest)
     return true
 end
 
