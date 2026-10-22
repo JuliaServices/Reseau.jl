@@ -142,7 +142,9 @@ an error. Surfacing only `EBADF` keeps callers from retrying `close` on an fd
 number that may already have been reused for a different socket.
 """
 function close_socket_nothrow(fd::Cint)::Int32
-    ret = @ccall close(fd::Cint)::Cint
+    # GC-safe: with SO_LINGER set, close can block until the linger timeout,
+    # and a GC-unsafe wait would hold up every thread's garbage collection.
+    ret = @gcsafe_ccall close(fd::Cint)::Cint
     ret == 0 && return Int32(0)
     errno = _errno_i32()
     # On BSD/Darwin, close deallocates the descriptor for all errors except EBADF.

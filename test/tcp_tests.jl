@@ -1061,6 +1061,64 @@ end
         end
     end
 
+@static if Sys.islinux()
+@testset "a lingering close does not hold up garbage collection on other threads" begin
+    if Threads.nthreads() < 2
+        @test_skip false  # the close must run on a second thread
+    else
+        listener = NC.listen(NC.loopback_addr(0); backlog = 4)
+        accept_task = errormonitor(@async NC.accept(listener))
+        client = NC.connect(NC.loopback_addr(Int((NC.addr(listener)::NC.SocketAddrV4).port)))
+        server = fetch(accept_task)
+        closer = nothing
+        try
+            # The server never reads, so once the send path is full the close
+            # waits out the linger in the kernel.
+            chunk = zeros(UInt8, 65536)
+            sent = 0
+            while true
+                n = GC.@preserve chunk SO.write_once!(client.fd.pfd.sysfd, pointer(chunk), Csize_t(length(chunk)))
+                n > 0 || break
+                sent += n
+            end
+            port = Int((NC.local_addr(client)::NC.SocketAddrV4).port)
+            NC.set_linger!(client, 10)
+            # /proc/net/tcp shows the endpoint as 0100007F:PORT (hex) in state
+            # 04 (FIN_WAIT1). Its inode stays nonzero only while close waits out
+            # the linger; the kernel orphans the socket once the wait ends.
+            local_endpoint = "0100007F:" * uppercase(string(port, base = 16, pad = 4))
+            lingering() = any(eachline("/proc/net/tcp")) do line
+                fields = split(line)
+                return length(fields) > 9 && fields[2] == local_endpoint &&
+                    fields[4] == "04" && fields[10] != "0"
+            end
+            closer = errormonitor(Threads.@spawn close(client))
+            # Spin without yielding so the close runs on another thread.
+            while !lingering() && !istaskdone(closer)
+                GC.safepoint()
+            end
+            @test lingering()
+            GC.gc(true)
+            # The collection finished while the close was still in the kernel.
+            @test lingering()
+            buf = Vector{UInt8}(undef, 65536)
+            got = 0
+            while got < sent
+                n = readbytes!(server, buf; all = false)
+                n == 0 && break
+                got += n
+            end
+            wait(closer)
+            @test got == sent
+        finally
+            closer === nothing && _close_quiet!(client)
+            _close_quiet!(server)
+            _close_quiet!(listener)
+        end
+    end
+end
+end
+
 @testset "eof while waiting" begin
     listener = nothing
     client = nothing
