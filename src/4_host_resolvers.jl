@@ -2146,6 +2146,8 @@ function _resolve_serial(
                 TCP._dial_socketaddr_impl(remote_addr, d.local_addr, attempt_deadline, state, kind)
             catch err
                 ex = _as_exception(err)
+                # An interrupt stops the dial; it is not one address's failure.
+                ex isa InterruptException && rethrow()
                 if ex isa TCP.ConnectCanceledError && (@atomic :acquire state.done)
                     return nothing, first_err
                 end
@@ -2160,6 +2162,7 @@ function _resolve_serial(
             return nothing, first_err
         catch err
             ex = _as_exception(err)
+            ex isa InterruptException && rethrow()
             first_err === nothing && (first_err = ex)
         end
     end
@@ -2178,19 +2181,23 @@ function _resolve_parallel(
     )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}} where {A<:TCP.SocketEndpoint, B<:TCP.SocketEndpoint}
     state = DNSRaceState()
     events = Channel{Union{DNSParallelResult, Symbol}}(4)
-    @inline function _emit_event!(event::Union{DNSParallelResult, Symbol})
+    # Returns false once the dialer has stopped taking events.
+    @inline function _emit_event!(event::Union{DNSParallelResult, Symbol})::Bool
         try
             put!(events, event)
         catch err
             ex = _as_exception(err)
             ex isa InvalidStateException || rethrow(err)
+            return false
         end
-        return nothing
+        return true
     end
     function _start_racer(primary::Bool, addrs::AbstractVector{<:TCP.SocketEndpoint})
         return _spawn_task_body(@noinline function ()
             conn, err = _resolve_serial(d, network, address, kind, addrs, deadline_ns, state)
-            _emit_event!(DNSParallelResult(primary, conn, err))
+            if !_emit_event!(DNSParallelResult(primary, conn, err)) && conn !== nothing
+                close(conn)
+            end
             return nothing
         end)
     end
@@ -2245,10 +2252,21 @@ function _resolve_parallel(
             end
         end
     finally
+        # If the loop was interrupted, cancel the attempts still running: a
+        # racer that connects after this loses `_mark_connect_done!` and
+        # closes its connection.
+        _mark_connect_done!(state)
         _close_timer_task!(fallback_timer, fallback_timer_task)
         try
             close(events)
         catch
+        end
+        # A winner queued before the close but never taken.
+        while isready(events)
+            event = take!(events)
+            if event isa DNSParallelResult && event.conn !== nothing
+                close(event.conn::TCP.Conn)
+            end
         end
     end
 end
@@ -2481,7 +2499,7 @@ function connect(
         end
         return _connect_dualstack(d, network, address, deadline_ns)
     catch err
-        err isa OpError && rethrow(err)
+        (err isa OpError || err isa InterruptException) && rethrow(err)
         throw(_wrap_op_error("connect", network, d.local_addr, nothing, _as_exception(err)))
     end
 end
