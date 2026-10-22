@@ -1439,9 +1439,9 @@ end
     # Spin without yielding until the poller thread has dispatched a completion
     # to `waiter`. Tasks created with `@async` are pinned to this thread, so the
     # woken task cannot resume (and see a deadline set next) until this task
-    # yields.
-    function _wait_dispatched(waiter)
-        while !((@atomic :acquire waiter.state) isa IP._PollWakeToken)
+    # yields. The `istaskdone` check only keeps an unexpected order from hanging.
+    function _wait_dispatched(task, waiter)
+        while !istaskdone(task) && !((@atomic :acquire waiter.state) isa IP._PollWakeToken)
             GC.safepoint()
         end
         return nothing
@@ -1472,8 +1472,11 @@ end
         end
         read_waiter = IP.current_registration(server.fd.pfd.pd).read_waiter
         _wait_parked(reader, read_waiter)
-        write(client, UInt8[0x61, 0x62, 0x63])
-        _wait_dispatched(read_waiter)
+        # A raw send never parks this task; an overlapped write would, letting
+        # the reader resume before the deadline is set.
+        payload = UInt8[0x61, 0x62, 0x63]
+        @test GC.@preserve(payload, SO.write_once!(client.fd.pfd.sysfd, pointer(payload), Csize_t(3))) == 3
+        _wait_dispatched(reader, read_waiter)
         NC.set_read_deadline!(server, Int64(1))
         @test fetch(reader) == 3
         @test buf[1:3] == UInt8[0x61, 0x62, 0x63]
@@ -1491,7 +1494,7 @@ end
         SO.set_nonblocking!(raw, true)
         errno = SO.connect_socket(raw, SO.sockaddr_in_loopback(port))
         @test errno == Int32(0) || errno == Int32(Base.Libc.EINPROGRESS)
-        _wait_dispatched(accept_waiter)
+        _wait_dispatched(acceptor, accept_waiter)
         NC.set_deadline!(listener, Int64(1))
         accepted = fetch(acceptor)
         @test accepted isa NC.Conn
