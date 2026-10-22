@@ -1242,3 +1242,42 @@ end
             end
         end
     end
+
+@static if !Sys.iswindows()
+@testset "an interrupt stops a dial instead of moving to the next address" begin
+    SO = Reseau.SocketOps
+    # A listener whose accept queue is full leaves later connects pending.
+    blocked = NC.listen(NC.loopback_addr(0); backlog = 1)
+    port = Int((NC.addr(blocked)::NC.SocketAddrV4).port)
+    fillers = [SO.open_socket(SO.AF_INET, SO.SOCK_STREAM) for _ in 1:8]
+    try
+        for fd in fillers
+            SO.set_nonblocking!(fd, true)
+            SO.connect_socket(fd, SO.sockaddr_in_loopback(port))
+        end
+        # Two candidates, both pending: an interrupt during the first dial
+        # must end the dial rather than start the second.
+        resolver = ND.StaticResolver(hosts = Dict("pending.test" => NC.SocketEndpoint[NC.loopback_addr(0), NC.loopback_addr(0)]))
+        d = ND.HostResolver(resolver = resolver, timeout_ns = 20_000_000_000, fallback_delay_ns = -1)
+        registrations() = length(IP.POLLER[].registrations)
+        before = registrations()
+        dialer = @async try
+            NC.connect(d, "tcp", "pending.test:$(port)")
+        catch err
+            err
+        end
+        # The dialer runs on this thread, so once its socket is registered it
+        # has parked waiting for the connect to complete.
+        while registrations() == before && !istaskdone(dialer)
+            yield()
+        end
+        istaskdone(dialer) || schedule(dialer, InterruptException(); error = true)
+        result = fetch(dialer)
+        result isa NC.Conn && close(result)
+        @test result isa InterruptException
+    finally
+        foreach(SO.close_socket_nothrow, fillers)
+        close(blocked)
+    end
+end
+end
