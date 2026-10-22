@@ -1720,13 +1720,33 @@ function resolve_tcp_addrs(network::AbstractString, address::AbstractString)
     return resolve_tcp_addrs(DEFAULT_RESOLVER, network, address)
 end
 
+# Where one address must be chosen (a listener, `resolve_tcp_addr`), Go takes
+# the first IPv4 address (`addrList.first(isIPv4)`): "localhost" means
+# 127.0.0.1 even when the resolver lists ::1 first, so IPv4-only clients can
+# reach it. A leading IPv6 wildcard stays first: it is the dual-stack listener.
+# Returns a new vector when it reorders; custom resolvers may own `addrs`.
+_prefer_first_ipv4(addrs, ::ResolverPolicy) = addrs
+
+function _prefer_first_ipv4(addrs::Vector{TCP.SocketEndpoint}, policy::ResolverPolicy)::Vector{TCP.SocketEndpoint}
+    (policy.prefer_ipv6 || isempty(addrs)) && return addrs
+    lead = addrs[1]
+    lead isa TCP.SocketAddrV6 || return addrs
+    all(iszero, (lead::TCP.SocketAddrV6).ip) && return addrs
+    for i in 2:length(addrs)
+        addrs[i] isa TCP.SocketAddrV4 || continue
+        return TCP.SocketEndpoint[addrs[i]; addrs[1:(i - 1)]; addrs[(i + 1):end]]
+    end
+    return addrs
+end
+
 """
     resolve_tcp_addr(resolver, network, address; policy=ResolverPolicy())
 
-Resolve and return the first preferred TCP endpoint.
+Resolve and return one TCP endpoint: the first IPv4 candidate when there is one
+(as Go's `ResolveTCPAddr` chooses), unless `policy.prefer_ipv6` is set, the
+address is an IPv6 literal, or the first candidate is the IPv6 wildcard.
 
-This is a convenience wrapper over `resolve_tcp_addrs` that returns only the
-first candidate after policy ordering is applied.
+This is a convenience wrapper over `resolve_tcp_addrs`.
 """
 function resolve_tcp_addr(
         resolver::AbstractResolver,
@@ -1735,7 +1755,7 @@ function resolve_tcp_addr(
         policy::ResolverPolicy = ResolverPolicy(),
     )::TCP.SocketEndpoint
     addrs = resolve_tcp_addrs(resolver, network, address; op = :resolve, policy = policy)
-    return addrs[1]
+    return _prefer_first_ipv4(addrs, policy)[1]
 end
 
 """
@@ -2522,7 +2542,10 @@ end
 Listen on a resolved local endpoint.
 
 The address string is resolved into one or more concrete local endpoints. Each
-candidate is tried in order until one bind/listen succeeds.
+candidate is tried in order until one bind/listen succeeds. As in Go, the first
+IPv4 candidate goes first (so `"localhost:8080"` binds 127.0.0.1), unless
+`d.policy.prefer_ipv6` is set or the host is empty or `[::]`, which bind the
+dual-stack IPv6 wildcard.
 
 Keyword arguments:
 - `backlog`: listen backlog passed to the kernel
@@ -2545,7 +2568,7 @@ function listen(
         throw(_wrap_op_error("listen", network, nothing, nothing, _as_exception(err)))
     end
     addrs = try
-        resolve_tcp_addrs(d.resolver, network, address; op = :listen, policy = d.policy)
+        _prefer_first_ipv4(resolve_tcp_addrs(d.resolver, network, address; op = :listen, policy = d.policy), d.policy)
     catch err
         throw(_wrap_op_error("listen", network, nothing, nothing, _as_exception(err)))
     end
@@ -2671,7 +2694,9 @@ end
     UDP.listen(network, address; resolver=DEFAULT_RESOLVER, policy=ResolverPolicy(), reuseaddr=false, reuseport=false) -> UDP.Conn
 
 Resolve `address` and bind an unconnected UDP socket to the first candidate
-that binds successfully. An empty host (`":9000"`) binds the wildcard address.
+that binds successfully, trying the first IPv4 candidate first unless
+`policy.prefer_ipv6` is set (as in Go, `"localhost:9000"` binds 127.0.0.1). An
+empty host (`":9000"`) binds the wildcard address.
 
 `network` must be `"udp"`, `"udp4"`, or `"udp6"`; `"udp6"` binds IPv6-only.
 Failures are wrapped in `HostResolvers.OpError`.
@@ -2686,7 +2711,7 @@ function UDP.listen(
     )::UDP.Conn
     kind = _udp_network_kind(network, "listen")
     addrs = try
-        resolve_tcp_addrs(resolver, network, address; op = :listen, policy = policy)
+        _prefer_first_ipv4(resolve_tcp_addrs(resolver, network, address; op = :listen, policy = policy), policy)
     catch err
         throw(_wrap_op_error("listen", network, nothing, nothing, _as_exception(err)))
     end
