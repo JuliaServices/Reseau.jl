@@ -997,6 +997,21 @@ end
 # `arm_waiter!` must run its locked lifetime checks before calling the hook.
 const _BACKEND_ARMS_WAITERS = true
 
+# Called on the poller thread after it stopped on a backend failure. Pending
+# overlapped operations still own their buffers, so cancel them and consume
+# their completion packets before waiters may fail. Returns false, leaving the
+# waiters parked, if that is not possible (for example the port itself broke).
+function _backend_retire_ops_after_failure!(state::Poller)::Bool
+    backend = _iocp_backend(state)
+    backend === nothing && return true
+    try
+        _drain_pending_ops_on_close!(backend)
+    catch
+        return false
+    end
+    return true
+end
+
 function _backend_arm_waiter!(state::Poller, registration::Registration, mode::PollMode.T)::Int32
     backend = _iocp_backend(state)
     backend === nothing && return Int32(Base.Libc.ENOSYS)
@@ -1181,6 +1196,10 @@ function _backend_open_fd!(state::Poller, fd::SysFD, mode::PollMode.T, token::UI
 end
 
 const _BACKEND_ARMS_WAITERS = false
+
+# epoll and kqueue operations own no caller memory, so nothing must be retired
+# before failing waiters after a poller failure.
+_backend_retire_ops_after_failure!(::Poller)::Bool = true
 
 function _backend_arm_waiter!(state::Poller, registration::Registration, mode::PollMode.T)::Int32
     _ = state

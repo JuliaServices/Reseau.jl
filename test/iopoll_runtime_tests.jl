@@ -679,3 +679,55 @@ end
         end
         _el_log_test_progress("DONE: shutdown wakes an idle poller promptly")
     end
+
+@static if !Sys.iswindows()
+@testset "a failed poller thread fails parked descriptors instead of stranding them" begin
+    NC = Reseau.TCP
+    IP.shutdown!()
+    listener = nothing
+    client = nothing
+    server = nothing
+    backend = nothing
+    field = :none
+    saved = Cint(-1)
+    try
+        listener = NC.listen(NC.loopback_addr(0))
+        accept_task = errormonitor(@async NC.accept(listener))
+        client = NC.connect(NC.loopback_addr(Int(NC.addr(listener).port)))
+        server = fetch(accept_task)
+        reader = errormonitor(Threads.@spawn try
+            read(server, UInt8)
+        catch err
+            err
+        end)
+        waiter = IP.current_registration(server.fd.pfd.pd).read_waiter
+        while !istaskdone(reader) && !((@atomic :acquire waiter.state) isa Task)
+            yield()
+        end
+        state = IP.POLLER[]
+        backend = state.backend_state
+        field = hasfield(typeof(backend), :kq) ? :kq : :epfd
+        saved = getfield(backend, field)
+        # A timer makes the poller poll again; that poll then fails on a bad
+        # descriptor, which stops the poller thread.
+        timer = IP.TimerState()
+        IP.schedule_timer!(timer, Int64(time_ns()) + 20_000_000)
+        setfield!(backend, field, Cint(-1))
+        # Bounded only so a regression fails instead of hanging the suite.
+        Base.timedwait(() -> istaskdone(reader), 60.0; pollint = 0.01)
+        @test istaskdone(reader)
+        @test !(@atomic :acquire state.running)
+        istaskdone(reader) && @test fetch(reader) isa IP.NetClosingError
+    finally
+        field === :none || setfield!(backend, field, saved)
+        IP.shutdown!()
+        for x in (server, client, listener)
+            x === nothing && continue
+            try
+                close(x)
+            catch
+            end
+        end
+    end
+end
+end

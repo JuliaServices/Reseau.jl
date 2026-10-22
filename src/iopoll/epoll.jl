@@ -156,6 +156,10 @@ end
 # lifetime checks when this is `false`.
 const _BACKEND_ARMS_WAITERS = false
 
+# epoll and kqueue operations own no caller memory, so nothing must be retired
+# before failing waiters after a poller failure.
+_backend_retire_ops_after_failure!(::Poller)::Bool = true
+
 function _backend_arm_waiter!(state::Poller, registration::Registration, mode::PollMode.T)::Int32
     _ = state
     _ = registration

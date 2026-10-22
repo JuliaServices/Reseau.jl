@@ -236,17 +236,7 @@ function shutdown!()
         # Backend teardown has relinquished all kernel ownership; blocked
         # descriptor tasks can now observe the final closing state.
         for registration in registrations
-            pd = registration.pollstate
-            lock(pd.lock)
-            try
-                @atomic :release pd.closing = true
-                @atomic :release pd.pollable = false
-                @atomic pd.rseq += UInt64(1)
-                @atomic pd.wseq += UInt64(1)
-            finally
-                unlock(pd.lock)
-            end
-            _notify_registration!(registration, PollMode.READWRITE, PollWakeReason.CANCELED)
+            _fail_registration!(registration)
         end
     finally
         unlock(POLLER_LOCK)
@@ -431,9 +421,31 @@ function _dispatch_ready_event!(state::Poller, event::PollEvent)
     return nothing
 end
 
+# Marks a registration's descriptor closing and wakes its waiters, which then
+# fail with a closing error instead of waiting on a poller that is gone.
+function _fail_registration!(registration::Registration)
+    pd = registration.pollstate
+    lock(pd.lock)
+    try
+        @atomic :release pd.closing = true
+        @atomic :release pd.pollable = false
+        @atomic pd.rseq += UInt64(1)
+        @atomic pd.wseq += UInt64(1)
+    finally
+        unlock(pd.lock)
+    end
+    _notify_registration!(registration, PollMode.READWRITE, PollWakeReason.CANCELED)
+    return nothing
+end
+
+# Runs on the poller thread after it has stopped (`running == false`) because
+# its backend failed. Nothing will service the registered descriptors again,
+# so they fail as in `shutdown!`, and timers are closed.
 function _notify_all_waiters!(state::Poller)
     registrations = Registration[]
     timers = TimerState[]
+    # Taking the lock also waits out any task that saw `running == true` and is
+    # inside a locked registration or submission.
     lock(state.lock)
     try
         append!(registrations, values(state.registrations))
@@ -445,8 +457,16 @@ function _notify_all_waiters!(state::Poller)
     finally
         unlock(state.lock)
     end
+    # IOCP operations own their buffers until their completion packets are
+    # consumed; if they cannot be retired, the waiters stay parked rather than
+    # hand back memory the kernel may still write.
+    retired = _backend_retire_ops_after_failure!(state)
     for registration in registrations
-        _notify_registration!(registration, PollMode.READWRITE, PollWakeReason.CANCELED)
+        if retired
+            _fail_registration!(registration)
+        else
+            _notify_registration!(registration, PollMode.READWRITE, PollWakeReason.CANCELED)
+        end
     end
     for timer in timers
         _close_timer!(timer)
