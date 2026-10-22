@@ -2125,12 +2125,6 @@ function _partition_addrs(addrs::AbstractVector{A}) where {A<:TCP.SocketEndpoint
     return primaries, fallbacks
 end
 
-@inline function _prefer_ipv4_first!(addrs::AbstractVector{<:TCP.SocketEndpoint}, policy::ResolverPolicy)
-    _ = addrs
-    _ = policy
-    return nothing
-end
-
 @inline function _same_addr_family(a::TCP.SocketEndpoint, b::TCP.SocketEndpoint)::Bool
     return (_is_ipv4(a) && _is_ipv4(b)) || (_is_ipv6(a) && _is_ipv6(b))
 end
@@ -2327,25 +2321,6 @@ function _resolve_parallel(
     end
 end
 
-function _resolve_serial_families(
-        d::HostResolver,
-        network::AbstractString,
-        address::AbstractString,
-        kind::Symbol,
-        primaries::AbstractVector{A},
-        fallbacks::AbstractVector{B},
-        deadline_ns::Int64,
-    )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}} where {A<:TCP.SocketEndpoint, B<:TCP.SocketEndpoint}
-    primary_state = DNSRaceState()
-    conn, err = _resolve_serial(d, network, address, kind, primaries, deadline_ns, primary_state)
-    conn !== nothing && return conn, nothing
-    isempty(fallbacks) && return nothing, err
-    fallback_state = DNSRaceState()
-    fallback_conn, fallback_err = _resolve_serial(d, network, address, kind, fallbacks, deadline_ns, fallback_state)
-    fallback_conn !== nothing && return fallback_conn, nothing
-    return nothing, err === nothing ? fallback_err : err
-end
-
 function _connect_resolved_addrs_impl(
         d::HostResolver,
         network::AbstractString,
@@ -2368,7 +2343,6 @@ function _connect_resolved_addrs_impl(
     if deadline_ns != 0 && Int64(time_ns()) >= deadline_ns
         throw(_wrap_op_error("connect", network, d.local_addr, nothing, DialTimeoutError(String(address))))
     end
-    _prefer_ipv4_first!(addrs, d.policy)
     primaries, fallbacks = _partition_addrs(addrs)
     conn = nothing
     err = nothing
@@ -2421,7 +2395,6 @@ function _connect_resolved_addrs_impl(
     if deadline_ns != 0 && Int64(time_ns()) >= deadline_ns
         throw(_wrap_op_error("connect", network, d.local_addr, nothing, DialTimeoutError(String(address))))
     end
-    _prefer_ipv4_first!(addrs, d.policy)
     primary_is_v4 = !isempty(addrs) && addrs[1] isa TCP.SocketAddrV4
     if primary_is_v4
         primaries = TCP.SocketAddrV4[]
@@ -2436,7 +2409,9 @@ function _connect_resolved_addrs_impl(
         conn, err = if _use_parallel_race(d, kind, fallbacks)
             _resolve_parallel(d, network, address, kind, primaries, fallbacks, deadline_ns)
         else
-            _resolve_serial_families(d, network, address, kind, primaries, fallbacks, deadline_ns)
+            # Without the race, dial every address in resolver order so each
+            # gets its share of the budget, as Go's dialSerial does.
+            _resolve_serial(d, network, address, kind, addrs, deadline_ns, DNSRaceState())
         end
         conn !== nothing && return conn
         throw(_wrap_op_error(
@@ -2459,7 +2434,7 @@ function _connect_resolved_addrs_impl(
     conn, err = if _use_parallel_race(d, kind, fallbacks)
         _resolve_parallel(d, network, address, kind, primaries, fallbacks, deadline_ns)
     else
-        _resolve_serial_families(d, network, address, kind, primaries, fallbacks, deadline_ns)
+        _resolve_serial(d, network, address, kind, addrs, deadline_ns, DNSRaceState())
     end
     conn !== nothing && return conn
     throw(_wrap_op_error(
