@@ -1157,6 +1157,44 @@ end
     end
 end
 
+@static if !Sys.iswindows()
+# IOCP submits a probe under the poller lock for every wait; epoll and kqueue
+# keep interest armed, so their waits must not touch that global lock.
+@testset "a read parks without the global poller lock" begin
+    listener = nothing
+    client = nothing
+    server = nothing
+    try
+        listener = NC.listen(NC.loopback_addr(0); backlog = 4)
+        laddr = NC.addr(listener)::NC.SocketAddrV4
+        accept_task = errormonitor(@async NC.accept(listener))
+        client = NC.connect(NC.loopback_addr(Int(laddr.port)))
+        server = fetch(accept_task)
+        waiter = IP.current_registration(server.fd.pfd.pd).read_waiter
+        state = IP.POLLER[]
+        reader = nothing
+        lock(state.lock)
+        try
+            # Pinned to this thread, so it runs only while this task yields.
+            reader = @async read(server, UInt8)
+            for _ in 1:1000
+                ((@atomic :acquire waiter.state) isa Task || istaskdone(reader)) && break
+                yield()
+            end
+            @test (@atomic :acquire waiter.state) === reader
+        finally
+            unlock(state.lock)
+        end
+        write(client, UInt8[0x2a])
+        @test fetch(reader) == 0x2a
+    finally
+        _close_quiet!(server)
+        _close_quiet!(client)
+        _close_quiet!(listener)
+    end
+end
+end
+
 @testset "TCP stdlib-parity additions" begin
     @testset "platform socket constants and layouts" begin
         @test Reseau.SocketOps.IPPROTO_TCP == 6
