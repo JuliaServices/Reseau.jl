@@ -253,4 +253,42 @@ const _TLS13_EMPTY_PSK_EARLY_SECRET_SHA256 =
         tampered[end] = xor(tampered[end], 0x01)
         @test !TLC._tls12_openssl_verify_signature(cert_info.public_key, TLC._TLS_SIGNATURE_RSA_PKCS1_SHA256, signed, tampered)
     end
+
+    @testset "record contexts keyed once match a fresh context for every nonce" begin
+        # Record cipher states key their OpenSSL context once and then set only
+        # the nonce, so each record must equal a freshly keyed one-shot seal.
+        aad = UInt8[0x17, 0x03, 0x03, 0x00, 0x20]
+        for spec in (TLC._TLS13_AES_128_GCM_SHA256, TLC._TLS13_AES_256_GCM_SHA384, TLC._TLS13_CHACHA20_POLY1305_SHA256)
+            secret = rand(UInt8, 48)
+            sealer = TLC._TLS13RecordCipherState(spec, secret)
+            opener = TLC._TLS13RecordCipherState(spec, secret)
+            for seq in UInt64(0):UInt64(8)
+                plaintext = rand(UInt8, 40)
+                nonce = TLC._tls13_nonce(sealer.iv, seq)
+                record = vcat(plaintext, zeros(UInt8, 16))
+                @test GC.@preserve(aad, TLC._tls13_encrypt_record_aead!(sealer.aead, record, 1, 40, sealer.key, nonce, pointer(aad), 5)) == 56
+                @test record == TLC._tls13_encrypt_record_aead(spec, sealer.key, nonce, aad, plaintext)
+                tampered = copy(record)
+                tampered[end] = xor(tampered[end], 0x01)
+                @test GC.@preserve(aad, TLC._tls13_decrypt_record_aead!(opener.aead, tampered, 1, 40, 41, opener.key, nonce, pointer(aad), 5)) === nothing
+                @test GC.@preserve(aad, TLC._tls13_decrypt_record_aead!(opener.aead, record, 1, 40, 41, opener.key, nonce, pointer(aad), 5)) == 40
+                @test record[1:40] == plaintext
+            end
+        end
+        for spec in (TLC._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLC._TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384)
+            key = rand(UInt8, spec == TLC._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256 ? 16 : 32)
+            fixed_iv = rand(UInt8, 4)
+            sealer = TLC._TLS12RecordCipherState(spec, copy(key), copy(fixed_iv), UInt64(0), false)
+            opener = TLC._TLS12RecordCipherState(spec, copy(key), copy(fixed_iv), UInt64(0), false)
+            for seq in UInt64(0):UInt64(8)
+                plaintext = rand(UInt8, 40)
+                nonce = vcat(fixed_iv, reinterpret(UInt8, [hton(seq)]))
+                record = vcat(plaintext, zeros(UInt8, 16))
+                @test GC.@preserve(aad, TLC._tls12_encrypt_record_aead!(sealer.aead, record, 1, 40, sealer.key, nonce, pointer(aad), 5)) == 56
+                @test record == TLC._tls12_encrypt_record_aead(spec, key, nonce, aad, plaintext)
+                @test GC.@preserve(aad, TLC._tls12_decrypt_record_aead!(opener.aead, record, 1, 40, 41, opener.key, nonce, pointer(aad), 5)) == 40
+                @test record[1:40] == plaintext
+            end
+        end
+    end
 end
