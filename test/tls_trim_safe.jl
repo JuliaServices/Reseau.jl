@@ -104,6 +104,68 @@ end
 
 Base.Experimental.entrypoint(_tls_server_task_entry, ())
 
+# After the handshake, sends an application-data record that cannot
+# authenticate, then drains the raw socket until the client closes.
+function _tls_forged_record_server_entry()::Nothing
+    listener = _TLS_SERVER_LISTENER[]::TL.Listener
+    conn = TL.accept(listener)
+    try
+        TL.handshake!(conn)
+        record = fill(0x42, 37)
+        record[1] = 0x17
+        record[2] = 0x03
+        record[3] = 0x03
+        record[4] = 0x00
+        record[5] = 0x20
+        write(conn.tcp, record)
+        buf = Vector{UInt8}(undef, 64)
+        while true
+            n = try
+                readbytes!(conn.tcp, buf; all = false)
+            catch
+                0
+            end
+            n == 0 && break
+        end
+    finally
+        _close_quiet!(conn)
+    end
+    return nothing
+end
+
+Base.Experimental.entrypoint(_tls_forged_record_server_entry, ())
+
+# A failed read must throw `TLSError` in the trimmed executable too, however
+# precisely inference knows the error the read caught.
+function _run_tls_forged_record_trim!()::Nothing
+    listener::Union{Nothing, TL.Listener} = nothing
+    client::Union{Nothing, TL.Conn} = nothing
+    try
+        listener = TL.listen(NC.loopback_addr(0), _TLS_MIXED_SERVER_CONFIG; backlog = 8)
+        _TLS_SERVER_LISTENER[] = listener
+        laddr = TL.addr(listener)::NC.SocketAddrV4
+        server_task = Task(_tls_forged_record_server_entry)
+        schedule(server_task)
+        client = TL.connect(NC.loopback_addr(Int(laddr.port)), _tls_client_config())
+        failed = false
+        try
+            readbytes!(client, Vector{UInt8}(undef, 16); all = false)
+        catch err
+            err isa TL.TLSError || rethrow()
+            failed = true
+        end
+        failed || error("expected a TLS read error for a forged record")
+        _close_quiet!(client)
+        client = nothing
+        wait(server_task)
+    finally
+        _TLS_SERVER_LISTENER[] = nothing
+        _close_quiet!(client)
+        _close_quiet!(listener)
+    end
+    return nothing
+end
+
 function _tls_expect_state(
     state::TL.ConnectionState,
     expected_version::String,
@@ -235,6 +297,7 @@ end
 
 function run_tls_trim_sample()::Nothing
     _run_distrusted_ca_trim!()
+    _run_tls_forged_record_trim!()
     _run_combined_ca_trim!(TL.TLS1_2_VERSION)
     _run_combined_ca_trim!(TL.TLS1_3_VERSION)
     _run_tls_roundtrip!(_TLS_MIXED_SERVER_CONFIG, _tls_client_config(), "TLSv1.3", true)
