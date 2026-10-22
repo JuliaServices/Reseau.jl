@@ -232,6 +232,24 @@ end
     @test parsed13 == msg13
 end
 
+@testset "record layers cap a handshake message's body, not body plus header" begin
+    for (typ, cap) in ((0x01, TLH._MAX_HANDSHAKE_SIZE), (0x0b, TLH._MAX_CERTIFICATE_HANDSHAKE_SIZE)), body in (cap, cap + 1)
+        header = UInt8[typ, UInt8(body >> 16), UInt8((body >> 8) & 0xff), UInt8(body & 0xff)]
+        state13 = TLH._TLS13NativeClientState()
+        append!(state13.handshake_buffer, header)
+        state12 = TLH._TLS12NativeState()
+        append!(state12.handshake_buffer, header)
+        if body <= cap
+            # Accepted size: waits for the rest of the body.
+            @test TLH._tls13_try_take_handshake_message!(state13) === nothing
+            @test TLH._tls12_try_take_handshake_message!(state12) === nothing
+        else
+            @test_throws TLH._TLSAlertError TLH._tls13_try_take_handshake_message!(state13)
+            @test_throws TLH._TLSAlertError TLH._tls12_try_take_handshake_message!(state12)
+        end
+    end
+end
+
 _server_hello_done_msg_tls12() = TLH._ServerHelloDoneMsgTLS12()
 
 function _client_key_exchange_msg_tls12(; ciphertext::AbstractVector{UInt8} = UInt8[])
