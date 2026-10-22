@@ -586,11 +586,6 @@ function _run_addrinfo_future!(future::_AddrInfoFuture)::Nothing
     catch ex
         err = ex::Exception
     end
-    _finish_addrinfo_future!(future, ret, err)
-    return nothing
-end
-
-function _finish_addrinfo_future!(future::_AddrInfoFuture, ret::Cint, err::Union{Nothing,Exception})::Nothing
     lock(future.notify)
     try
         future.ret = ret
@@ -599,6 +594,19 @@ function _finish_addrinfo_future!(future::_AddrInfoFuture, ret::Cint, err::Union
         else
             future.err = err::Exception
         end
+        future.done = true
+        notify(future.notify)
+    finally
+        unlock(future.notify)
+    end
+    return nothing
+end
+
+# Completes a queued lookup without running it: its caller stopped waiting.
+function _drop_addrinfo_future!(future::_AddrInfoFuture)::Nothing
+    lock(future.notify)
+    try
+        future.err = _LookupAbandonedError()
         future.done = true
         notify(future.notify)
     finally
@@ -651,7 +659,7 @@ function _addrinfo_worker_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
             future = _take_addrinfo_work!(work_queue)
             future === nothing && break
             if _lookup_abandoned(future.ctx)
-                _finish_addrinfo_future!(future, Cint(0), _LookupAbandonedError())
+                _drop_addrinfo_future!(future)
             else
                 _run_addrinfo_future!(future)
             end
