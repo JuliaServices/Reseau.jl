@@ -1048,6 +1048,43 @@ end
         @test server_state3.curve == "X25519"
     end
 
+    @testset "TLS 1.2 server rejects a malformed unverified client certificate with bad_certificate" begin
+        # DER `30 03 02 01`: a SEQUENCE whose contents are truncated.
+        bad_cert = tempname() * ".pem"
+        write(bad_cert, "-----BEGIN CERTIFICATE-----\nMAMCAQ==\n-----END CERTIFICATE-----\n")
+        server_cfg = _tls12_server_config(
+            cert_file = _TLS12_NATIVE_SERVER_CERT_PATH,
+            key_file = _TLS12_NATIVE_SERVER_KEY_PATH,
+            client_auth = TL12N.ClientAuthMode.RequestClientCert,
+        )
+        client_cfg = _tls12_native_client_config(cert_file = bad_cert, key_file = _TLS12_NATIVE_CLIENT_KEY_PATH)
+        listener = TL12N.listen("tcp", "127.0.0.1:0", server_cfg)
+        try
+            port = Int(TL12N.addr(listener).port)
+            server_task = errormonitor(Threads.@spawn begin
+                conn = TL12N.accept(listener)
+                try
+                    TL12N.handshake!(conn)
+                    nothing
+                catch err
+                    err
+                finally
+                    close(conn)
+                end
+            end)
+            try
+                close(TL12N.connect("tcp", "127.0.0.1:$port", client_cfg))
+            catch
+            end
+            server_err = fetch(server_task)
+            # Before, the parse error escaped without an alert.
+            @test server_err isa Exception && occursin("malformed X.509 certificate", sprint(showerror, server_err))
+        finally
+            close(listener)
+            rm(bad_cert; force = true)
+        end
+    end
+
     @testset "exact TLS 1.2 ECDSA server certificates negotiate ECDHE-ECDSA" begin
         server_cfg = _tls12_server_config(
             cert_file = _TLS12_NATIVE_ECDSA_CERT_PATH,
