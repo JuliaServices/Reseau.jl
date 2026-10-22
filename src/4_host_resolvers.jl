@@ -1405,6 +1405,11 @@ end
     return lowercase(String(network)), _normalize_lookup_host(host)
 end
 
+# Stored as a flight's error when the leader's failure is its own: an interrupt,
+# or a non-`Exception` value thrown by a custom resolver. Followers retry the
+# lookup instead of inheriting it.
+struct _LookupLeaderFailed <: Exception end
+
 function _resolve_singleflight_host(
         resolver::SingleflightResolver,
         network::AbstractString,
@@ -1414,60 +1419,82 @@ function _resolve_singleflight_host(
     literal = _literal_host_addr(h)
     literal === nothing || return TCP.SocketEndpoint[literal]
     key = _lookup_key(network, h)
-    flight = nothing
-    leader = false
-    lock(resolver.lock)
-    try
-        existing = get(() -> nothing, resolver.inflight, key)
-        if existing === nothing
-            flight = _LookupFlight()
-            resolver.inflight[key] = flight::_LookupFlight
-            @atomic :acquire_release resolver.actual_lookups += 1
-            leader = true
-        else
-            flight = existing::_LookupFlight
-            @atomic :acquire_release resolver.shared_hits += 1
-        end
-    finally
-        unlock(resolver.lock)
-    end
-    if leader
-        result = nothing
-        err = nothing
-        try
-            result = _resolve_host_ips(resolver.parent, network, h)
-        catch ex
-            err = ex::Exception
-        end
-        lock((flight::_LookupFlight).lock)
-        try
-            flight.result = result === nothing ? nothing : copy(result::Vector{TCP.SocketEndpoint})
-            flight.err = err
-            @atomic :release flight.done = true
-            notify(flight.cond; all = true)
-        finally
-            unlock(flight.lock)
-        end
+    while true
+        flight = nothing
+        leader = false
         lock(resolver.lock)
         try
-            current = get(() -> nothing, resolver.inflight, key)
-            current === flight && delete!(resolver.inflight, key)
+            existing = get(() -> nothing, resolver.inflight, key)
+            # A finished flight whose leader has not removed it yet is not joined.
+            if existing === nothing || (@atomic :acquire (existing::_LookupFlight).done)
+                flight = _LookupFlight()
+                resolver.inflight[key] = flight::_LookupFlight
+                @atomic :acquire_release resolver.actual_lookups += 1
+                leader = true
+            else
+                flight = existing::_LookupFlight
+                @atomic :acquire_release resolver.shared_hits += 1
+            end
         finally
             unlock(resolver.lock)
         end
-        err === nothing || throw(err::Exception)
-        return result::Vector{TCP.SocketEndpoint}
-    end
-    lock((flight::_LookupFlight).lock)
-    try
-        while !(@atomic :acquire flight.done)
-            wait(flight.cond)
+        leader && return _lead_singleflight_lookup!(resolver, flight::_LookupFlight, key, network, h)
+        lock((flight::_LookupFlight).lock)
+        try
+            while !(@atomic :acquire flight.done)
+                wait(flight.cond)
+            end
+            err = flight.err
+            err isa _LookupLeaderFailed && continue
+            err === nothing || throw(err::Exception)
+            return copy(flight.result::Vector{TCP.SocketEndpoint})
+        finally
+            unlock(flight.lock)
         end
-        flight.err === nothing || throw(flight.err::Exception)
-        return copy(flight.result::Vector{TCP.SocketEndpoint})
+    end
+end
+
+function _lead_singleflight_lookup!(
+        resolver::SingleflightResolver,
+        flight::_LookupFlight,
+        key::Tuple{String, String},
+        network::AbstractString,
+        h::String,
+    )::Vector{TCP.SocketEndpoint}
+    result = nothing
+    failed = false
+    thrown = nothing
+    try
+        result = _resolve_host_ips(resolver.parent, network, h)
+    catch ex
+        failed = true
+        thrown = ex
+    end
+    err = if !failed
+        nothing
+    elseif thrown isa Exception && !(thrown isa InterruptException)
+        thrown
+    else
+        _LookupLeaderFailed()
+    end
+    lock(flight.lock)
+    try
+        flight.result = result === nothing ? nothing : copy(result::Vector{TCP.SocketEndpoint})
+        flight.err = err
+        @atomic :release flight.done = true
+        notify(flight.cond; all = true)
     finally
         unlock(flight.lock)
     end
+    lock(resolver.lock)
+    try
+        current = get(() -> nothing, resolver.inflight, key)
+        current === flight && delete!(resolver.inflight, key)
+    finally
+        unlock(resolver.lock)
+    end
+    failed && throw(thrown)
+    return result::Vector{TCP.SocketEndpoint}
 end
 
 function _evict_cache_if_needed_locked!(resolver::CachingResolver)
@@ -1519,24 +1546,26 @@ function _refresh_cached_host!(
         host::String,
     )
     result = nothing
+    failed = false
     err = nothing
     try
         result = _resolve_host_ips(resolver.parent, network, host)
     catch ex
-        err = ex::Exception
+        failed = true
+        ex isa LookupError && (err = ex)
     end
     now_ns = Int64(time_ns())
     lock(resolver.lock)
     try
         entry = get(() -> nothing, resolver.entries, key)
         entry === nothing && return nothing
-        if err === nothing
+        if !failed
             _store_cache_entry_locked!(resolver, key, result::Vector{TCP.SocketEndpoint}, nothing, now_ns)
             return nothing
         end
         entry.refreshing = false
-        if err isa LookupError && resolver.negative_ttl_ns > 0
-            _store_cache_entry_locked!(resolver, key, nothing, err, now_ns)
+        if err !== nothing && resolver.negative_ttl_ns > 0
+            _store_cache_entry_locked!(resolver, key, nothing, err::LookupError, now_ns)
         end
     finally
         unlock(resolver.lock)
@@ -1591,24 +1620,26 @@ function _resolve_cached_host(
         return stale_result::Vector{TCP.SocketEndpoint}
     end
     result = nothing
-    err = nothing
+    failed = false
+    thrown = nothing
     try
         result = _resolve_host_ips(resolver.parent, network, h)
     catch ex
-        err = ex::Exception
+        failed = true
+        thrown = ex
     end
     now_ns = Int64(time_ns())
     lock(resolver.lock)
     try
-        if err === nothing
+        if !failed
             _store_cache_entry_locked!(resolver, key, result::Vector{TCP.SocketEndpoint}, nothing, now_ns)
-        elseif err isa LookupError && resolver.negative_ttl_ns > 0
-            _store_cache_entry_locked!(resolver, key, nothing, err, now_ns)
+        elseif thrown isa LookupError && resolver.negative_ttl_ns > 0
+            _store_cache_entry_locked!(resolver, key, nothing, thrown, now_ns)
         end
     finally
         unlock(resolver.lock)
     end
-    err === nothing || throw(err::Exception)
+    failed && throw(thrown)
     return result::Vector{TCP.SocketEndpoint}
 end
 
@@ -2002,7 +2033,7 @@ function _resolve_with_deadline(
         try
             _notify_resolved_connect_addrs_future!(future, resolve_tcp_addrs(d.resolver, network, address; op = :connect, policy = d.policy))
         catch err
-            ex = err::Exception
+            ex = _as_exception(err)
             lock(future.notify)
             try
                 if !future.done
@@ -2139,8 +2170,12 @@ end
     return OpError(String(op), String(net), source, addr, err)
 end
 
+# Custom resolvers can throw any value; one that is not an `Exception` is
+# wrapped so it can travel inside `OpError` and resolution futures. (No
+# backtrace: processing one is not trim-safe.)
 @inline function _as_exception(err)::Exception
-    return err::Exception
+    err isa Exception && return err
+    return CapturedException(err, Any[])
 end
 
 function _mark_connect_done!(state::DNSRaceState)
