@@ -1433,3 +1433,74 @@ end
         end
     end
 end
+
+@static if Sys.iswindows()
+@testset "IOCP completion that races a deadline is delivered" begin
+    # Spin without yielding until the poller thread has dispatched a completion
+    # to `waiter`. Tasks created with `@async` are pinned to this thread, so the
+    # woken task cannot resume (and see a deadline set next) until this task
+    # yields.
+    function _wait_dispatched(waiter)
+        while !((@atomic :acquire waiter.state) isa IP._PollWakeToken)
+            GC.safepoint()
+        end
+        return nothing
+    end
+    function _wait_parked(task, waiter)
+        while !istaskdone(task) && !((@atomic :acquire waiter.state) isa Task)
+            yield()
+        end
+        return nothing
+    end
+    listener = nothing
+    client = nothing
+    server = nothing
+    accepted = nothing
+    raw = SO.INVALID_SOCKET
+    try
+        listener = NC.listen(NC.loopback_addr(0); backlog = 4)
+        port = Int((NC.addr(listener)::NC.SocketAddrV4).port)
+        accept_task = errormonitor(@async NC.accept(listener))
+        client = NC.connect(NC.loopback_addr(port))
+        server = fetch(accept_task)
+        # A read whose bytes arrive just as its deadline expires returns them.
+        buf = zeros(UInt8, 8)
+        reader = @async try
+            readbytes!(server, buf; all = false)
+        catch err
+            err
+        end
+        read_waiter = IP.current_registration(server.fd.pfd.pd).read_waiter
+        _wait_parked(reader, read_waiter)
+        write(client, UInt8[0x61, 0x62, 0x63])
+        _wait_dispatched(read_waiter)
+        NC.set_read_deadline!(server, Int64(1))
+        @test fetch(reader) == 3
+        @test buf[1:3] == UInt8[0x61, 0x62, 0x63]
+        # An accept whose connection arrives just as its deadline expires
+        # returns the connection instead of closing it.
+        acceptor = @async try
+            NC.accept(listener)
+        catch err
+            err
+        end
+        accept_waiter = IP.current_registration(listener.fd.pfd.pd).read_waiter
+        _wait_parked(acceptor, accept_waiter)
+        # A raw nonblocking connect never parks this task.
+        raw = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
+        SO.set_nonblocking!(raw, true)
+        errno = SO.connect_socket(raw, SO.sockaddr_in_loopback(port))
+        @test errno == Int32(0) || errno == Int32(Base.Libc.EINPROGRESS)
+        _wait_dispatched(accept_waiter)
+        NC.set_deadline!(listener, Int64(1))
+        accepted = fetch(acceptor)
+        @test accepted isa NC.Conn
+    finally
+        raw == SO.INVALID_SOCKET || SO.close_socket_nothrow(raw)
+        accepted isa NC.Conn && _close_quiet!(accepted)
+        _close_quiet!(server)
+        _close_quiet!(client)
+        _close_quiet!(listener)
+    end
+end
+end
