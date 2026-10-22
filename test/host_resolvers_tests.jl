@@ -453,6 +453,13 @@ end
                 @test_throws ND.LookupError ND.lookup_port(ND.StaticResolver(), network, name)
             end
             @test ND.lookup_port(ND.StaticResolver(), "tcp", "https") == 443
+            mixed_case = ND.StaticResolver(
+                hosts = Dict("MyHost" => NC.SocketEndpoint[NC.loopback_addr(0)]),
+                services_tcp = Dict("MySvc" => 7000),
+            )
+            @test ND.resolve_tcp_addrs(mixed_case, "tcp", "MyHost:80") == NC.SocketEndpoint[NC.loopback_addr(80)]
+            @test ND.resolve_tcp_addrs(mixed_case, "tcp", "myhost:80") == NC.SocketEndpoint[NC.loopback_addr(80)]
+            @test ND.lookup_port(mixed_case, "tcp", "MySvc") == 7000
             @test_throws ND.LookupError ND.lookup_port("tcp", "\xffbad")
             @test_throws ND.UnknownNetworkError ND.lookup_port("sctp", "domain")
             @test_throws ND.UnknownNetworkError ND.lookup_port(static_lookup, "sctp", "smtp-alt")

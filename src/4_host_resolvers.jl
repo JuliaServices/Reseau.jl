@@ -267,7 +267,21 @@ function StaticResolver(;
         services_udp::Dict{String, Int} = Dict{String, Int}(),
         fallback::Union{Nothing, AbstractResolver} = nothing,
     )
-    return StaticResolver{typeof(fallback)}(copy(hosts), copy(services_tcp), copy(services_udp), fallback)
+    return StaticResolver{typeof(fallback)}(
+        _lowercase_keys(hosts),
+        _lowercase_keys(services_tcp),
+        _lowercase_keys(services_udp),
+        fallback,
+    )
+end
+
+# Lookups compare lowercased names, so the tables are stored the same way.
+function _lowercase_keys(table::Dict{String, V})::Dict{String, V} where {V}
+    lowered = Dict{String, V}()
+    for (name, value) in table
+        lowered[lowercase(name)] = value
+    end
+    return lowered
 end
 
 const DEFAULT_RESOLVER = SystemResolver()
