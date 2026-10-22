@@ -1773,6 +1773,7 @@ Throws:
 - `TLSHandshakeTimeoutError` when `config.handshake_timeout_ns` expires
 - `TLSError` for TLS or transport failures
 - `EOFError` if the peer closes cleanly during the handshake
+- `InterruptException` if the waiting task is interrupted; later calls throw a `TLSError`
 """
 function handshake!(conn::Conn)
     _ensure_open!(conn, "handshake")
@@ -1814,6 +1815,12 @@ function handshake!(conn::Conn)
             end
         catch err
             ex = _as_exception(err)
+            if ex isa InterruptException
+                # A cancelled handshake can't resume: later operations report
+                # it, while the caller sees the interrupt itself.
+                conn.handshake_error = TLSError("handshake", Int32(0), "interrupted", ex)
+                rethrow()
+            end
             if ex isa _TLSHandshakeDeadlineError
                 deadline_err = ex::_TLSHandshakeDeadlineError
                 if deadline_err.handshake_owned
@@ -2029,6 +2036,8 @@ function _throw_tls_read_error(conn::Conn, ex::Exception, block::Bool)
     if !block && !(ex isa _TLSTransportDeadlineError)
         close(conn.tcp)
     end
+    # Cancellation is not a TLS failure; report it as is.
+    ex isa InterruptException && rethrow()
     ex isa TLSError && rethrow()
     if ex isa _TLSTransportDeadlineError
         throw(TLSError("read", Int32(0), "i/o timeout", (ex::_TLSTransportDeadlineError).cause))
@@ -2098,6 +2107,7 @@ function _peek_eof(conn::Conn)::Bool
         # A transport EOF at a record boundary ends the stream, as in `read`; a
         # local close while waiting reports EOF, as for TCP.
         (ex isa EOFError || ex isa IOPoll.NetClosingError || _is_closed(conn)) && return true
+        ex isa InterruptException && rethrow()
         ex isa TLSError && rethrow()
         if ex isa _TLSTransportDeadlineError
             throw(TLSError("peek", Int32(0), "i/o timeout", (ex::_TLSTransportDeadlineError).cause))
@@ -2518,6 +2528,13 @@ function Base.unsafe_write(conn::Conn, ptr::Ptr{UInt8}, nbytes::UInt)
             end
             throw(conn.write_permanent_error::TLSError)
         end
+        if ex isa InterruptException
+            # like a timeout, the interrupt may have torn a record mid-write
+            if conn.write_permanent_error === nothing
+                conn.write_permanent_error = TLSError("write", Int32(0), "interrupted", ex)
+            end
+            rethrow()
+        end
         ex isa TLSError && rethrow()
         if ex isa IOPoll.NetClosingError || _is_closed(conn)
             throw(_closed_error("write", ex))
@@ -2711,6 +2728,7 @@ function Base.closewrite(conn::Conn)
         return nothing
     catch err
         ex = _as_exception(err)
+        ex isa InterruptException && rethrow()
         ex isa TLSError && rethrow()
         if ex isa IOPoll.NetClosingError || _is_closed(conn)
             throw(_closed_error("closewrite", ex))

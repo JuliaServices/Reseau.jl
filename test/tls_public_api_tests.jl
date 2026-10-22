@@ -471,6 +471,54 @@ _vector_alloc_bytes(n) = @allocated Vector{UInt8}(undef, n)
                 IP.shutdown!()
             end
         end
+        @testset "an interrupt during a blocked read or handshake surfaces as is" begin
+            IP.shutdown!()
+            listener = nothing
+            plain_listener = nothing
+            client = nothing
+            server = nothing
+            try
+                listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(); backlog = 16)
+                laddr = TL.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn begin
+                    conn = TL.accept(listener)
+                    TL.handshake!(conn)
+                    conn # never writes
+                end)
+                client_cfg = TL.Config(verify_peer = false, server_name = "localhost",
+                                       handshake_timeout_ns = 10_000_000_000)
+                client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                server = fetch(accept_task)
+                reader = @async try
+                    read(client, UInt8)
+                catch err
+                    err
+                end
+                sleep(0.2)
+                schedule(reader, InterruptException(); error = true)
+                @test fetch(reader) isa InterruptException
+
+                # a TCP server that never answers the ClientHello
+                plain_listener = NC.listen("tcp", "127.0.0.1:0"; backlog = 16)
+                paddr = NC.addr(plain_listener)::NC.SocketAddrV4
+                silent_task = errormonitor(Threads.@spawn NC.accept(plain_listener))
+                dialer = @async try
+                    _tls_connect("tcp", "127.0.0.1:$(Int(paddr.port))", client_cfg)
+                catch err
+                    err
+                end
+                sleep(0.2)
+                schedule(dialer, InterruptException(); error = true)
+                @test fetch(dialer) isa InterruptException
+                _tls_close_quiet!(fetch(silent_task))
+            finally
+                _tls_close_quiet!(server)
+                _tls_close_quiet!(client)
+                _tls_close_quiet!(listener)
+                _tls_close_quiet!(plain_listener)
+                IP.shutdown!()
+            end
+        end
         @testset "zero-length I/O drives the handshake without application data" begin
             IP.shutdown!()
             listener = nothing
