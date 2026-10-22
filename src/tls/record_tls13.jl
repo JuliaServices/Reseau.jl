@@ -59,6 +59,7 @@ mutable struct _TLS13NativeClientState
     write_cipher::Union{Nothing, _TLS13RecordCipherState}
     record_buffer::Vector{UInt8}
     record_received::Int
+    record_consumed::Int
     handshake_buffer::Vector{UInt8}
     handshake_buffer_pos::Int
     plaintext_buffer::Vector{UInt8}
@@ -87,6 +88,7 @@ _TLS13NativeClientState() = _TLS13NativeClientState(
     nothing,
     nothing,
     UInt8[],
+    0,
     0,
     UInt8[],
     1,
@@ -155,6 +157,7 @@ function _securezero_tls13_native_client_state!(state::_TLS13NativeClientState):
     end
     empty!(state.record_buffer)
     state.record_received = 0
+    state.record_consumed = 0
     empty!(state.handshake_buffer)
     empty!(state.plaintext_buffer)
     empty!(state.resumption_secret)

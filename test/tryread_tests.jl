@@ -203,3 +203,40 @@ end
         end
     end
 end
+
+@testset "TLS record reads take buffered records together" begin
+    for version in (TL.TLS1_2_VERSION, TL.TLS1_3_VERSION)
+        listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(min_version=version, max_version=version))
+        task = @async begin
+            server = TL.accept(listener)
+            TL.handshake!(server)
+            server
+        end
+        client = TL.connect(NC.loopback_addr(Int(TL.addr(listener).port)),
+                            TL.Config(verify_peer=false, server_name="localhost", min_version=version, max_version=version))
+        server = fetch(task)
+        try
+            # Drain post-handshake control records first.
+            write(server, UInt8[0x00])
+            @test read(client, UInt8) == 0x00
+            first = _tryread_record(server, UInt8[0x41])
+            second = _tryread_record(server, UInt8[0x42])
+            write(server.tcp, vcat(first, second))
+            _tryread_wait_raw_bytes(client.tcp, length(first) + length(second))
+            @test read(client, UInt8) == 0x41
+            # The transport read that returned the first record also took the
+            # second, so the socket is already empty.
+            pfd = client.tcp.fd.pfd
+            peeked = Ref{UInt8}(0x00)
+            n = GC.@preserve peeked Reseau.SocketOps.recv_from!(
+                pfd.sysfd, Base.unsafe_convert(Ptr{UInt8}, peeked), Csize_t(1), Reseau.SocketOps.MSG_PEEK,
+            )
+            @test n == -1 && Reseau.SocketOps.last_error() == Int32(Base.Libc.EAGAIN)
+            @test read(client, UInt8) == 0x42
+        finally
+            close(client)
+            close(server)
+            close(listener)
+        end
+    end
+end
