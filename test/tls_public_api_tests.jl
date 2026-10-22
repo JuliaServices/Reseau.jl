@@ -185,6 +185,48 @@ _vector_alloc_bytes(n) = @allocated Vector{UInt8}(undef, n)
                 IP.shutdown!()
             end
         end
+        @testset "ALPN protocol IDs are opaque bytes" begin
+            # RFC 7301 IDs need not be UTF-8; RFC 8701 GREASE IDs such as
+            # 0xDADA never are. Both TLS versions must still pick "h2".
+            for max_version in (TL.TLS1_2_VERSION, TL.TLS1_3_VERSION)
+                IP.shutdown!()
+                listener = nothing
+                client = nothing
+                server = nothing
+                try
+                    server_cfg = TL.Config(
+                        verify_peer = false,
+                        cert_file = _TLS_CERT_PATH,
+                        key_file = _TLS_KEY_PATH,
+                        alpn_protocols = ["h2"],
+                        max_version = max_version,
+                    )
+                    listener = TL.listen("tcp", "127.0.0.1:0", server_cfg; backlog = 8)
+                    laddr = TL.addr(listener)::NC.SocketAddrV4
+                    accept_task = errormonitor(Threads.@spawn begin
+                        conn = TL.accept(listener)
+                        TL.handshake!(conn)
+                        return conn
+                    end)
+                    client_cfg = TL.Config(
+                        verify_peer = false,
+                        server_name = "localhost",
+                        alpn_protocols = [String(UInt8[0xda, 0xda]), "h2"],
+                        max_version = max_version,
+                    )
+                    client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                    _tls_wait_task_done(accept_task)
+                    server = fetch(accept_task)
+                    @test TL.connection_state(client).alpn_protocol == "h2"
+                    @test TL.connection_state(server).alpn_protocol == "h2"
+                finally
+                    _tls_close_quiet!(server)
+                    _tls_close_quiet!(client)
+                    _tls_close_quiet!(listener)
+                    IP.shutdown!()
+                end
+            end
+        end
         @testset "ALPN h2 servers still accept http/1.1 clients without ALPN overlap" begin
             IP.shutdown!()
             listener = nothing

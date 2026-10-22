@@ -1246,7 +1246,6 @@ function _unmarshal_client_hello(data::Vector{UInt8})::Union{_ClientHelloMsg, No
             while !_reader_empty(protocol_list_reader)
                 protocol_bytes = _read_u8_length_prefixed_bytes!(protocol_list_reader)
                 (protocol_bytes === nothing || isempty(protocol_bytes)) && return nothing
-                isvalid(String, protocol_bytes) || return nothing
                 protocol = String(protocol_bytes)
                 push!(msg.alpn_protocols, protocol)
             end
@@ -1362,7 +1361,6 @@ function _unmarshal_server_hello(data::Vector{UInt8})::Union{_ServerHelloMsg, No
             (protocol_list_reader === nothing || _reader_empty(protocol_list_reader)) && return nothing
             protocol_bytes = _read_u8_length_prefixed_bytes!(protocol_list_reader)
             (protocol_bytes === nothing || isempty(protocol_bytes) || !_reader_empty(protocol_list_reader)) && return nothing
-            isvalid(String, protocol_bytes) || return nothing
             protocol = String(protocol_bytes)
             msg.alpn_protocol = protocol
         elseif extension == _HANDSHAKE_EXTENSION_SCT
@@ -1468,7 +1466,6 @@ function _unmarshal_encrypted_extensions(data::Vector{UInt8})::Union{_EncryptedE
             (protocol_list_reader === nothing || _reader_empty(protocol_list_reader)) && return nothing
             protocol_bytes = _read_u8_length_prefixed_bytes!(protocol_list_reader)
             (protocol_bytes === nothing || isempty(protocol_bytes) || !_reader_empty(protocol_list_reader)) && return nothing
-            isvalid(String, protocol_bytes) || return nothing
             protocol = String(protocol_bytes)
             msg.alpn_protocol = protocol
         elseif extension == _HANDSHAKE_EXTENSION_QUIC_TRANSPORT_PARAMETERS
