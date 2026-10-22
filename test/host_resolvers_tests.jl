@@ -600,6 +600,11 @@ end
         end
         @testset "host resolver internal helper utilities" begin
             @test ND._normalize_lookup_host("Example.COM..") == "example.com"
+            @test ND._normalize_lookup_host("...") == ""
+            dotted = "a" * "."^20_000
+            ND._normalize_lookup_host(dotted)
+            # Linear in the name: copying it once per trailing dot allocated ~200 MB here.
+            @test @allocated(ND._normalize_lookup_host(dotted)) < 20 * sizeof(dotted)
             @test ND._lookup_key("TCP", "Example.COM.") == ("tcp", "example.com")
             @test ND._min_nonzero(Int64(0), Int64(9)) == Int64(9)
             @test ND._min_nonzero(Int64(7), Int64(0)) == Int64(7)
