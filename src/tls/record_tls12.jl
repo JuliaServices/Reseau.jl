@@ -445,7 +445,8 @@ function _tls12_try_take_handshake_message!(state::_TLS12NativeState)::Union{Not
         (Int(state.handshake_buffer[pos + 2]) << 8) +
         Int(state.handshake_buffer[pos + 3])
     msg_type = state.handshake_buffer[pos]
-    msg_len <= _tls_max_handshake_frame_size(msg_type) ||
+    # The cap is on the body, as in Go's readHandshake; `msg_len` includes the header.
+    msg_len - 4 <= _tls_max_handshake_frame_size(msg_type) ||
         _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received oversized TLS 1.2 handshake message")
     available >= msg_len || return nothing
     raw = Vector{UInt8}(undef, msg_len)
