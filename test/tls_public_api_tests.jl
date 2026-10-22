@@ -1504,6 +1504,65 @@ _vector_alloc_bytes(n) = @allocated Vector{UInt8}(undef, n)
                 IP.shutdown!()
             end
         end
+        @testset "eof is true when the transport ends without close_notify or closes locally" begin
+            for max_version in (TL.TLS1_2_VERSION, TL.TLS1_3_VERSION)
+                IP.shutdown!()
+                listener = nothing
+                conns = TL.Conn[]
+                try
+                    # No session tickets: unread ticket bytes would make a
+                    # client-side socket close send a reset instead of a FIN.
+                    server_cfg = TL.Config(
+                        verify_peer = false,
+                        cert_file = _TLS_CERT_PATH,
+                        key_file = _TLS_KEY_PATH,
+                        max_version = max_version,
+                        session_tickets_disabled = true,
+                    )
+                    listener = TL.listen("tcp", "127.0.0.1:0", server_cfg; backlog = 8)
+                    port = Int((TL.addr(listener)::NC.SocketAddrV4).port)
+                    function connect_pair()
+                        accept_task = errormonitor(Threads.@spawn begin
+                            conn = TL.accept(listener)
+                            TL.handshake!(conn)
+                            return conn
+                        end)
+                        client = _tls_connect("tcp", "127.0.0.1:$(port)", TL.Config(
+                            verify_peer = false,
+                            server_name = "localhost",
+                            max_version = max_version,
+                        ))
+                        push!(conns, client)
+                        server = fetch(accept_task)
+                        push!(conns, server)
+                        TL.set_read_deadline!(client, _TLS_FAR_FUTURE_NS)
+                        return client, server
+                    end
+                    client, server = connect_pair()
+                    write(server, "one\ntwo\n")
+                    close(server.tcp)
+                    # Base's eachline calls eof before every line.
+                    @test collect(eachline(client)) == ["one", "two"]
+                    @test eof(client)
+                    client, server = connect_pair()
+                    waiter = errormonitor(Threads.@spawn try
+                        eof(client)
+                    catch ex
+                        ex
+                    end)
+                    # A waiting eof holds `read_lock` until data or EOF arrives.
+                    while !islocked(client.read_lock)
+                        yield()
+                    end
+                    close(client)
+                    @test fetch(waiter) === true
+                finally
+                    foreach(_tls_close_quiet!, conns)
+                    _tls_close_quiet!(listener)
+                    IP.shutdown!()
+                end
+            end
+        end
         @testset "peer read observes clean EOF after close_notify" begin
             IP.shutdown!()
             listener = nothing
