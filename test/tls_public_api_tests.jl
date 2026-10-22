@@ -471,7 +471,7 @@ _vector_alloc_bytes(n) = @allocated Vector{UInt8}(undef, n)
                 IP.shutdown!()
             end
         end
-        @testset "an interrupt during a blocked read or handshake surfaces as is" begin
+        @testset "an interrupted TLS read, peek, write, or handshake surfaces the interrupt" begin
             IP.shutdown!()
             listener = nothing
             plain_listener = nothing
@@ -497,6 +497,30 @@ _vector_alloc_bytes(n) = @allocated Vector{UInt8}(undef, n)
                 sleep(0.2)
                 schedule(reader, InterruptException(); error = true)
                 @test fetch(reader) isa InterruptException
+                peeker = @async try
+                    eof(client)
+                catch err
+                    err
+                end
+                sleep(0.2)
+                schedule(peeker, InterruptException(); error = true)
+                @test fetch(peeker) isa InterruptException
+                # the peer never reads, so a large write blocks once the socket buffers fill
+                writer = @async try
+                    write(client, zeros(UInt8, 64 * 1024 * 1024))
+                catch err
+                    err
+                end
+                sleep(0.5)
+                schedule(writer, InterruptException(); error = true)
+                @test fetch(writer) isa InterruptException
+                # a record may have been torn, so later writes fail
+                err = try
+                    write(client, 0x01)
+                catch e
+                    e
+                end
+                @test err isa TL.TLSError && err.message == "interrupted"
 
                 # a TCP server that never answers the ClientHello
                 plain_listener = NC.listen("tcp", "127.0.0.1:0"; backlog = 16)
