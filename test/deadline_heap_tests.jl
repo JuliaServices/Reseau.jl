@@ -179,4 +179,34 @@ end
     end
 end
 
+@testset "closed timers behind a live earlier entry are dropped from the heap" begin
+    IP.shutdown!()
+    state = IP.init!()
+    heap_length() = (lock(state.lock); try length(state.time_heap) finally unlock(state.lock) end)
+    now_ns = Int64(time_ns())
+    # The live timer stays at the top, so stale entries never reach it.
+    live = IP.TimerState()
+    IP.schedule_timer!(live, now_ns + 3600 * 1_000_000_000)
+    try
+        for _ in 1:10_000
+            timer = IP.TimerState()
+            IP.schedule_timer!(timer, now_ns + 7200 * 1_000_000_000)
+            IP._close_timer!(timer)
+        end
+        @test heap_length() <= 2 * IP._TIME_HEAP_MIN_COMPACT
+        lock(state.lock)
+        try
+            # Compaction kept the heap order and the live entry.
+            heap = state.time_heap
+            @test any(entry -> entry.timer === live, heap)
+            @test all(i -> !IP._time_less(heap[i], heap[i >>> 1]), 2:length(heap))
+        finally
+            unlock(state.lock)
+        end
+    finally
+        IP._close_timer!(live)
+        IP.shutdown!()
+    end
+end
+
 end # module

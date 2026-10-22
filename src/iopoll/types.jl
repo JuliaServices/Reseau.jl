@@ -378,17 +378,21 @@ updates can run adjacent to syscalls where spin waiting would be wasteful.
 Notable fields:
 - `registrations`/`registrations_by_token` let us validate that an event or
   time entry still belongs to the current occupant of an fd slot
-- `time_heap` is the min-heap that drives finite backend poll timeouts
+- `time_heap` is the min-heap that drives finite backend poll timeouts;
+  `compact_at` is the heap length at which stale entries are next dropped
 - `poll_until_ns` records the deadline currently being slept toward so that a
   newly earlier deadline can call `_backend_wake!` and shorten a blocking poll
 """
 abstract type BackendState end
+
+const _TIME_HEAP_MIN_COMPACT = 64
 
 mutable struct Poller
     lock::ReentrantLock
     registrations::Dict{SysFD, Registration}
     registrations_by_token::Dict{UInt64, Registration}
     time_heap::Vector{TimeEntry}
+    compact_at::Int
     shutdown_event::Base.Threads.Event
     backend_state::Union{Nothing, BackendState}
     @atomic next_token::UInt64
@@ -402,6 +406,7 @@ function Poller()
         Dict{SysFD, Registration}(),
         Dict{UInt64, Registration}(),
         TimeEntry[],
+        _TIME_HEAP_MIN_COMPACT,
         Base.Threads.Event(),
         nothing,
         UInt64(0),
