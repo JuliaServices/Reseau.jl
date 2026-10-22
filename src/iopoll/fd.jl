@@ -484,18 +484,30 @@ Every READ/WRITE operation independently roots its submitted buffer. For
 pointer-only APIs that buffer is a bounded copy, so an unavailable runtime may
 return `EBADF` here while global shutdown finishes draining without exposing
 caller-owned memory to the kernel.
+
+Returns the operation's final `(bytes, errno)`. `errno == 0` means it completed
+successfully before the cancel took effect; see `_completed_before_cancel`.
 """
-function _drain_canceled_iocp_op!(registration::Registration, mode::PollMode.T)
+function _drain_canceled_iocp_op!(registration::Registration, mode::PollMode.T)::Tuple{UInt32, Int32}
     canceled = _iocp_cancel_mode!(registration, mode)
     waiter = mode == PollMode.WRITE ? registration.write_waiter : registration.read_waiter
     while true
         canceled && pollwait!(waiter)
-        _, errno = mode == PollMode.WRITE ? _iocp_finish_write!(registration) : _iocp_finish_read!(registration)
-        errno == Int32(Base.Libc.EAGAIN) || return nothing
+        bytes, errno = mode == PollMode.WRITE ? _iocp_finish_write!(registration) : _iocp_finish_read!(registration)
+        errno == Int32(Base.Libc.EAGAIN) || return bytes, errno
         # The completion packet has not been consumed yet. Keep waiting through
         # stale deadline/close wakes until the poller dispatches it.
         canceled = true
     end
+end
+
+# A deadline or close can interrupt the wait just as the operation completes.
+# A successful completion already moved its bytes (or accepted or connected
+# its socket), so callers return it instead of the interruption, as Go's
+# `execIO` does. Other interruptions, such as `InterruptException`, propagate.
+@inline function _completed_before_cancel(errno::Int32, err)::Bool
+    errno == Int32(0) || return false
+    return err isa DeadlineExceededError || err isa NetClosingError || err isa FileClosingError
 end
 
 """
@@ -700,14 +712,14 @@ function connect!(fd::FD, addrbuf::Vector{UInt8}, addrlen::Int32)
             end
             throw(SystemError("connectex", Int(errno)))
         end
-        try
+        errno = try
             _wait_iocp_completion!(registration, fd.pd, PollMode.WRITE, fd.is_file)
+            _iocp_finish_connect!(registration)
         catch err
-            ex = err::Exception
-            _drain_canceled_iocp_op!(registration, PollMode.WRITE)
-            rethrow(ex)
+            _, drained_errno = _drain_canceled_iocp_op!(registration, PollMode.WRITE)
+            _completed_before_cancel(drained_errno, err) || rethrow(err)
+            drained_errno
         end
-        errno = _iocp_finish_connect!(registration)
         errno == Int32(0) || throw(SystemError("connectex", Int(errno)))
         SocketOps.update_connect_context!(fd.sysfd)
     finally
@@ -740,15 +752,17 @@ function accept!(fd::FD, family::Cint, sotype::Cint)::Tuple{SysFD, SocketOps.Acc
                     end
                     throw(SystemError("acceptex", Int(errno)))
                 end
-                try
+                accepted_sysfd, accepted_addrbuf, errno = try
                     _wait_iocp_completion!(registration, fd.pd, PollMode.READ, fd.is_file)
+                    _iocp_finish_accept!(registration)
                 catch err
-                    ex = err::Exception
-                    _drain_canceled_iocp_op!(registration, PollMode.READ)
-                    SocketOps.close_socket_nothrow(child_sysfd)
-                    rethrow(ex)
+                    _, drained_errno = _drain_canceled_iocp_op!(registration, PollMode.READ)
+                    if !_completed_before_cancel(drained_errno, err)
+                        SocketOps.close_socket_nothrow(child_sysfd)
+                        rethrow(err)
+                    end
+                    child_sysfd, addrbuf, drained_errno
                 end
-                accepted_sysfd, accepted_addrbuf, errno = _iocp_finish_accept!(registration)
                 if errno == Int32(0)
                     peer_addr = SocketOps.finish_accept_ex!(fd.sysfd, accepted_sysfd, accepted_addrbuf)
                     return accepted_sysfd, peer_addr
@@ -830,13 +844,14 @@ function _read_ptr_some!(fd::FD, p::Ptr{UInt8}, nbytes::Int, root=nothing)::Int
                     end
                     throw(SystemError("read", Int(errno)))
                 end
-                try
+                bytes, result = try
                     _wait_iocp_completion!(registration, fd.pd, PollMode.READ, fd.is_file)
+                    _iocp_finish_read!(registration)
                 catch err
-                    _drain_canceled_iocp_op!(registration, PollMode.READ)
-                    rethrow(err)
+                    drained = _drain_canceled_iocp_op!(registration, PollMode.READ)
+                    _completed_before_cancel(drained[2], err) || rethrow(err)
+                    drained
                 end
-                bytes, result = _iocp_finish_read!(registration)
                 result == Int32(0) || throw(SystemError("read", Int(result)))
                 if bytes == UInt32(0) && fd.zero_read_is_eof
                     throw(EOFError())
@@ -942,13 +957,14 @@ function _write_ptr!(fd::FD, p::Ptr{UInt8}, nbytes::Int, root=nothing)::Int
                         end
                         throw(SystemError("write", Int(errno)))
                     end
-                    try
+                    bytes, result = try
                         _wait_iocp_completion!(registration, fd.pd, PollMode.WRITE, fd.is_file)
+                        _iocp_finish_write!(registration)
                     catch err
-                        _drain_canceled_iocp_op!(registration, PollMode.WRITE)
-                        rethrow(err)
+                        drained = _drain_canceled_iocp_op!(registration, PollMode.WRITE)
+                        _completed_before_cancel(drained[2], err) || rethrow(err)
+                        drained
                     end
-                    bytes, result = _iocp_finish_write!(registration)
                 end
                 result == Int32(0) || throw(SystemError("write", Int(result)))
                 bytes == UInt32(0) && throw(EOFError())
@@ -1059,13 +1075,14 @@ function sendto_ptr!(
                         throw(SystemError("sendto", Int(errno)))
                     end
                 end
-                try
+                bytes, result = try
                     _wait_iocp_completion!(registration, fd.pd, PollMode.WRITE, fd.is_file)
+                    _iocp_finish_write!(registration)
                 catch err
-                    _drain_canceled_iocp_op!(registration, PollMode.WRITE)
-                    rethrow(err)
+                    drained = _drain_canceled_iocp_op!(registration, PollMode.WRITE)
+                    _completed_before_cancel(drained[2], err) || rethrow(err)
+                    drained
                 end
-                bytes, result = _iocp_finish_write!(registration)
             end
             result == Int32(0) || throw(SystemError(dest === nothing ? "send" : "sendto", Int(result)))
             return Int(bytes)
@@ -1141,13 +1158,14 @@ function recvfrom_ptr!(
                     end
                     throw(SystemError("recvfrom", Int(errno)))
                 end
-                try
+                bytes, result = try
                     _wait_iocp_completion!(registration, fd.pd, PollMode.READ, fd.is_file)
+                    _iocp_finish_read!(registration)
                 catch err
-                    _drain_canceled_iocp_op!(registration, PollMode.READ)
-                    rethrow(err)
+                    drained = _drain_canceled_iocp_op!(registration, PollMode.READ)
+                    _completed_before_cancel(drained[2], err) || rethrow(err)
+                    drained
                 end
-                bytes, result = _iocp_finish_read!(registration)
             end
             result == Int32(0) || throw(SystemError("recvfrom", Int(result)))
             n = Int(bytes)
