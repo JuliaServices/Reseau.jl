@@ -267,11 +267,27 @@ function StaticResolver(;
         services_udp::Dict{String, Int} = Dict{String, Int}(),
         fallback::Union{Nothing, AbstractResolver} = nothing,
     )
-    return StaticResolver{typeof(fallback)}(copy(hosts), copy(services_tcp), copy(services_udp), fallback)
+    return StaticResolver{typeof(fallback)}(
+        _lowercase_keys(hosts),
+        _lowercase_keys(services_tcp),
+        _lowercase_keys(services_udp),
+        fallback,
+    )
+end
+
+# Lookups compare lowercased names, so the tables are stored the same way.
+function _lowercase_keys(table::Dict{String, V})::Dict{String, V} where {V}
+    lowered = Dict{String, V}()
+    for (name, value) in table
+        lowered[lowercase(name)] = value
+    end
+    return lowered
 end
 
 const DEFAULT_RESOLVER = SystemResolver()
 
+# Built-in service names. Never mutated, so `StaticResolver` reads them without
+# a lock and its answers do not depend on the host's /etc/services.
 const _SERVICE_TCP = Dict{String, Int}(
     "ftp" => 21,
     "ftps" => 990,
@@ -291,13 +307,23 @@ const _SERVICE_TCP = Dict{String, Int}(
 const _SERVICE_UDP = Dict{String, Int}(
     "domain" => 53,
 )
-const _SERVICE_LOCK = ReentrantLock()
-const _SERVICES_LOADED = Ref(false)
+# The system resolver's tables: the built-ins plus /etc/services, built once by
+# the first named-port lookup and read-only once `loaded` is published.
+mutable struct _SystemServiceTables
+    lock::ReentrantLock
+    @atomic loaded::Bool
+    tcp::Dict{String, Int}
+    udp::Dict{String, Int}
+end
 
-function _load_system_services!()
+const _SYSTEM_SERVICES = _SystemServiceTables(ReentrantLock(), false, Dict{String, Int}(), Dict{String, Int}())
+
+function _load_system_services!(tcp::Dict{String, Int}, udp::Dict{String, Int})
     path = "/etc/services"
     isfile(path) || return nothing
     for raw in eachline(path)
+        # A malformed line must not make every named-port lookup throw.
+        isvalid(raw) || continue
         line = strip(raw)
         isempty(line) && continue
         startswith(line, '#') && continue
@@ -322,9 +348,9 @@ function _load_system_services!()
         port === nothing && continue
         (port <= 0 || port > 65535) && continue
         table = if proto == "tcp"
-            _SERVICE_TCP
+            tcp
         elseif proto == "udp"
-            _SERVICE_UDP
+            udp
         else
             nothing
         end
@@ -337,17 +363,23 @@ function _load_system_services!()
     return nothing
 end
 
-function _ensure_system_services_loaded!()
-    _SERVICES_LOADED[] && return nothing
-    lock(_SERVICE_LOCK)
+function _system_service_tables()::_SystemServiceTables
+    tables = _SYSTEM_SERVICES
+    (@atomic :acquire tables.loaded) && return tables
+    lock(tables.lock)
     try
-        _SERVICES_LOADED[] && return nothing
-        _load_system_services!()
-        _SERVICES_LOADED[] = true
+        if !(@atomic :acquire tables.loaded)
+            tcp = copy(_SERVICE_TCP)
+            udp = copy(_SERVICE_UDP)
+            _load_system_services!(tcp, udp)
+            tables.tcp = tcp
+            tables.udp = udp
+            @atomic :release tables.loaded = true
+        end
     finally
-        unlock(_SERVICE_LOCK)
+        unlock(tables.lock)
     end
-    return nothing
+    return tables
 end
 
 @static if Sys.iswindows()
@@ -640,6 +672,8 @@ function _wait_addrinfo_future!(future::_AddrInfoFuture)::Cint
 end
 
 function __init__()
+    # Read this host's /etc/services, not one loaded while precompiling.
+    @atomic _SYSTEM_SERVICES.loaded = false
     _ADDRINFO_THREAD_ENTRY_C[] = @cfunction(_addrinfo_worker_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
     _ADDRINFO_WORK_QUEUE[] = _AddrInfoWorkQueue()
     _ADDRINFO_STARTED_THREADS[] = 0
@@ -1064,7 +1098,9 @@ function _literal_host_addr(host::AbstractString)::Union{Nothing, TCP.SocketEndp
 end
 
 function _parse_port_table(table::Dict{String, Int}, network::AbstractString, service::AbstractString)::Int
-    port = get(() -> nothing, table, lowercase(String(service)))
+    name = String(service)
+    isvalid(name) || _lookup_error("unknown port", string(network, "/", service))
+    port = get(() -> nothing, table, lowercase(name))
     port === nothing && _lookup_error("unknown port", string(network, "/", service))
     return port::Int
 end
@@ -1221,18 +1257,18 @@ end
 function lookup_port(::SystemResolver, network::AbstractString, service::AbstractString)::Int
     port, needs_lookup = parse_port(service)
     if needs_lookup
-        _ensure_system_services_loaded!()
+        tables = _system_service_tables()
         n = String(network)
         if n == "ip" || isempty(n)
             try
-                port = _parse_port_table(_SERVICE_TCP, "ip", service)
+                port = _parse_port_table(tables.tcp, "ip", service)
             catch
-                port = _parse_port_table(_SERVICE_UDP, "ip", service)
+                port = _parse_port_table(tables.udp, "ip", service)
             end
         elseif n == "tcp" || n == "tcp4" || n == "tcp6"
-            port = _parse_port_table(_SERVICE_TCP, n, service)
+            port = _parse_port_table(tables.tcp, n, service)
         elseif n == "udp" || n == "udp4" || n == "udp6"
-            port = _parse_port_table(_SERVICE_UDP, n, service)
+            port = _parse_port_table(tables.udp, n, service)
         else
             throw(UnknownNetworkError(n))
         end

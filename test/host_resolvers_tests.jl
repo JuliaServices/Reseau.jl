@@ -440,6 +440,27 @@ end
             @test ND.lookup_port(static_lookup, "tcp", "fallbacksvc") == 2626
             udp_fallback = ND.StaticResolver(fallback = ND.StaticResolver(services_udp = Dict("udp-fallback" => 5354)))
             @test ND.lookup_port(udp_fallback, "udp", "udp-fallback") == 5354
+            # StaticResolver uses only the built-in table: names the system
+            # resolver reads from /etc/services (here "domain" over TCP and
+            # "rsync") stay unknown to it after a system lookup.
+            for (network, name) in (("tcp", "domain"), ("tcp", "rsync"))
+                system_port = try
+                    ND.lookup_port(ND.SystemResolver(), network, name)
+                catch
+                    nothing
+                end
+                system_port === nothing && continue  # not in this host's /etc/services
+                @test_throws ND.LookupError ND.lookup_port(ND.StaticResolver(), network, name)
+            end
+            @test ND.lookup_port(ND.StaticResolver(), "tcp", "https") == 443
+            mixed_case = ND.StaticResolver(
+                hosts = Dict("MyHost" => NC.SocketEndpoint[NC.loopback_addr(0)]),
+                services_tcp = Dict("MySvc" => 7000),
+            )
+            @test ND.resolve_tcp_addrs(mixed_case, "tcp", "MyHost:80") == NC.SocketEndpoint[NC.loopback_addr(80)]
+            @test ND.resolve_tcp_addrs(mixed_case, "tcp", "myhost:80") == NC.SocketEndpoint[NC.loopback_addr(80)]
+            @test ND.lookup_port(mixed_case, "tcp", "MySvc") == 7000
+            @test_throws ND.LookupError ND.lookup_port("tcp", "\xffbad")
             @test_throws ND.UnknownNetworkError ND.lookup_port("sctp", "domain")
             @test_throws ND.UnknownNetworkError ND.lookup_port(static_lookup, "sctp", "smtp-alt")
         end
