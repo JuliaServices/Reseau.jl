@@ -143,14 +143,13 @@ end
     return @atomic :acquire conn.fd.is_connected
 end
 
-function _close_partial!(fd::FD, registered::Bool)
-    if registered
-        try
-            Base.close(fd.pfd)
-        catch
-        end
-    else
-        SocketOps.close_socket_nothrow(fd.pfd.sysfd)
+# Close through the FD, registered or not: a raw close of the descriptor would
+# leave the FD open, and its GC finalizer would later close the same number
+# again, by then possibly reused by an unrelated socket or file.
+function _close_partial!(fd::FD)
+    try
+        close(fd)
+    catch
     end
     return nothing
 end
@@ -180,7 +179,6 @@ function listen(
     end
     family = _addr_family(local_addr)
     fd = open_net_fd!(; family = family, sotype = SocketOps.SOCK_DGRAM, net = net)
-    registered = false
     ok = false
     try
         family == SocketOps.AF_INET6 && _set_ipv6_only!(fd, v6only)
@@ -202,12 +200,11 @@ function listen(
         end
         SocketOps.bind_socket(fd.pfd.sysfd, _to_sockaddr(local_addr))
         IOPoll.register!(fd.pfd)
-        registered = true
         _set_local_addr!(fd)
         ok = true
         return Conn(fd)
     finally
-        ok || _close_partial!(fd, registered)
+        ok || _close_partial!(fd)
     end
 end
 
@@ -244,7 +241,6 @@ function connect(
     remote_endpoint = _coerce_family(remote_addr, family)
     local_endpoint = local_addr === nothing ? nothing : _coerce_family(local_addr, family)
     fd = open_net_fd!(; family = family, sotype = SocketOps.SOCK_DGRAM, net = net)
-    registered = false
     ok = false
     try
         family == SocketOps.AF_INET6 && _set_ipv6_only!(fd, v6only)
@@ -259,12 +255,11 @@ function connect(
             throw(SystemError("connect", Int(errno)))
         end
         IOPoll.register!(fd.pfd)
-        registered = true
         _finalize_connected_addrs!(fd, remote_endpoint)
         ok = true
         return Conn(fd)
     finally
-        ok || _close_partial!(fd, registered)
+        ok || _close_partial!(fd)
     end
 end
 

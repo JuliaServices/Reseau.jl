@@ -431,3 +431,33 @@ end
         @test err.err isa Reseau.HostResolvers.UnknownNetworkError
     end
 end
+
+@static if !Sys.iswindows()
+@testset "UDP failed listen and connect leave no finalizer that closes a reused descriptor" begin
+    SO = Reseau.SocketOps
+    holder = UDP.listen(UDP.loopback_addr(0))
+    port = Int(UDP.local_addr(holder).port)
+    try
+        for attempt in (
+                () -> UDP.listen(UDP.loopback_addr(port)),
+                () -> UDP.connect(UDP.loopback_addr(9); local_addr = UDP.loopback_addr(port)),
+            )
+            @test_throws SystemError attempt()
+            # Descriptor numbers are reused lowest-first, so one of these takes
+            # the number the failed call released.
+            victims = [SO.open_socket(SO.AF_INET, SO.SOCK_STREAM) for _ in 1:32]
+            try
+                GC.gc(true)  # runs the failed socket's finalizer
+                for _ in 1:100
+                    yield()  # and any close task it scheduled
+                end
+                @test all(v -> ccall(:fcntl, Cint, (Cint, Cint), v, Cint(1)) != -1, victims)
+            finally
+                foreach(SO.close_socket_nothrow, victims)
+            end
+        end
+    finally
+        close(holder)
+    end
+end
+end
