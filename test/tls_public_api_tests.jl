@@ -1534,6 +1534,58 @@ _vector_alloc_bytes(n) = @allocated Vector{UInt8}(undef, n)
                 IP.shutdown!()
             end
         end
+        @testset "close sends close_notify while a reader is blocked" begin
+            for max_version in (TL.TLS1_2_VERSION, TL.TLS1_3_VERSION)
+                IP.shutdown!()
+                listener = nothing
+                client = nothing
+                server = nothing
+                try
+                    # No session tickets: unread ticket bytes would make the
+                    # client's socket close send a reset instead of a FIN.
+                    server_cfg = TL.Config(
+                        verify_peer = false,
+                        cert_file = _TLS_CERT_PATH,
+                        key_file = _TLS_KEY_PATH,
+                        max_version = max_version,
+                        session_tickets_disabled = true,
+                    )
+                    listener = TL.listen("tcp", "127.0.0.1:0", server_cfg; backlog = 8)
+                    laddr = TL.addr(listener)::NC.SocketAddrV4
+                    accept_task = errormonitor(Threads.@spawn begin
+                        conn = TL.accept(listener)
+                        TL.handshake!(conn)
+                        return conn
+                    end)
+                    client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
+                        verify_peer = false,
+                        server_name = "localhost",
+                        max_version = max_version,
+                    ))
+                    _tls_wait_task_done(accept_task)
+                    server = fetch(accept_task)
+                    reader = errormonitor(Threads.@spawn try
+                        read(client, UInt8)
+                    catch ex
+                        ex
+                    end)
+                    # A blocked read holds `read_lock` for its whole wait.
+                    while !islocked(client.read_lock)
+                        yield()
+                    end
+                    close(client)
+                    @test fetch(reader) isa TL.TLSError
+                    TL.set_read_deadline!(server, _TLS_FAR_FUTURE_NS)
+                    @test_throws EOFError read(server, UInt8)
+                    @test server.native_state.peer_close_notify
+                finally
+                    _tls_close_quiet!(server)
+                    _tls_close_quiet!(client)
+                    _tls_close_quiet!(listener)
+                    IP.shutdown!()
+                end
+            end
+        end
         @testset "close_write shuts down TLS write side and rejects further writes" begin
             IP.shutdown!()
             listener = nothing
