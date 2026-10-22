@@ -73,6 +73,7 @@ end
 
 function _time_push_locked!(state::Poller, entry::TimeEntry)
     heap = state.time_heap
+    length(heap) >= state.compact_at && _compact_time_heap_locked!(state)
     push!(heap, entry)
     _time_set_index!(entry, length(heap))
     _time_sift_up!(heap, length(heap))
@@ -94,6 +95,32 @@ function _time_remove_locked!(state::Poller, index::Int)::TimeEntry
         end
     end
     return entry
+end
+
+# Closed or re-armed timers stay in the heap until they reach its top, which a
+# live earlier entry can postpone until their own deadline. Drop them once the
+# heap has doubled since the last compaction: amortized O(1) per push, in place.
+function _compact_time_heap_locked!(state::Poller)
+    heap = state.time_heap
+    n = 0
+    for i in eachindex(heap)
+        entry = heap[i]
+        if _entry_live_locked(state, entry)
+            n += 1
+            heap[n] = entry
+        else
+            _time_set_index!(entry, 0)
+        end
+    end
+    resize!(heap, n)
+    for i in (n >>> 1):-1:1
+        _time_sift_down!(heap, i)
+    end
+    for i in 1:n
+        _time_set_index!(heap[i], i)
+    end
+    state.compact_at = max(_TIME_HEAP_MIN_COMPACT, 2 * n)
+    return nothing
 end
 
 function _time_pop_locked!(state::Poller)::TimeEntry
