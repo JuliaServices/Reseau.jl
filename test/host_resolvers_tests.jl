@@ -336,6 +336,46 @@ Base.@noinline function _nd_start_late_workers!()::Nothing
     return nothing
 end
 
+# An IPv4 address whose connect stays pending: Linux drops SYNs for a listener
+# whose accept queue is full; macOS leaves 127.0.0.2 unconfigured. (macOS resets
+# a full queue, and other platforms are untested.)
+@static if Sys.islinux() || Sys.isapple()
+@testset "a serial dial over both families splits the timeout across every address" begin
+    SO = Reseau.SocketOps
+    blocked = NC.listen(NC.loopback_addr(0); backlog = 1)
+    port = Int((NC.addr(blocked)::NC.SocketAddrV4).port)
+    good = NC.listen(NC.loopback_addr6(port); backlog = 4)
+    fillers = [SO.open_socket(SO.AF_INET, SO.SOCK_STREAM) for _ in 1:8]
+    conn = nothing
+    try
+        for fd in fillers
+            SO.set_nonblocking!(fd, true)
+            SO.connect_socket(fd, SO.sockaddr_in_loopback(port))
+        end
+        pending = Sys.isapple() ? NC.SocketAddrV4((127, 0, 0, 2), 0) : NC.loopback_addr(0)
+        accept_task = errormonitor(Threads.@spawn try
+            NC.accept(good)
+        catch
+            nothing
+        end)
+        resolver = ND.StaticResolver(hosts = Dict("mixed.test" => NC.SocketEndpoint[pending, NC.loopback_addr6(0)]))
+        # No Happy Eyeballs race: the pending IPv4 attempt gets half the budget
+        # (above the 2 s per-attempt floor), then IPv6 runs. Giving IPv4's family
+        # the whole budget left none for IPv6.
+        d = ND.HostResolver(resolver = resolver, timeout_ns = 5_000_000_000, fallback_delay_ns = -1)
+        conn = NC.connect(d, "tcp", "mixed.test:$(port)")
+        @test NC.remote_addr(conn) isa NC.SocketAddrV6
+        accepted = fetch(accept_task)
+        accepted === nothing || close(accepted)
+    finally
+        conn === nothing || close(conn)
+        foreach(SO.close_socket_nothrow, fillers)
+        close(good)
+        close(blocked)
+    end
+end
+end
+
 @testset "HostResolvers phase 5" begin
         @testset "host-port parser and joiner" begin
             host, port = ND.split_host_port("127.0.0.1:8080")
