@@ -2616,14 +2616,12 @@ function _native_tls12_shutdown!(conn::Conn)::Nothing
     return nothing
 end
 
+# The alert uses only write-side state, so a reader parked in `read` (holding
+# `read_lock`) does not stop it. A held `write_lock` means a write is in flight
+# and this close is breaking it, so the alert is skipped, as in Go's `Close`.
 @inline function _try_lock_close_path!(conn::Conn)::Bool
     trylock(conn.handshake_lock) || return false
-    if !trylock(conn.read_lock)
-        unlock(conn.handshake_lock)
-        return false
-    end
     if !trylock(conn.write_lock)
-        unlock(conn.read_lock)
         unlock(conn.handshake_lock)
         return false
     end
@@ -2632,7 +2630,6 @@ end
 
 @inline function _unlock_close_path!(conn::Conn)
     unlock(conn.write_lock)
-    unlock(conn.read_lock)
     unlock(conn.handshake_lock)
     return nothing
 end
@@ -2642,8 +2639,10 @@ end
 
 Close the TLS connection and the underlying TCP transport.
 
-If the handshake completed, this best-effort sends a TLS `close_notify` alert before
-closing the socket. The method is idempotent and returns `nothing`.
+If the handshake completed and no write is in progress, this sends a TLS
+`close_notify` alert first, waiting at most 5 seconds for the transport to accept
+it. A task blocked reading `conn` does not prevent the alert; it wakes with a
+closed-connection error. The method is idempotent and returns `nothing`.
 """
 function Base.close(conn::Conn)
     _mark_closed!(conn) || return nothing
