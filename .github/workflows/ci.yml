@@ -13,6 +13,11 @@ jobs:
   test:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }} - t${{ matrix.threads }} - ${{ github.event_name }}
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.version == 'pre' }}
+    # Per job, not per workflow, so a newer push cancels superseded tests but never a docs deploy.
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-test-${{ strategy.job-index }}
+      cancel-in-progress: true
     permissions:
       contents: read
       id-token: write
@@ -118,6 +123,9 @@ jobs:
   test-freebsd:
     name: Julia ${{ matrix.version }} - FreeBSD ${{ matrix.release }} - ${{ matrix.arch }} - t${{ matrix.threads }} - ${{ github.event_name }}
     runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-test-freebsd-${{ strategy.job-index }}
+      cancel-in-progress: true
     env:
       JULIA_NUM_THREADS: ${{ matrix.threads }}
       RESEAU_RUN_TLS_TESTS: '1'
