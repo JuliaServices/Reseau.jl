@@ -2023,8 +2023,10 @@ end
 
 # Maps a failure on the read path to the public error, sending the fatal alert
 # a local protocol error calls for. Call it from the `catch` of a read that
-# holds `read_lock`; it always throws.
-function _throw_tls_read_error(conn::Conn, ex::Exception, block::Bool)
+# holds `read_lock`; it always throws. `@nospecialize` keeps the call static
+# when the caught error is only known as `Exception`: `juliac --trim` compiles
+# no specialization for a dynamic call, so the read would throw a MethodError.
+function _throw_tls_read_error(conn::Conn, @nospecialize(ex::Exception), block::Bool)
     # A failed nonblocking read must not wait to transmit a fatal alert.
     if !block && !(ex isa _TLSTransportDeadlineError)
         close(conn.tcp)
