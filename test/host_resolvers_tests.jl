@@ -443,6 +443,31 @@ end
             @test_throws ND.UnknownNetworkError ND.lookup_port("sctp", "domain")
             @test_throws ND.UnknownNetworkError ND.lookup_port(static_lookup, "sctp", "smtp-alt")
         end
+        @testset "listen and resolve_tcp_addr prefer the first IPv4 address, as Go does" begin
+            # Like macOS and glibc for "localhost": ::1 is listed first.
+            dual = ND.StaticResolver(hosts = Dict("dual.test" => NC.SocketEndpoint[NC.loopback_addr6(0), NC.loopback_addr(0)]))
+            @test ND.resolve_tcp_addr(dual, "tcp", "dual.test:80") == NC.loopback_addr(80)
+            @test ND.resolve_tcp_addr(dual, "tcp", "dual.test:80"; policy = ND.ResolverPolicy(prefer_ipv6 = true)) == NC.loopback_addr6(80)
+            @test ND.resolve_tcp_addr(dual, "tcp6", "dual.test:80") == NC.loopback_addr6(80)
+            listener = ND.listen(ND.HostResolver(resolver = dual), "tcp", "dual.test:0")
+            try
+                @test NC.addr(listener) isa NC.SocketAddrV4
+                # An IPv4-only client reaches it.
+                port = Int((NC.addr(listener)::NC.SocketAddrV4).port)
+                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                client = NC.connect(NC.loopback_addr(port))
+                close(fetch(accept_task))
+                close(client)
+            finally
+                close(listener)
+            end
+            udp = Reseau.UDP.listen("udp", "dual.test:0"; resolver = dual)
+            try
+                @test Reseau.UDP.local_addr(udp) isa NC.SocketAddrV4
+            finally
+                close(udp)
+            end
+        end
         @testset "resolve_tcp_addr convenience wrapper" begin
             @test ND.resolve_tcp_addr("tcp", "127.0.0.1:80") == NC.loopback_addr(80)
             @test ND.resolve_tcp_addr("tcp", "[::]:80") == NC.any_addr6(80)
