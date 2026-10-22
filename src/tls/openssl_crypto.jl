@@ -129,22 +129,31 @@ Persistent AEAD backend state for one record-protection direction.
 The native TLS record layer keeps one of these per read/write direction so we can
 reuse an `EVP_CIPHER_CTX` across records instead of allocating and freeing a
 fresh OpenSSL cipher context for every seal/open operation.
+
+The context is keyed on first use. Later records with the same key object and
+direction set only the nonce, as OpenSSL's own TLS record layer does, which
+skips the key schedule and provider-context setup per record. `keyed_key` is
+the key vector itself (compared by identity), so a new traffic key always gets
+a full re-key.
 """
 mutable struct _OpenSSLAEADState
     cipher::Ptr{Cvoid}
     ctx::Ptr{Cvoid}
     iv_len::Int
+    keyed_key::Union{Nothing, Vector{UInt8}}
+    keyed_encrypt::Bool
 end
 
 function _OpenSSLAEADState(cipher::Ptr{Cvoid}, iv_len::Int)
     ctx = ccall((:EVP_CIPHER_CTX_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
     _openssl_require_nonnull(ctx, "EVP_CIPHER_CTX_new")
-    return _OpenSSLAEADState(cipher, ctx, iv_len)
+    return _OpenSSLAEADState(cipher, ctx, iv_len, nothing, false)
 end
 
 function _free_openssl_aead_state!(state::_OpenSSLAEADState)::Nothing
     _free_evp_cipher_ctx!(state.ctx)
     state.ctx = C_NULL
+    state.keyed_key = nothing
     return nothing
 end
 
@@ -1126,6 +1135,13 @@ function _openssl_prepare_encrypt_record_ctx!(
 )::Nothing
     length(iv_bytes) == aead.iv_len || throw(ArgumentError("unexpected AEAD IV length"))
     ctx = aead.ctx
+    if aead.keyed_key === key_bytes && aead.keyed_encrypt
+        ok = GC.@preserve iv_bytes ccall((:EVP_EncryptInit_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Ptr{UInt8}), ctx, C_NULL, C_NULL, Ptr{UInt8}(C_NULL), pointer(iv_bytes))
+        ok == 1 || (aead.keyed_key = nothing)
+        _openssl_require_ok(ok, "EVP_EncryptInit_ex(iv)")
+        return nothing
+    end
+    aead.keyed_key = nothing
     _reset_evp_cipher_ctx!(ctx)
     ok = ccall((:EVP_EncryptInit_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Ptr{UInt8}), ctx, aead.cipher, C_NULL, Ptr{UInt8}(C_NULL), Ptr{UInt8}(C_NULL))
     _openssl_require_ok(ok, "EVP_EncryptInit_ex")
@@ -1135,6 +1151,8 @@ function _openssl_prepare_encrypt_record_ctx!(
         ok = ccall((:EVP_EncryptInit_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Ptr{UInt8}), ctx, C_NULL, C_NULL, pointer(key_bytes), pointer(iv_bytes))
         _openssl_require_ok(ok, "EVP_EncryptInit_ex(key/iv)")
     end
+    aead.keyed_key = key_bytes
+    aead.keyed_encrypt = true
     return nothing
 end
 
@@ -1145,6 +1163,13 @@ function _openssl_prepare_decrypt_record_ctx!(
 )::Nothing
     length(iv_bytes) == aead.iv_len || throw(ArgumentError("unexpected AEAD IV length"))
     ctx = aead.ctx
+    if aead.keyed_key === key_bytes && !aead.keyed_encrypt
+        ok = GC.@preserve iv_bytes ccall((:EVP_DecryptInit_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Ptr{UInt8}), ctx, C_NULL, C_NULL, Ptr{UInt8}(C_NULL), pointer(iv_bytes))
+        ok == 1 || (aead.keyed_key = nothing)
+        _openssl_require_ok(ok, "EVP_DecryptInit_ex(iv)")
+        return nothing
+    end
+    aead.keyed_key = nothing
     _reset_evp_cipher_ctx!(ctx)
     ok = ccall((:EVP_DecryptInit_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Ptr{UInt8}), ctx, aead.cipher, C_NULL, Ptr{UInt8}(C_NULL), Ptr{UInt8}(C_NULL))
     _openssl_require_ok(ok, "EVP_DecryptInit_ex")
@@ -1154,6 +1179,8 @@ function _openssl_prepare_decrypt_record_ctx!(
         ok = ccall((:EVP_DecryptInit_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Ptr{UInt8}), ctx, C_NULL, C_NULL, pointer(key_bytes), pointer(iv_bytes))
         _openssl_require_ok(ok, "EVP_DecryptInit_ex(key/iv)")
     end
+    aead.keyed_key = key_bytes
+    aead.keyed_encrypt = false
     return nothing
 end
 
