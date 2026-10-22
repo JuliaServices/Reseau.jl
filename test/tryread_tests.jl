@@ -97,6 +97,19 @@ end
     end
 end
 
+@testset "TCP tryread! returns 0 when close starts after it takes the read lock" begin
+    client, server = _tryread_tcp_pair()
+    try
+        # `close` marks the lock closed, then evicts the poll state. A tryread
+        # that already holds the read lock sees only the eviction.
+        IP.evict!(client.fd.pfd.pd)
+        @test NC.tryread!(client, zeros(UInt8, 4)) == 0
+    finally
+        close(client)
+        close(server)
+    end
+end
+
 @testset "TLS tryread! preserves partial records" begin
     for version in (TL.TLS1_2_VERSION, TL.TLS1_3_VERSION)
         listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(min_version=version, max_version=version))

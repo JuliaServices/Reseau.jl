@@ -275,9 +275,16 @@ end
 function _tryread!(conn::_StreamConn, ptr::Ptr{UInt8}, nbytes::Int)::Union{Int, Nothing}
     isopen(conn) || return 0
     pfd = conn.fd.pfd
-    IOPoll._fdlock_rwlock!(pfd.fdlock, true, false) || return nothing
+    # The try-lock also fails once `close` has started.
+    IOPoll._fdlock_rwlock!(pfd.fdlock, true, false) || return isopen(conn) ? nothing : 0
     try
-        IOPoll.prepareread(pfd.pd, pfd.is_file, false)
+        try
+            IOPoll.prepareread(pfd.pd, pfd.is_file, false)
+        catch err
+            # `close` started after the lock was taken: also a local close.
+            err isa IOPoll.NetClosingError && return 0
+            rethrow()
+        end
         # All stream descriptors, including IOCP sockets, are nonblocking. The
         # read lock excludes overlapped reads while this synchronous recv runs.
         n = SocketOps.recv_from!(pfd.sysfd, ptr, Csize_t(min(nbytes, 1 << 30)))
