@@ -260,6 +260,11 @@ const _TLS13_EMPTY_PSK_EARLY_SECRET_SHA256 =
             @test !TLC._tls13_openssl_verify_signature(ecdsa_key, TLC._TLS_SIGNATURE_ECDSA_SECP256R1_SHA256, signed, garbage)
             @test !TLC._tls12_openssl_verify_signature(ecdsa_key, TLC._TLS_SIGNATURE_ECDSA_SECP256R1_SHA256, signed, garbage)
         end
+        # Ed25519 takes OpenSSL's one-shot verify path.
+        ed25519_key = TLC._TLSEd25519PublicKey(fill(0x11, 32))
+        for garbage in (UInt8[0x00], fill(0x5a, 64))
+            @test !TLC._tls13_openssl_verify_signature(ed25519_key, TLC._TLS_SIGNATURE_ED25519, signed, garbage)
+        end
     end
 
     @testset "record contexts keyed once match a fresh context for every nonce" begin
