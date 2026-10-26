@@ -56,22 +56,16 @@
 #     delay" (a mock's return value; Reseau has no pacer); "allows sending of
 #     ACKs when we're keeping track of MaxOutstandingSentPackets packets"
 #     (quic-go's cap on tracked packets, which Reseau does not have).
-#   No counterpart API for ACK-range pruning (RFC 9000 Section 13.2.4, which
-#     Reseau does not implement; it bounds ranges at _MAX_ACK_RANGES instead):
-#     received history "deleting" cases "does nothing when the history is
-#     empty", "deletes a range", "deletes multiple ranges", "adjusts a range,
-#     if packets are delete from an existing range", "adjusts a range, if only
-#     one packet remains in the range", "keeps a one-packet range, if deleting
-#     up to the packet directly below", "says a packet is a potentially
-#     duplicate if the ranges were already deleted"; tracker "doesn't recognize
-#     in-order packets as out-of-order after raising the threshold",
-#     "recognizes out-of-order packets after raising the threshold", "errors
-#     when called with an old packet"; sent handler "determining which ACKs we
-#     have received an ACK for" (3). The observable consequence is ported, with
-#     the real trigger (the peer acknowledging a packet that carried an ACK),
-#     as "doesn't add delayed packets below deleted ranges", "deletes packets
-#     from the packetHistory when a lower limit is set", and "drops old ACK
-#     ranges".
+#
+# ACK-range pruning (RFC 9000 Section 13.2.4): quic-go's DeleteBelow and
+# IgnoreBelow are `_ignore_below!` on a space's `received`; its
+# GetLowestPacketNotConfirmedAcked is the space's `ack_floor`, which the
+# connection applies on the next packet received, as quic-go's
+# receivedPacketHandler does. Where a Go test raises the threshold by hand,
+# the port does too; "doesn't add delayed packets below deleted ranges",
+# "deletes packets from the packetHistory when a lower limit is set", and
+# "drops old ACK ranges" use the real trigger instead (the peer acknowledging
+# a packet that carried an ACK).
 
 using Test
 using Random
@@ -234,14 +228,15 @@ end
 _qga_ranges(e::_QgaEnd, idx::Int = 3) = copy(e.conn.spaces[idx].received.ranges)
 
 # Sending, recorded as `_build_datagram!` records it.
-function _qga_sent!(conn::QGA._Connection, idx::Int, pn::Integer; time::Int64, size::Int = 1, ack_eliciting::Bool = true)
+# `ack_largest` is the largest packet number an ACK frame in it acknowledged.
+function _qga_sent!(conn::QGA._Connection, idx::Int, pn::Integer; time::Int64, size::Int = 1, ack_eliciting::Bool = true, ack_largest::Integer = -1)
     space = conn.spaces[idx]
     space.next_pn = max(space.next_pn, Int64(pn) + 1)
     conn.bytes_sent += size
     conn.last_send_time = time
     ack_eliciting || return nothing
     frames = [QGA._SentFrame(QGA._SF_CRYPTO, UInt64(0), Int64(pn), Int64(1), false)]
-    push!(space.sent, QGA._SentPacket(Int64(pn), time, size, frames))
+    push!(space.sent, QGA._SentPacket(Int64(pn), time, size, frames, Int64(ack_largest), false))
     space.time_of_last_ack_eliciting = time
     conn.bytes_in_flight += size
     return nothing
@@ -467,6 +462,42 @@ end
         end
 
         @testset "deleting" begin
+            delete_below!(e, pn) = QGA._ignore_below!(e.conn.spaces[3].received, Int64(pn))
+            @testset "does nothing when the history is empty" begin
+                e = _qga_end()
+                delete_below!(e, 5)
+                @test isempty(_qga_ranges(e))
+            end
+            @testset "deletes a range" begin
+                e = _qga_end()
+                foreach(pn -> @test(_qga_rx!(e, pn, T)), (4, 5, 10))
+                delete_below!(e, 6)
+                @test _qga_ranges(e) == [10:10]
+            end
+            @testset "deletes multiple ranges" begin
+                e = _qga_end()
+                foreach(pn -> @test(_qga_rx!(e, pn, T)), (1, 5, 10))
+                delete_below!(e, 8)
+                @test _qga_ranges(e) == [10:10]
+            end
+            @testset "adjusts a range, if packets are delete from an existing range" begin
+                e = _qga_end()
+                foreach(pn -> @test(_qga_rx!(e, pn, T)), 3:7)
+                delete_below!(e, 5)
+                @test _qga_ranges(e) == [5:7]
+            end
+            @testset "adjusts a range, if only one packet remains in the range" begin
+                e = _qga_end()
+                foreach(pn -> @test(_qga_rx!(e, pn, T)), (4, 5, 10))
+                delete_below!(e, 5)
+                @test _qga_ranges(e) == [5:5, 10:10]
+            end
+            @testset "keeps a one-packet range, if deleting up to the packet directly below" begin
+                e = _qga_end()
+                @test _qga_rx!(e, 4, T)
+                delete_below!(e, 4)
+                @test _qga_ranges(e) == [4:4]
+            end
             @testset "doesn't add delayed packets below deleted ranges" begin
                 # DeleteBelow(5) after 4..6: here, an ACK covering 4 is acknowledged.
                 e = _qga_end()
@@ -474,11 +505,9 @@ end
                 _qga_ack_gets_acked!(e, T)
                 @test _qga_rx!(e, 5, T)
                 @test _qga_rx!(e, 6, T)
-                # BUG?: Reseau never prunes ranges a peer has seen acknowledged (RFC 9000 §13.2.4).
-                @test_broken _qga_ranges(e) == [5:6]
-                # BUG?: and so accepts a delayed packet below them as new.
-                @test_broken !_qga_rx!(e, 2, T)
-                @test_broken _qga_ranges(e) == [5:6]
+                @test _qga_ranges(e) == [5:6]
+                @test !_qga_rx!(e, 2, T)
+                @test _qga_ranges(e) == [5:6]
             end
             @testset "doesn't create more than MaxNumAckRanges ranges" begin
                 e = _qga_end()
@@ -561,6 +590,17 @@ end
                 @test !isdup(e, 7)
                 @test isdup(e, 8)
                 @test isdup(e, 9)
+                @test !isdup(e, 10)
+            end
+            @testset "says a packet is a potentially duplicate if the ranges were already deleted" begin
+                e = _qga_end()
+                foreach(pn -> _qga_rx!(e, pn, T), (4, 5, 8, 9))
+                QGA._ignore_below!(e.conn.spaces[3].received, Int64(8))
+                @test _qga_ranges(e) == [8:9]
+                # Everything below 8 may have been received, even 3, 6, and 7.
+                for pn in 0:9
+                    @test isdup(e, pn)
+                end
                 @test !isdup(e, 10)
             end
         end
@@ -691,11 +731,10 @@ end
             @testset "works with packet number 0" begin
                 e = _qga_end()
                 _qga_rx!(e, 0, T)
-                # BUG?: packet 0 arrives in order, so Reseau waits max_ack_delay; quic-go always acknowledges the first packet at once.
-                @test_broken _qga_ack_queued(e, T)
-                @test_broken _qga_ack_alarm(e, T) == 0
+                @test _qga_ack_queued(e, T)
+                @test _qga_ack_alarm(e, T) == 0
                 ack = _qga_ack_out!(e, T)
-                @test_broken ack !== nothing && ack.delay_ns < _QGA_SEC
+                @test ack !== nothing && ack.delay_ns < _QGA_SEC
             end
             @testset "queues an ACK for every second ack-eliciting packet" begin
                 e = _qga_end()
@@ -760,8 +799,38 @@ end
                 @test _qga_ack_out!(e, T) === nothing
                 # 11 is received out-of-order, but this hasn't been reported in an ACK frame yet
                 _qga_rx!(e, 11, T)
-                # BUG?: Reseau acknowledges at once any packet below the largest received, even when only a non-ack-eliciting packet was above it.
-                @test_broken _qga_ack_out!(e, T) === nothing
+                @test _qga_ack_out!(e, T) === nothing
+            end
+        end
+
+        @testset "raising the threshold" begin
+            # quic-go's tracker.IgnoreBelow, as the receivedPacketHandler
+            # applies it on the next packet: the space's ack_floor.
+            @testset "doesn't recognize in-order packets as out-of-order after raising the threshold" begin
+                e = _qga_end()
+                receive_and_ack_10!(e, T)
+                @test e.conn.spaces[3].last_ack_largest == 10
+                e.conn.spaces[3].ack_floor = 11
+                _qga_rx!(e, 11, T)
+                @test _qga_ack_out!(e, T) === nothing
+            end
+            @testset "recognizes out-of-order packets after raising the threshold" begin
+                e = _qga_end()
+                receive_and_ack_10!(e, T)
+                @test e.conn.spaces[3].last_ack_largest == 10
+                e.conn.spaces[3].ack_floor = 11
+                _qga_rx!(e, 12, T)
+                ack = _qga_ack_out!(e, T)
+                @test ack !== nothing
+                @test ack.ranges == [12:12]
+            end
+            @testset "errors when called with an old packet" begin
+                # quic-go's error is a duplicate here: dropped, not acknowledged.
+                e = _qga_end()
+                QGA._ignore_below!(e.conn.spaces[3].received, Int64(7))
+                @test !_qga_rx!(e, 4, T)
+                @test isempty(_qga_ranges(e))
+                @test !e.conn.spaces[3].ack_pending
             end
         end
 
@@ -876,8 +945,7 @@ end
                     ack = _qga_ack_out!(e, T)
                     @test ack !== nothing
                     @test _qga_largest(ack) == 12
-                    # BUG?: Reseau never prunes ranges a peer has seen acknowledged (RFC 9000 §13.2.4).
-                    @test_broken _qga_lowest(ack) == 7
+                    @test _qga_lowest(ack) == 7
                     @test !_qga_has_missing(ack)
                 end
                 @testset "resets all counters needed for the ACK queueing decision when sending an ACK" begin
@@ -979,8 +1047,7 @@ end
             _qga_rx!(e, 4, T)
             ack = _qga_ack_out!(e, T)
             @test ack !== nothing
-            # BUG?: Reseau never prunes ranges a peer has seen acknowledged (RFC 9000 §13.2.4).
-            @test_broken _qga_lowest(ack) == 3
+            @test _qga_lowest(ack) == 3
             @test _qga_largest(ack) == 4
         end
         @testset "says if packets are duplicates" begin
@@ -1262,6 +1329,36 @@ end
                 end
             end
 
+            @testset "determining which ACKs we have received an ACK for" begin
+                # GetLowestPacketNotConfirmedAcked is the space's ack_floor.
+                function more_packets()
+                    e = ack_ctx()
+                    _qga_sent!(e, 3, 13; time = T, ack_largest = 100)
+                    _qga_sent!(e, 3, 14; time = T, ack_largest = 200)
+                    _qga_sent!(e, 3, 15; time = T)
+                    return e
+                end
+                @testset "determines which ACK we have received an ACK for" begin
+                    e = more_packets()
+                    @test _qga_ack!(e, 3, [13:15], T) === nothing
+                    @test e.conn.spaces[3].ack_floor == 201
+                end
+                @testset "doesn't do anything when the acked packet didn't contain an ACK" begin
+                    e = more_packets()
+                    @test _qga_ack!(e, 3, [13:13], T) === nothing
+                    @test e.conn.spaces[3].ack_floor == 101
+                    @test _qga_ack!(e, 3, [15:15], T) === nothing
+                    @test e.conn.spaces[3].ack_floor == 101
+                end
+                @testset "doesn't decrease the value" begin
+                    e = more_packets()
+                    @test _qga_ack!(e, 3, [14:14], T) === nothing
+                    @test e.conn.spaces[3].ack_floor == 201
+                    @test _qga_ack!(e, 3, [13:13], T) === nothing
+                    @test e.conn.spaces[3].ack_floor == 201
+                end
+            end
+
             @testset "calculating RTT" begin
                 @testset "computes the RTT" begin
                     e = ack_ctx()
@@ -1311,13 +1408,9 @@ end
                         _qga_set_time!(e, 3, 1, T - 10 * _QGA_MIN)
                         s0 = e.conn.smoothed_rtt
                         @test _qga_ack!(e, 3, [1:1], T; delay_ns = 5 * _QGA_MIN) === nothing
-                        # quic-go's (adjusted) LatestRTT is 9 minutes
-                        if confirmed
-                            @test e.conn.smoothed_rtt == (7 * s0 + 9 * _QGA_MIN) ÷ 8
-                        else
-                            # BUG?: Reseau trusts ack delays above max_ack_delay until the handshake is confirmed (RFC 9002 §5.3 allows this); quic-go always caps.
-                            @test_broken e.conn.smoothed_rtt == (7 * s0 + 9 * _QGA_MIN) ÷ 8
-                        end
+                        # quic-go's (adjusted) LatestRTT is 9 minutes, with or
+                        # without handshake confirmation
+                        @test e.conn.smoothed_rtt == (7 * s0 + 9 * _QGA_MIN) ÷ 8
                     end
                 end
             end
@@ -1464,6 +1557,9 @@ end
                 # resends two packets' worth for its two probes).
                 lost = _qga_lost(e)
                 @test !isempty(lost) && first(lost) == 10
+                # A timeout is not a loss (RFC 9002 Section 6.2): both stay in flight.
+                @test _qga_history(e) == [10, 11]
+                @test e.conn.bytes_in_flight == 2
             end
             @testset "says when it can't queue a probe packet" begin
                 e = _qga_end(server = true)
@@ -1487,11 +1583,10 @@ end
                 @test _qga_timer(e) - send_time == 4 * timeout
                 # truncated when the exponential gets too large
                 e.conn.pto_count = 20
-                # BUG?: Reseau caps the backoff at 2^16, not at quic-go's maxPTODuration of 60 s.
-                @test_broken _qga_timer(e) - send_time == 60 * _QGA_SEC
+                @test _qga_timer(e) - send_time == 60 * _QGA_SEC
                 # protected from rollover
                 e.conn.pto_count = 100
-                @test_broken _qga_timer(e) - send_time == 60 * _QGA_SEC
+                @test _qga_timer(e) - send_time == 60 * _QGA_SEC
                 @test _qga_timer(e) - send_time > 0
             end
             @testset "reset the PTO count when receiving an ACK" begin
@@ -1506,8 +1601,7 @@ end
                 @test _qga_pto_mode(e) == 3
                 @test e.conn.pto_count == 1
                 @test _qga_ack!(e, 3, [1:1], T) === nothing
-                # BUG?: the probe timeout took packets 1 and 2 out of flight, so their late ACK acknowledges nothing and leaves the backoff in place.
-                @test_broken e.conn.pto_count == 0
+                @test e.conn.pto_count == 0
             end
             @testset "resets the PTO mode and PTO count when a packet number space is dropped" begin
                 e = _qga_end(server = true)
@@ -1524,8 +1618,7 @@ end
                 _qga_fire!(e, T)
                 @test e.conn.pto_count == 1
                 @test _qga_pto_mode(e) == 2
-                # BUG?: the probe timeout took the Handshake packet out of flight, so no timer runs until the probe is sent.
-                @test_broken _qga_timer(e) == send_time_handshake + QGA._pto_duration(e.conn, 2)  # already backed off once
+                @test _qga_timer(e) == send_time_handshake + QGA._pto_duration(e.conn, 2)  # already backed off once
                 _qga_confirm!(e)
                 # PTO timer based on the 1-RTT packet
                 @test _qga_timer(e) == send_time_app + QGA._pto_duration(e.conn, 3)  # no backoff. PTO count = 0
@@ -1604,8 +1697,7 @@ end
                 _qga_fire!(e, now)
                 @test _qga_pto_mode(e) == 1
                 _qga_tx!(e, now)
-                # BUG?: Reseau sends one probe for Initial and Handshake timeouts (RFC 9002 §6.2.4 allows up to two); quic-go sends two.
-                @test_broken _qga_pto_mode(e) == 1
+                @test _qga_pto_mode(e) == 1
                 _qga_tx!(e, now)
 
                 @test _qga_pto_mode(e) == 0
@@ -1632,8 +1724,7 @@ end
                 _qga_fire!(e, T)
                 @test _qga_pto_mode(e) == 3
                 @test _qga_ack!(e, 3, [0:0], T) === nothing
-                # BUG?: an ACK leaves the owed probes in place (and the timeout already took packet 0 out of flight).
-                @test_broken _qga_pto_mode(e) == 0
+                @test _qga_pto_mode(e) == 0
             end
             @testset "handles ACKs for the original packet" begin
                 e = _qga_end(server = true)
@@ -1675,8 +1766,7 @@ end
                 e.conn.bytes_received = 300
                 _qga_sent!(e, 1, 1; time = T, size = 900)
                 # Amplification limited. We don't need to set a timer now.
-                # BUG?: Reseau arms the PTO while the amplification limit blocks sending (RFC 9002 §6.2.2.1: MUST NOT).
-                @test_broken _qga_timer(e) === nothing
+                @test _qga_timer(e) === nothing
                 # Unblock the server. Now we should fire up the timer.
                 e.conn.bytes_received = 301
                 @test _qga_timer(e) !== nothing
@@ -1686,8 +1776,7 @@ end
                 e.conn.bytes_received = 300
                 _qga_sent!(e, 2, 1; time = T, size = 900)
                 # Amplification limited. We don't need to set a timer now.
-                # BUG?: Reseau arms the PTO while the amplification limit blocks sending (RFC 9002 §6.2.2.1: MUST NOT).
-                @test_broken _qga_timer(e) === nothing
+                @test _qga_timer(e) === nothing
                 e.conn.address_validated = true
                 @test _qga_timer(e) !== nothing
             end
@@ -1736,8 +1825,7 @@ end
                 QGA._discard_space!(e.conn, 1)  # sending a Handshake packet drops the Initial packet number space
                 @test _qga_ack!(e, 2, [1:1], now) === nothing
                 # Make sure that no timer is set at this point.
-                # BUG?: Reseau keeps the client's anti-deadlock PTO running until the handshake is confirmed, though a Handshake ACK shows the server validated its address (RFC 9002 §6.2.2.1, A.8).
-                @test_broken _qga_timer(e) === nothing
+                @test _qga_timer(e) === nothing
             end
             @testset "sends a Handshake packet to unblock the server, if Initial keys were already dropped" begin
                 e = _qga_end(handshake_keys = false)
@@ -1753,8 +1841,7 @@ end
                 # Now receive an ACK for this packet, and send another one.
                 @test _qga_ack!(e, 2, [1:1], now) === nothing
                 _qga_sent!(e, 2, 2; time = now, ack_eliciting = false)
-                # BUG?: Reseau keeps the client's anti-deadlock PTO running until the handshake is confirmed, though a Handshake ACK shows the server validated its address (RFC 9002 §6.2.2.1, A.8).
-                @test_broken _qga_timer(e) === nothing
+                @test _qga_timer(e) === nothing
             end
             @testset "doesn't send a packet to unblock the server after handshake confirmation, even if no Handshake ACK was received" begin
                 e = _qga_end()
@@ -1827,13 +1914,11 @@ end
                 @test e.conn.smoothed_rtt == _QGA_SEC
                 # Packet 1 should be considered lost (1+1/8) RTTs after it was sent.
                 loss_time = T - 2 * _QGA_SEC + 9 * _QGA_SEC ÷ 8
-                # BUG?: Reseau sets no loss timer for packets not yet lost by the time threshold (RFC 9002 §6.1.2: SHOULD); only the PTO runs.
-                @test_broken _qga_timer(e) == loss_time
+                @test _qga_timer(e) == loss_time
                 @test _qga_pto_mode(e) == 0
                 @test _qga_history(e) == [1, 3]
                 QGA._handle_timeout!(e.conn, loss_time)
-                # BUG?: nothing declares packet 1 lost when its time threshold passes.
-                @test_broken _qga_history(e) == [3]
+                @test _qga_history(e) == [3]
                 @test _qga_pto_mode(e) == 0
             end
             @testset "sets the early retransmit alarm for crypto packets" begin
@@ -1846,13 +1931,11 @@ end
                 @test e.conn.smoothed_rtt == _QGA_SEC
                 # Packet 1 should be considered lost (1+1/8) RTTs after it was sent.
                 loss_time = T - 2 * _QGA_SEC + 9 * _QGA_SEC ÷ 8
-                # BUG?: Reseau sets no loss timer for packets not yet lost by the time threshold (RFC 9002 §6.1.2: SHOULD); only the PTO runs.
-                @test_broken _qga_timer(e) == loss_time
+                @test _qga_timer(e) == loss_time
                 @test _qga_pto_mode(e) == 0
                 @test _qga_history(e, 1) == [1, 3]
                 QGA._handle_timeout!(e.conn, loss_time)
-                # BUG?: nothing declares packet 1 lost when its time threshold passes.
-                @test_broken _qga_history(e, 1) == [3]
+                @test _qga_history(e, 1) == [3]
                 @test _qga_pto_mode(e) == 0
             end
             @testset "sets the early retransmit alarm for Path MTU probe packets" begin
