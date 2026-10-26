@@ -1114,19 +1114,31 @@ function sendto_ptr!(
     end
 end
 
+# Control messages: `struct cmsghdr { size_t cmsg_len; int cmsg_level; int
+# cmsg_type; }` followed by the data, each aligned to a size_t, as glibc's
+# CMSG_ALIGN, CMSG_LEN and CMSG_SPACE compute them.
+@inline _cmsg_align(n::Int)::Int = (n + sizeof(Csize_t) - 1) & ~(sizeof(Csize_t) - 1)
+const _CMSG_HDR = _cmsg_align(sizeof(Csize_t) + 2 * sizeof(Cint))
+@inline _cmsg_len(n::Int)::Int = _CMSG_HDR + n
+@inline _cmsg_space(n::Int)::Int = _CMSG_HDR + _cmsg_align(n)
+
 # The segment size in a UDP_GRO control message among `controllen` bytes of
-# control data at `control`, or 0 when there is none.
+# control data at `control`, or 0 when there is none. The kernel sends it as
+# an int; a 2-byte one is accepted too.
 function _gro_segment_size(control::Ptr{UInt8}, controllen::Int)::Int
     off = 0
-    while off + 16 <= controllen
-        len = Int(unsafe_load(Ptr{UInt64}(control + off)))
-        len < 16 && return 0
-        level = unsafe_load(Ptr{Int32}(control + off + 8))
-        type = unsafe_load(Ptr{Int32}(control + off + 12))
-        if level == SocketOps.SOL_UDP && type == SocketOps.UDP_GRO && len >= 16 + 2
-            return Int(unsafe_load(Ptr{UInt16}(control + off + 16)))
+    while off + _CMSG_HDR <= controllen
+        len = Int(unsafe_load(Ptr{Csize_t}(control + off)))
+        len < _CMSG_HDR && return 0
+        level = unsafe_load(Ptr{Cint}(control + off + sizeof(Csize_t)))
+        type = unsafe_load(Ptr{Cint}(control + off + sizeof(Csize_t) + sizeof(Cint)))
+        if level == SocketOps.SOL_UDP && type == SocketOps.UDP_GRO
+            data = control + off + _CMSG_HDR
+            len >= _cmsg_len(sizeof(Cint)) && return Int(unsafe_load(Ptr{Cint}(data)))
+            len >= _cmsg_len(sizeof(UInt16)) && return Int(unsafe_load(Ptr{UInt16}(data)))
+            return 0
         end
-        off += (len + 7) & ~7
+        off += _cmsg_align(len)
     end
     return 0
 end
@@ -1139,6 +1151,9 @@ the size of the datagrams the kernel coalesced into this buffer (UDP generic
 receive offload), or 0 when it holds one datagram. With `wait = false` it
 returns `nread = -1` instead of waiting, as [`try_recvfrom_ptr!`](@ref).
 """
+# UDP segmentation and receive offload (UDP_SEGMENT, UDP_GRO) are Linux's.
+const _UDP_OFFLOAD = Sys.islinux()
+
 function recvmsg_segments_ptr!(
         fd::FD,
         p::Ptr{UInt8},
@@ -1146,7 +1161,7 @@ function recvmsg_segments_ptr!(
         root,
         wait::Bool,
     )::Tuple{Int, SocketOps.AcceptPeer, Int, Bool}
-    @static if !Sys.islinux() || ENDIAN_BOM != 0x04030201
+    @static if !_UDP_OFFLOAD
         n, peer, truncated = wait ? recvfrom_ptr!(fd, p, nbytes, root) : try_recvfrom_ptr!(fd, p, nbytes, root)
         return n, peer, 0, truncated
     else
@@ -1205,19 +1220,21 @@ function sendmsg_segments_ptr!(
         destlen::Int,
         segment_size::Int,
     )::Int
-    @static if !Sys.islinux() || ENDIAN_BOM != 0x04030201
+    @static if !_UDP_OFFLOAD
         throw(SystemError("sendmsg", Int(Base.Libc.ENOSYS)))
     else
         _fd_write_lock!(fd)
         try
             preparewrite(fd.pd, fd.is_file)
-            # struct cmsghdr { size_t cmsg_len; int cmsg_level; int cmsg_type; }
-            # followed by the uint16 segment size, padded to CMSG_SPACE(2).
-            control = Ref((
-                UInt64(16 + 2),
-                UInt64(UInt32(SocketOps.SOL_UDP)) | (UInt64(UInt32(SocketOps.UDP_SEGMENT)) << 32),
-                UInt64(UInt16(segment_size)),
-            ))
+            # One control message: the uint16 segment size.
+            control = Ref(ntuple(_ -> UInt64(0), Val(4)))
+            control_ptr = Ptr{UInt8}(Base.unsafe_convert(Ptr{Cvoid}, control))
+            GC.@preserve control begin
+                unsafe_store!(Ptr{Csize_t}(control_ptr), Csize_t(_cmsg_len(sizeof(UInt16))))
+                unsafe_store!(Ptr{Cint}(control_ptr + sizeof(Csize_t)), SocketOps.SOL_UDP)
+                unsafe_store!(Ptr{Cint}(control_ptr + sizeof(Csize_t) + sizeof(Cint)), SocketOps.UDP_SEGMENT)
+                unsafe_store!(Ptr{UInt16}(control_ptr + _CMSG_HDR), UInt16(segment_size))
+            end
             iov = Ref(SocketOps.IOVec(Ptr{Cvoid}(p), Csize_t(nbytes)))
             GC.@preserve control iov root dest begin
                 name_ptr = dest === nothing ? C_NULL : Base.unsafe_convert(Ptr{Cvoid}, dest)
@@ -1226,8 +1243,8 @@ function sendmsg_segments_ptr!(
                     SocketOps.SockLen(dest === nothing ? 0 : destlen),
                     Base.unsafe_convert(Ptr{SocketOps.IOVec}, iov),
                     Csize_t(1),
-                    Base.unsafe_convert(Ptr{Cvoid}, control),
-                    Csize_t(24),
+                    Ptr{Cvoid}(control_ptr),
+                    Csize_t(_cmsg_space(sizeof(UInt16))),
                     Cint(0),
                 ))
                 while true

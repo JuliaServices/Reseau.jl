@@ -104,7 +104,9 @@ end
 
 function _qga_end(; server::Bool = false, handshake_keys::Bool = true)
     conn = QGA._client_connection(_qcn_client_config(), _QGA_T0)
+    # quic-go's ackhandler has no idle timers.
     conn.idle_timeout_ns = Int64(10)^18
+    conn.handshake_idle_timeout_ns = Int64(10)^18
     # The ClientHello stays out of the way; tests send their own packets. The
     # CRYPTO bytes the tests' packets "carry" exist, so resending them works.
     empty!(conn.spaces[QGA._INITIAL_SPACE].crypto_send.pending)
@@ -279,7 +281,7 @@ _qga_update_rtt!(e::_QgaEnd, rtt::Int64) = QGA._update_rtt!(e.conn, rtt, Int64(0
 function _qga_timer(e::_QgaEnd)
     conn = e.conn
     t = QGA._next_timeout(conn)
-    (t === nothing || t >= conn.last_activity + conn.idle_timeout_ns) && return nothing
+    (t === nothing || t >= QGA._idle_deadline(conn)) && return nothing
     return t
 end
 

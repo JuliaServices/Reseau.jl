@@ -431,6 +431,73 @@ end
         end
     end
 
+    @testset "an unreachable port is retried until the deadline, not fatal" begin
+        # A connected socket hears ICMP port unreachable as ECONNREFUSED; that
+        # is lost packets, as on an unconnected socket, not the end.
+        probe = UDA.listen(UDA.loopback_addr(0))
+        addr = UDA.local_addr(probe)
+        close(probe)
+        @test_throws UDA.DeadlineExceededError QA.connect(addr, _qa_client_config(); deadline_ns = _qa_deadline(0.5))
+    end
+
+    @testset "a closed connection releases its TLS state" begin
+        listener, client, server = _qa_pair()
+        close(client)
+        @test QA._wait_endpoint_done(client.ep, _qa_deadline())
+        @test client.slot.conn.tls.closed
+        close(listener)
+        @test QA._wait_endpoint_done(server.ep, _qa_deadline())
+        @test server.slot.conn.tls.closed
+    end
+
+    @testset "rejects new connection attempts if the accept queue is full" begin
+        # quic-go v0.48.2 server_test.go: protocol.MaxAcceptQueueSize = 32
+        # handshaken connections wait to be accepted; more are refused.
+        listener = QA.listen(UDA.loopback_addr(0), _qa_server_config())
+        port = QA.local_addr(listener).port
+        clients = QA.Connection[]
+        try
+            for _ in 1:32
+                push!(clients, QA.connect(UDA.loopback_addr(port), _qa_client_config(); deadline_ns = _qa_deadline()))
+            end
+            err = try
+                c = QA.connect(UDA.loopback_addr(port), _qa_client_config(); deadline_ns = _qa_deadline())
+                push!(clients, c)
+                QA.accept_stream(c; deadline_ns = _qa_deadline(10))
+                nothing
+            catch ex
+                ex
+            end
+            @test err isa QA.ConnectionError && err.code == 0x02 && err.remote && !err.app
+            # Accepting one makes room for another.
+            QA.accept(listener; deadline_ns = _qa_deadline())
+            push!(clients, QA.connect(UDA.loopback_addr(port), _qa_client_config(); deadline_ns = _qa_deadline()))
+            @test QA.accept(listener; deadline_ns = _qa_deadline()) isa QA.Connection
+        finally
+            foreach(close, clients)
+            close(listener)
+        end
+    end
+
+    @testset "connecting does not pin the calling task to a thread" begin
+        # Scheduling a sticky task makes the scheduling task sticky too.
+        if Threads.threadpoolsize() > 1
+            listener = QA.listen(UDA.loopback_addr(0), _qa_server_config())
+            port = QA.local_addr(listener).port
+            try
+                t = Threads.@spawn begin
+                    c = QA.connect(UDA.loopback_addr(port), _qa_client_config(); deadline_ns = _qa_deadline())
+                    sticky = current_task().sticky
+                    close(c)
+                    sticky
+                end
+                @test !fetch(t)
+            finally
+                close(listener)
+            end
+        end
+    end
+
     @testset "a closed listener accepts no more, but its connections go on" begin
         listener, client, server = _qa_pair()
         try

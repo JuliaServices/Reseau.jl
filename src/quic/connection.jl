@@ -30,6 +30,10 @@ const _MAX_ACK_RANGES = 32
 # Backoff stops lengthening the probe timeout here (quic-go's maxPTODuration).
 const _MAX_PTO_NS = Int64(60_000_000_000)
 const _DEFAULT_IDLE_TIMEOUT_MS = UInt64(30_000)
+# Until the handshake completes, a connection quiet this long is dropped, and
+# one not done by twice this from its creation (quic-go's
+# DefaultHandshakeIdleTimeout and handshakeTimeout).
+const _HANDSHAKE_IDLE_TIMEOUT_NS = Int64(5_000_000_000)
 # Congestion windows (RFC 9002 Section 7.2).
 const _INITIAL_WINDOW = 10 * _MAX_DATAGRAM_SIZE
 const _MINIMUM_WINDOW = 2 * _MAX_DATAGRAM_SIZE
@@ -192,6 +196,8 @@ Base.@kwdef mutable struct _Connection
     last_send_time::Int64
     last_activity::Int64
     idle_timeout_ns::Int64 = Int64(_DEFAULT_IDLE_TIMEOUT_MS) * 1_000_000
+    handshake_idle_timeout_ns::Int64 = _HANDSHAKE_IDLE_TIMEOUT_NS
+    created::Int64 = Int64(0)
     close_pending::Bool = false
     close_deadline::Int64 = Int64(0)
     # Datagrams received while closing, each answered at falling rate.
@@ -317,7 +323,7 @@ function _new_connection(
     )
     conn = _Connection(;
         is_server, tls, local_cid, peer_cid, original_dcid, peer_cid_set = is_server,
-        local_params = params, last_send_time = now, last_activity = now, limits,
+        local_params = params, last_send_time = now, last_activity = now, created = now, limits,
         local_max_streams_bidi = limits.max_streams_bidi, local_max_streams_uni = limits.max_streams_uni,
         local_max_data = limits.max_data,
     )
@@ -412,10 +418,7 @@ function _process_tls_events!(conn::_Connection, now::Int64)::Nothing
             conn.peer_max_data = Int64(params.initial_max_data)
             conn.peer_max_streams_bidi = Int64(params.initial_max_streams_bidi)
             conn.peer_max_streams_uni = Int64(params.initial_max_streams_uni)
-            # The idle timeout is the smaller of the two nonzero values (Section 10.1).
-            if params.max_idle_timeout_ms > 0
-                conn.idle_timeout_ns = min(conn.idle_timeout_ns, Int64(params.max_idle_timeout_ms) * 1_000_000)
-            end
+            conn.idle_timeout_ns = _negotiated_idle_timeout_ns(conn.idle_timeout_ns, params.max_idle_timeout_ms)
         elseif kind == TLS.QUICEventKind.HandshakeDone
             conn.handshake_complete = true
             conn.state == _ConnState.Handshaking && (conn.state = _ConnState.Established)
@@ -630,6 +633,9 @@ function _receive_datagram!(conn::_Connection, buf::Vector{UInt8}, first::Int, l
         # (RFC 9000 Section 10.2.1).
         conn.close_received += 1
         ispow2(conn.close_received) && (conn.close_pending = true)
+        # It still raises the anti-amplification budget (RFC 9000 Section
+        # 8.1), which a close over that budget is waiting for.
+        conn.bytes_received += last - first + 1
         return nothing
     end
     conn.state == _ConnState.Handshaking || conn.state == _ConnState.Established || conn.state == _ConnState.Confirmed ||
@@ -924,10 +930,17 @@ function _on_ack!(conn::_Connection, space::_PacketSpace, idx::Int, buf::Vector{
     for r in _ack_ranges(buf, frame)
         push!(ranges, r)
     end
+    # The frame lists ranges from the largest down, and `space.sent` is in
+    # packet number order, so one pass over both finds the acknowledged ones.
+    reverse!(ranges)
     newly_acked = _SentPacket[]
     kept = 0
+    j = 1
     for p in space.sent
-        if any(r -> Int64(first(r)) <= p.pn <= Int64(last(r)), ranges)
+        while j <= length(ranges) && Int64(last(ranges[j])) < p.pn
+            j += 1
+        end
+        if j <= length(ranges) && Int64(first(ranges[j])) <= p.pn
             push!(newly_acked, p)
         else
             kept += 1
@@ -1372,7 +1385,6 @@ end
 # One CONNECTION_CLOSE in each packet number space the peer may be reading.
 function _close_datagram!(conn::_Connection, now::Int64)::Union{Nothing, Vector{UInt8}}
     conn.close_pending || return nothing
-    conn.close_pending = false
     err = conn.error::_TransportError
     reason = Vector{UInt8}(codeunits(err.reason))
     length(reason) > 256 && resize!(reason, 256)
@@ -1396,7 +1408,15 @@ function _close_datagram!(conn::_Connection, now::Int64)::Union{Nothing, Vector{
     end
     isempty(packets) && return nothing
     has_initial && !conn.is_server && _pad_last_packet!(buf, packets, _MAX_DATAGRAM_SIZE)
-    length(buf) <= _send_budget(conn) || return nothing
+    if length(buf) > _send_budget(conn)
+        # Over the anti-amplification limit: try again once the peer sends
+        # more, without using up packet numbers.
+        for p in packets
+            conn.spaces[p.space].next_pn -= 1
+        end
+        return nothing
+    end
+    conn.close_pending = false
     return _seal_datagram!(conn, buf, packets, now)
 end
 
@@ -1454,6 +1474,22 @@ function _loss_time_deadline(conn::_Connection)::Union{Nothing, Tuple{Int64, Int
     return best
 end
 
+# The idle timeout is the smaller of the two nonzero values (RFC 9000 Section
+# 10.1). The peer's can be up to 2^62 - 1 ms, which overflows in nanoseconds;
+# anything above the local value cannot lower it.
+function _negotiated_idle_timeout_ns(local_ns::Int64, peer_ms::UInt64)::Int64
+    (peer_ms == 0 || peer_ms >= UInt64(local_ns ÷ 1_000_000) + 1) && return local_ns
+    return min(local_ns, Int64(peer_ms) * 1_000_000)
+end
+
+# When inactivity ends the connection: until the handshake completes, after
+# the handshake idle timeout, or at twice that from its creation, as in
+# quic-go; afterwards after the idle timeout.
+function _idle_deadline(conn::_Connection)::Int64
+    conn.handshake_complete && return conn.last_activity + conn.idle_timeout_ns
+    return min(conn.last_activity + conn.handshake_idle_timeout_ns, conn.created + 2 * conn.handshake_idle_timeout_ns)
+end
+
 """
     _next_timeout(conn) -> Int64 or nothing
 
@@ -1463,7 +1499,7 @@ function _next_timeout(conn::_Connection)::Union{Nothing, Int64}
     state = conn.state
     state == _ConnState.Closed && return nothing
     (state == _ConnState.Closing || state == _ConnState.Draining) && return conn.close_deadline
-    t = conn.last_activity + conn.idle_timeout_ns
+    t = _idle_deadline(conn)
     # A pending loss time stands in for the probe timeout (RFC 9002 Appendix A.8).
     loss = _loss_time_deadline(conn)
     recovery = loss === nothing ? _pto_deadline(conn) : loss
@@ -1490,7 +1526,7 @@ function _handle_timeout!(conn::_Connection, now::Int64)::Nothing
         now >= conn.close_deadline && (conn.state = _ConnState.Closed)
         return nothing
     end
-    if now >= conn.last_activity + conn.idle_timeout_ns
+    if now >= _idle_deadline(conn)
         conn.state = _ConnState.Closed
         return nothing
     end

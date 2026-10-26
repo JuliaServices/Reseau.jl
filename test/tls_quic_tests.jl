@@ -168,6 +168,13 @@ function _quic_close_all!(peers::_QUICTestPeer...)
 end
 
 @testset "TLS QUIC" begin
+    @testset "a handshake failure with a non-String message is still reported" begin
+        # ArgumentError's message is any AbstractString.
+        err = Reseau.TLS._quic_error("handshake", ArgumentError(SubString("bad argument!", 1, 12)))
+        @test err isa Reseau.TLS.TLSError
+        @test occursin("bad argument", sprint(showerror, err))
+    end
+
     @testset "handshake installs matching secrets at each level" begin
         cli = _quic_test_client(_quic_client_config())
         srv = _quic_test_server(_quic_server_config())

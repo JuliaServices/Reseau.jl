@@ -182,8 +182,15 @@ end
 function _quic_error(op::String, @nospecialize(ex::Exception))::TLSError
     ex isa TLSError && return ex::TLSError
     ex isa _TLSAlertError && return TLSError(op, Int32(0), (ex::_TLSAlertError).message, ex)
-    ex isa ArgumentError && return TLSError(op, Int32(0), (ex::ArgumentError).msg::String, ex)
+    ex isa ArgumentError && return TLSError(op, Int32(0), _quic_message((ex::ArgumentError).msg), ex)
     return TLSError(op, Int32(0), "unexpected TLS failure", ex)
+end
+
+# An ArgumentError's message is any AbstractString.
+function _quic_message(@nospecialize(msg))::String
+    msg isa String && return msg::String
+    msg isa SubString{String} && return String(msg::SubString{String})
+    return "invalid argument"
 end
 
 @inline _quic_misuse_error(op::String, message::String)::TLSError = TLSError(op, Int32(0), message, nothing)
@@ -200,6 +207,8 @@ function start!(q::QUICConn)::Nothing
     q.started && throw(_quic_misuse_error("start", "tls: start! called more than once"))
     q.started = true
     task = Task(() -> _quic_run_handshake!(q))
+    # A sticky task would pin the task scheduling it to its thread.
+    task.sticky = false
     lock(q.cond)
     try
         q.handshake_turn = true

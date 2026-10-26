@@ -95,3 +95,9 @@ network. Sockets ask for 7 MiB buffers; raise `net.core.rmem_max` and
 
 Packets are not paced. There is no 0-RTT, no connection migration, and no
 handling of Retry or Version Negotiation.
+
+Without Retry, a listener cannot make clients prove their address before it
+sets up a connection, so spoofed Initial packets each cost it a connection
+until they time out. As in quic-go, a handshake is dropped after 5 seconds
+without activity or 10 seconds in all, and at most 32 handshaken connections
+wait to be accepted; further ones are refused with CONNECTION_REFUSED.

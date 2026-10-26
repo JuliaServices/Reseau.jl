@@ -10,7 +10,7 @@ lives in `TLS.QUICConn`. Not exported: use it as `Reseau.QUIC`.
 module QUIC
 
 using Random
-using ..Reseau: TLS, UDP
+using ..Reseau: TLS, UDP, IOPoll
 using ..Reseau.TLS:
     _HASH_SHA256,
     _LIBCRYPTO_PATH,

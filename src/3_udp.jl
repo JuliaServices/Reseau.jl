@@ -394,7 +394,7 @@ end
 # one receive (UDP generic receive offload); read them with
 # `_recv_segments!`. Returns whether the option took effect.
 function _enable_gro!(conn::Conn)::Bool
-    @static if Sys.islinux()
+    @static if IOPoll._UDP_OFFLOAD
         try
             SocketOps.set_sockopt_int(conn.fd.pfd.sysfd, SocketOps.SOL_UDP, SocketOps.UDP_GRO, 1)
             return true

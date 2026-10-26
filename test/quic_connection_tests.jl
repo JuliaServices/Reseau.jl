@@ -363,6 +363,80 @@ using Reseau
         @test h.server.peer_error !== nothing && h.server.peer_error.code == 1
     end
 
+    # quic-go v0.48.2 connection_test.go, "timeouts": before the handshake
+    # completes, the handshake idle timeout (5 s) applies instead of the idle
+    # timeout, and the handshake must finish within twice that.
+    @testset "times out due to non-completed handshake" begin
+        h = _QcnHarness()
+        conn = h.client
+        created = h.now
+        # Keep the connection active, so only the handshake timeout can end it.
+        t = created
+        while t < created + 2 * QCN._HANDSHAKE_IDLE_TIMEOUT_NS
+            t += QCN._HANDSHAKE_IDLE_TIMEOUT_NS ÷ 2
+            conn.last_activity = t
+            QCN._handle_timeout!(conn, t)
+            t < created + 2 * QCN._HANDSHAKE_IDLE_TIMEOUT_NS && @test conn.state != QCN._ConnState.Closed
+        end
+        @test conn.state == QCN._ConnState.Closed
+        @test QCN._next_timeout(_QcnHarness().client) <= created + QCN._HANDSHAKE_IDLE_TIMEOUT_NS
+    end
+
+    @testset "does not use the idle timeout before the handshake complete" begin
+        h = _QcnHarness()
+        conn = h.client
+        conn.handshake_idle_timeout_ns = 9999 * 1_000_000_000
+        conn.idle_timeout_ns = 9999 * 1_000_000_000
+        now = h.now + 60_000_000_000
+        QCN._handle_timeout!(conn, now)
+        @test conn.state != QCN._ConnState.Closed
+    end
+
+    @testset "closes the connection due to the idle timeout before handshake" begin
+        h = _QcnHarness()
+        conn = h.client
+        conn.handshake_idle_timeout_ns = 25_000_000
+        @test QCN._next_timeout(conn) <= h.now + 25_000_000
+        QCN._handle_timeout!(conn, h.now + 25_000_000)
+        @test conn.state == QCN._ConnState.Closed
+        @test conn.error === nothing  # silent, like any idle timeout
+    end
+
+    @testset "closes the connection due to the idle timeout after handshake" begin
+        h = _QcnHarness()
+        @test _qcn_run!(h)
+        conn = h.client
+        @test QCN._next_timeout(conn) <= conn.last_activity + conn.idle_timeout_ns
+        @test conn.idle_timeout_ns > QCN._HANDSHAKE_IDLE_TIMEOUT_NS  # the handshake's no longer applies
+    end
+
+    @testset "a huge peer max_idle_timeout does not overflow" begin
+        # 2^62 - 1 ms is a valid varint; the idle timeout stays the local one.
+        ns = QCN._negotiated_idle_timeout_ns(Int64(30_000_000_000), UInt64(2)^62 - 1)
+        @test ns == 30_000_000_000
+        @test QCN._negotiated_idle_timeout_ns(Int64(30_000_000_000), UInt64(10_000)) == 10_000_000_000
+        @test QCN._negotiated_idle_timeout_ns(Int64(30_000_000_000), UInt64(0)) == 30_000_000_000
+    end
+
+    @testset "a CONNECTION_CLOSE over the amplification budget waits for more budget" begin
+        # A silent client: the server soon reaches three times what it received.
+        h = _QcnHarness(drop = (from_client, n) -> from_client && n > 1)
+        @test !_qcn_run!(h; max_time = _QCN_START + 2_000_000_000)
+        server = h.server
+        # As if the server had sent all but 50 bytes of what it may.
+        server.bytes_sent = 3 * server.bytes_received - 50
+        @test QCN._send_budget(server) == 50
+        QCN._close_connection!(server, UInt64(0x42), "a reason long enough to need more than the budget left", h.now)
+        @test QCN._next_datagram!(server, h.now) === nothing
+        @test server.close_pending
+        # The client's next datagram raises the budget, and the close goes out.
+        QCN._receive_datagram!(server, copy(_qcn_sent(h, true)[2].bytes), h.now)
+        dgram = QCN._next_datagram!(server, h.now)
+        @test dgram !== nothing
+        QCN._receive_datagram!(h.client, dgram, h.now)
+        @test h.client.peer_error !== nothing
+    end
+
     @testset "an application close during the handshake is sent as APPLICATION_ERROR" begin
         # Before 1-RTT keys, the application's code and reason stay private
         # (RFC 9000 Section 10.2.3).

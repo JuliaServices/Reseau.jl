@@ -132,7 +132,7 @@ function _Endpoint(sock::UDP.Conn, is_server::Bool, config::Union{Nothing, TLS.C
     return _Endpoint(
         sock, lk, is_server, config, limits, _ConnSlot[], Dict{Vector{UInt8}, _ConnSlot}(),
         typemax(Int64), Int64[], _ConnSlot[], Threads.Condition(lk), is_server, false,
-        Sys.islinux(), Vector{UInt8}(undef, _GSO_MAX_BYTES), _MAX_DATAGRAM_SIZE,
+        IOPoll._UDP_OFFLOAD, Vector{UInt8}(undef, _GSO_MAX_BYTES), _MAX_DATAGRAM_SIZE,
     )
 end
 
@@ -250,12 +250,28 @@ function _fail_slot!(slot::_ConnSlot, @nospecialize(ex))::Nothing
     return nothing
 end
 
+# At most this many handshaken connections wait to be accepted (quic-go's
+# MaxAcceptQueueSize); later ones are refused.
+const _MAX_ACCEPT_QUEUE = 32
+
 # At most this many datagrams, and bytes, go out in one segmented send.
 const _GSO_MAX_SEGMENTS = 64
 const _GSO_MAX_BYTES = 65000
 
-# errno values meaning the kernel or device cannot segment UDP (Linux).
-const _GSO_UNSUPPORTED = (Int32(Base.Libc.EIO), Int32(Base.Libc.EINVAL), Int32(Base.Libc.ENOSYS), Int32(92), Int32(95))
+# errno values meaning the kernel or device cannot segment UDP (Linux): EIO
+# when the device lacks checksum offload, as in quic-go, or no support at all.
+const _GSO_UNSUPPORTED = (Int32(Base.Libc.EIO), Int32(Base.Libc.ENOSYS), Int32(92), Int32(95))
+
+# errno values that lose a datagram but leave the socket usable: ICMP errors,
+# which a connected socket reports on a later call (an unconnected one, as
+# quic-go uses, never sees them), and transient shortages.
+const _TRANSIENT_SOCKET_ERRORS = (
+    Int32(Base.Libc.ECONNREFUSED), Int32(Base.Libc.EHOSTUNREACH), Int32(Base.Libc.ENETUNREACH),
+    Int32(Base.Libc.EHOSTDOWN), Int32(Base.Libc.ECONNRESET), Int32(Base.Libc.ENOBUFS),
+    Int32(Base.Libc.ENOMEM), Int32(Base.Libc.EINTR),
+)
+
+_transient_socket_error(@nospecialize(ex))::Bool = ex isa SystemError && Int32((ex::SystemError).errnum) in _TRANSIENT_SOCKET_ERRORS
 
 # Sends `nbytes` of `ep.send_buf`, datagrams of `segment` bytes with a shorter
 # last one, to the slot's peer. Where segmentation turns out to be
@@ -273,12 +289,17 @@ function _send_gathered!(ep::_Endpoint, slot::_ConnSlot, nbytes::Int, segment::I
             _pmtu_black_hole!(slot.conn)
             return true
         end
-        if !(ex isa SystemError && Int32(ex.errnum) in _GSO_UNSUPPORTED)
+        _transient_socket_error(ex) && return true  # lost, as on the network
+        errno = ex isa SystemError ? Int32(ex.errnum) : Int32(0)
+        if errno in _GSO_UNSUPPORTED
+            ep.gso = false
+        elseif errno != Int32(Base.Libc.EINVAL)
             _fail_slot!(slot, ex)
             return false
         end
+        # EINVAL: the segments are larger than the route now takes. Sent one
+        # by one, they get EMSGSIZE, which shrinks the datagram size.
     end
-    ep.gso = false
     off = 0
     while off < nbytes
         len = min(segment, nbytes - off)
@@ -302,6 +323,7 @@ function _send_one!(ep::_Endpoint, slot::_ConnSlot, dgram::Vector{UInt8})::Bool
             length(dgram) > conn.max_datagram_size ? _pmtu_refused!(conn) : _pmtu_black_hole!(conn)
             return true
         end
+        _transient_socket_error(ex) && return true  # lost, as on the network
         _fail_slot!(slot, ex)
         return false
     end
@@ -362,6 +384,8 @@ function _remove_slot!(ep::_Endpoint, slot::_ConnSlot)::Nothing
     for cid in slot.routes
         get(ep.routes, cid, nothing) === slot && delete!(ep.routes, cid)
     end
+    # Ends a handshake still in progress and drops its secrets.
+    close(slot.conn.tls)
     return nothing
 end
 
@@ -426,11 +450,13 @@ function _service!(ep::_Endpoint, slot::_ConnSlot, now::Int64, force::Bool = fal
     _flush!(ep, slot, now)
     if ep.is_server && !slot.announced && _handshake_complete(conn) && _conn_open(conn)
         slot.announced = true
-        if ep.accepting
+        if ep.accepting && length(ep.accept_queue) < _MAX_ACCEPT_QUEUE
             push!(ep.accept_queue, slot)
             notify(ep.accept_cond; all = true)
         else
-            _close_connection!(conn, UInt64(0), "", now; app = false)
+            # Closed, or too many waiting to be accepted: CONNECTION_REFUSED,
+            # as quic-go does.
+            _close_connection!(conn, ep.accepting ? _CONNECTION_REFUSED : UInt64(0), "", now; app = false)
             _flush!(ep, slot, now)
         end
     end
@@ -552,10 +578,11 @@ function _run_endpoint!(ep::_Endpoint)::Nothing
                     yield()
                     continue
                 end
-                # A truncated datagram is not QUIC; anything else ends the endpoint.
-                ex isa UDP.TruncatedDatagramError && continue
+                # A truncated datagram is not QUIC, and transient errors lose
+                # a datagram at most; anything else ends the endpoint.
+                (ex isa UDP.TruncatedDatagramError || _transient_socket_error(ex)) && continue
                 _fail_all!(ep, ex)
-                continue
+                break
             end
             # Take whatever else has already arrived, so connections are
             # serviced (and send, and wake their waiters) once per batch
@@ -569,7 +596,7 @@ function _run_endpoint!(ep::_Endpoint)::Nothing
                     n, from, segment = try
                         UDP._recv_segments!(ep.sock, buf, false)
                     catch ex
-                        ex isa UDP.TruncatedDatagramError && continue
+                        (ex isa UDP.TruncatedDatagramError || _transient_socket_error(ex)) && continue
                         failure = ex
                         break
                     end
@@ -579,7 +606,10 @@ function _run_endpoint!(ep::_Endpoint)::Nothing
             finally
                 unlock(ep.lock)
             end
-            failure === nothing || _fail_all!(ep, failure)
+            if failure !== nothing
+                _fail_all!(ep, failure)
+                break
+            end
         end
     finally
         lock(ep.lock)
@@ -589,6 +619,7 @@ function _run_endpoint!(ep::_Endpoint)::Nothing
             for slot in ep.slots
                 _fail_slot!(slot, "endpoint closed")
                 _wake!(slot, true)
+                close(slot.conn.tls)
             end
             empty!(ep.slots)
             notify(ep.accept_cond; all = true)
