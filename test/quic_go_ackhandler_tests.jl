@@ -594,14 +594,18 @@ end
             end
             @testset "says a packet is a potentially duplicate if the ranges were already deleted" begin
                 e = _qga_end()
-                foreach(pn -> _qga_rx!(e, pn, T), (4, 5, 8, 9))
+                foreach(pn -> _qga_rx!(e, pn, T), (4, 5, 8, 9, 11))
                 QGA._ignore_below!(e.conn.spaces[3].received, Int64(8))
-                @test _qga_ranges(e) == [8:9]
-                # Everything below 8 may have been received, even 3, 6, and 7.
-                for pn in 0:9
-                    @test isdup(e, pn)
-                end
+                @test isdup(e, 3)
+                @test isdup(e, 4)
+                @test isdup(e, 5)
+                @test isdup(e, 6)
+                @test isdup(e, 7)
+                @test isdup(e, 8)
+                @test isdup(e, 9)
                 @test !isdup(e, 10)
+                @test isdup(e, 11)
+                @test !isdup(e, 12)
             end
         end
 
@@ -810,6 +814,7 @@ end
                 e = _qga_end()
                 receive_and_ack_10!(e, T)
                 @test e.conn.spaces[3].last_ack_largest == 10
+                @test !_qga_ack_queued(e, T)
                 e.conn.spaces[3].ack_floor = 11
                 _qga_rx!(e, 11, T)
                 @test _qga_ack_out!(e, T) === nothing
@@ -818,6 +823,7 @@ end
                 e = _qga_end()
                 receive_and_ack_10!(e, T)
                 @test e.conn.spaces[3].last_ack_largest == 10
+                @test !_qga_ack_queued(e, T)
                 e.conn.spaces[3].ack_floor = 11
                 _qga_rx!(e, 12, T)
                 ack = _qga_ack_out!(e, T)
@@ -828,6 +834,7 @@ end
                 # quic-go's error is a duplicate here: dropped, not acknowledged.
                 e = _qga_end()
                 QGA._ignore_below!(e.conn.spaces[3].received, Int64(7))
+                @test 4 in e.conn.spaces[3].received  # IsPotentiallyDuplicate(4)
                 @test !_qga_rx!(e, 4, T)
                 @test isempty(_qga_ranges(e))
                 @test !e.conn.spaces[3].ack_pending
@@ -1333,28 +1340,28 @@ end
                 # GetLowestPacketNotConfirmedAcked is the space's ack_floor.
                 function more_packets()
                     e = ack_ctx()
-                    _qga_sent!(e, 3, 13; time = T, ack_largest = 100)
-                    _qga_sent!(e, 3, 14; time = T, ack_largest = 200)
-                    _qga_sent!(e, 3, 15; time = T)
+                    _qga_sent!(e, 3, 10; time = T, ack_largest = 100)
+                    _qga_sent!(e, 3, 11; time = T, ack_largest = 200)
+                    _qga_sent!(e, 3, 12; time = T)
                     return e
                 end
                 @testset "determines which ACK we have received an ACK for" begin
                     e = more_packets()
-                    @test _qga_ack!(e, 3, [13:15], T) === nothing
+                    @test _qga_ack!(e, 3, [10:12], T) === nothing
                     @test e.conn.spaces[3].ack_floor == 201
                 end
                 @testset "doesn't do anything when the acked packet didn't contain an ACK" begin
                     e = more_packets()
-                    @test _qga_ack!(e, 3, [13:13], T) === nothing
+                    @test _qga_ack!(e, 3, [10:10], T) === nothing
                     @test e.conn.spaces[3].ack_floor == 101
-                    @test _qga_ack!(e, 3, [15:15], T) === nothing
+                    @test _qga_ack!(e, 3, [12:12], T) === nothing
                     @test e.conn.spaces[3].ack_floor == 101
                 end
                 @testset "doesn't decrease the value" begin
                     e = more_packets()
-                    @test _qga_ack!(e, 3, [14:14], T) === nothing
+                    @test _qga_ack!(e, 3, [11:11], T) === nothing
                     @test e.conn.spaces[3].ack_floor == 201
-                    @test _qga_ack!(e, 3, [13:13], T) === nothing
+                    @test _qga_ack!(e, 3, [10:10], T) === nothing
                     @test e.conn.spaces[3].ack_floor == 201
                 end
             end
