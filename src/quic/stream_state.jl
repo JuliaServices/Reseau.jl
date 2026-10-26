@@ -48,8 +48,11 @@ One open stream. `send` is `nothing` on a stream only the peer sends on, and
 flow-control limit for the stream, `recv_max` the one advertised to it. The
 `reset_*` fields track this endpoint abandoning its send side (RESET_STREAM),
 `stop_sending_*` its receive side (STOP_SENDING); `peer_*` record what the
-peer did. `recv_done` means the application has seen the receive side end.
-`queued` means the stream is in the connection's send queue.
+peer did. `recv_done` means the receive side is over for this endpoint: the
+application has seen it end, or stopped it and its final size is known.
+`blocked_at` is the stream limit last reported with STREAM_DATA_BLOCKED (-1
+for none), which `blocked_pending` means is still to be sent. `queued` means
+the stream is in the connection's send queue.
 """
 mutable struct _Stream
     id::UInt64
@@ -70,12 +73,14 @@ mutable struct _Stream
     # write): until then the stream is kept so writes report it.
     stop_seen::Bool
     recv_done::Bool
+    blocked_at::Int64
+    blocked_pending::Bool
     queued::Bool
 end
 
 _Stream(id::UInt64, send, recv, send_max::Int64, recv_max::Int64) = _Stream(
     id, send, recv, send_max, recv_max, false,
-    _NO_CODE, Int64(0), false, false, _NO_CODE, false, _NO_CODE, _NO_CODE, false, false, false,
+    _NO_CODE, Int64(0), false, false, _NO_CODE, false, _NO_CODE, _NO_CODE, false, false, Int64(-1), false, false,
 )
 
 """
@@ -84,7 +89,8 @@ _Stream(id::UInt64, send, recv, send_max::Int64, recv_max::Int64) = _Stream(
 A frame in a packet awaiting acknowledgment, as much of it as is needed to act
 when the packet is acknowledged or lost: `kind` is one of the `_SF_*`
 constants; CRYPTO and STREAM frames record their byte range as `offset` and
-`len`, and STREAM frames whether they carried the FIN.
+`len`, and STREAM frames whether they carried the FIN. The *_BLOCKED frames
+record the limit they reported as `offset`.
 """
 struct _SentFrame
     kind::UInt8
@@ -104,6 +110,11 @@ const _SF_MAX_STREAMS_UNI = 0x07
 const _SF_RESET_STREAM = 0x08
 const _SF_STOP_SENDING = 0x09
 const _SF_PING = 0x0a
+const _SF_DATA_BLOCKED = 0x0b
+const _SF_STREAM_DATA_BLOCKED = 0x0c
+const _SF_STREAMS_BLOCKED_BIDI = 0x0d
+const _SF_STREAMS_BLOCKED_UNI = 0x0e
+const _SF_PATH_RESPONSE = 0x0f
 
 _SentFrame(kind::UInt8, stream_id::UInt64 = UInt64(0)) = _SentFrame(kind, stream_id, Int64(0), Int64(0), false)
 

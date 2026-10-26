@@ -13,8 +13,10 @@
 # `_qcn_inject!` and what a side sends is decrypted with its peer's keys), or
 # the public `Reseau.QUIC.Stream` API over loopback UDP for blocking reads,
 # writes, deadlines and accepts. Testset names are quic-go's Describe/Context/It
-# text. Where our behavior differs from quic-go's the assertion of quic-go's
-# behavior is kept as `@test_broken` with a `# BUG?:` note.
+# text. Where our behavior differs from quic-go's on purpose, a `# Differs
+# from quic-go:` note says why and the test asserts ours; otherwise the
+# assertion of quic-go's behavior is kept as `@test_broken` with a `# BUG?:`
+# note.
 #
 # Adaptations:
 # - Stream IDs: quic-go's unit tests use stream 1337 in isolation; here a
@@ -77,7 +79,20 @@ _qgs_vl(x) = QGS._varint_length(UInt64(x))
 # ---------------------------------------------------------------------------
 # Frame encoding and decoding.
 
-_qgs_sf(id, off, data; fin = false) = (b = UInt8[]; QGS._append_stream_frame!(b, UInt64(id), UInt64(off), data; fin); b)
+function _qgs_sf(id, off, data; fin = false)
+    b = UInt8[]
+    if isempty(data) && !fin
+        # quic-go's tests hand such frames to a stream directly; our encoder
+        # refuses to write them, so write the bytes here.
+        push!(b, off > 0 ? 0x0e : 0x0a)
+        QGS._append_varint!(b, UInt64(id))
+        off > 0 && QGS._append_varint!(b, UInt64(off))
+        push!(b, 0x00)
+        return b
+    end
+    QGS._append_stream_frame!(b, UInt64(id), UInt64(off), data; fin)
+    return b
+end
 _qgs_rst(id, code, final) = (b = UInt8[]; QGS._append_reset_stream_frame!(b, UInt64(id), UInt64(code), UInt64(final)); b)
 _qgs_ss(id, code) = (b = UInt8[]; QGS._append_stop_sending_frame!(b, UInt64(id), UInt64(code)); b)
 _qgs_msd(id, max) = (b = UInt8[]; QGS._append_max_stream_data_frame!(b, UInt64(id), UInt64(max)); b)
@@ -410,12 +425,6 @@ _qgs_near(t_ns, deadline_ns) = deadline_ns - 2_000_000 <= t_ns <= deadline_ns + 
 const _QGS_BLOCKING_WRITE = QGS._SEND_BUFFER_LIMIT + 5000
 const _QGS_SMALL_WINDOW = (; max_stream_data = 1000)
 
-# Callers blocked in open_stream are woken together and race for a new
-# stream. On one thread they run in the order they blocked, the order quic-go
-# guarantees; with more threads the order is not deterministic, so it is only
-# checked on one thread.
-_qgs_fifo(ok::Bool) = Threads.nthreads() == 1 ? (@test ok) : (@test_skip ok)
-
 # Lets the peer see stream `s` by writing a byte, and accepts it there.
 function _qgs_accept_peer(s, peer_conn)
     write(s, UInt8[0x2a])
@@ -513,9 +522,10 @@ end
                 @test length(s.recv.reassembly.fragments) + 1 == 1000
                 @test h.server.error === nothing
                 _qcn_inject!(h, true, _qgs_sf(0, 1000 * 7 + 100, Vector{UInt8}("foobar")))
-                # BUG?: quic-go fails the connection ("too many gaps in received data");
-                # we hold any number of fragments, bounded only by flow control.
-                @test_broken h.server.error !== nothing
+                # "too many gaps in received data", closed with INTERNAL_ERROR
+                # as quic-go does.
+                @test h.server.error !== nothing
+                @test _qgs_code(h.server) == QGS._INTERNAL_ERROR
             end
         end
     end
@@ -1034,14 +1044,12 @@ end
                 QGS._stream_stop_sending!(h.server, rid, UInt64(1234))
                 recv!(h, _qgs_sf(rid, 1000, UInt8[]; fin = true))
                 @test h.server.error === nothing
-                # BUG?: quic-go completes the stream here (its credit and stream
-                # count return to the peer); ours waits for the application to
-                # read, which the public API never does after stop_sending!.
-                @test_broken !haskey(h.server.streams, rid)
-                # BUG?: quic-go abandons the flow controller, returning the 1000
-                # bytes of final size to the connection window; ours never counts
-                # bytes that did not arrive as consumed (RFC 9000 Section 4.5).
-                @test_broken h.server.data_consumed >= 1000
+                # The stream completes (its credit and stream count return to
+                # the peer) without the application reading.
+                @test !haskey(h.server.streams, rid)
+                # The 1000 bytes of final size return to the connection window,
+                # though they never arrived (RFC 9000 Section 4.5).
+                @test h.server.data_consumed >= 1000
             end
 
             @testset "handles duplicate FinBits after the stream was canceled" begin
@@ -1106,11 +1114,9 @@ end
                 @test h.server.error === nothing
                 # The final size is credited to the connection window (Abandon).
                 @test h.server.data_consumed == 42
-                # BUG?: quic-go completes the stream on the RESET_STREAM; ours
-                # waits for a read (see the API test of the same name).
-                @test_broken !haskey(h.server.streams, rid)
-                # The stop was local, so the API reports StreamStoppedError.
-                @test h.server.streams[rid].stop_sending_code == 1234
+                # The stream completes on the RESET_STREAM, without a read.
+                @test !haskey(h.server.streams, rid)
+                @test h.server.peer_closed_uni == 1
                 r = readn(h, 1)
                 @test isempty(r.data) && r.fin
             end
@@ -1261,9 +1267,7 @@ end
                 @test isempty(p2.stream)
                 @test !_qgs_can_send(conn, id)
                 frames = vcat(p2.frames, _qgs_flush!(h, true))
-                # BUG?: quic-go queues STREAM_DATA_BLOCKED(limit 3); we never
-                # send it (RFC 9000 Section 4.1 SHOULD).
-                @test_broken any(f -> f.type == :stream_data_blocked && f.id == id && f.limit == 3, frames)
+                @test any(f -> f.type == :stream_data_blocked && f.id == id && f.limit == 3, frames)
             end
         end
 
@@ -1859,7 +1863,10 @@ end
                 attempts_blocked = 0
                 if persp == :client
                     # Before the server's transport parameters, no streams.
-                    @test QGS._open_stream!(_QcnHarness().client) === nothing
+                    # It queues STREAMS_BLOCKED(0), sent once it has 1-RTT keys.
+                    client = _QcnHarness().client
+                    @test QGS._open_stream!(client) === nothing
+                    @test client.streams_blocked_bidi_pending && client.streams_blocked_bidi_at == 0
                     attempts_blocked += 1
                 end
                 h, me, peer, mc = map_harness(persp; peer_limits = QGS._StreamLimits(max_streams_bidi = 5, max_streams_uni = 8))
@@ -1870,10 +1877,11 @@ end
                 @test QGS._open_stream!(me; bidi = false) === nothing
                 _qcn_exchange!(h)
                 blocked = _qgs_of(_qgs_sent(h, mc, mark), :streams_blocked)
-                # BUG?: quic-go queues a STREAMS_BLOCKED frame each time a stream
-                # cannot be opened (3 here); we never send one (RFC 9000
-                # Section 4.6 SHOULD).
-                @test_broken length(blocked) + attempts_blocked == 3
+                # A STREAMS_BLOCKED frame each time a stream cannot be opened
+                # (RFC 9000 Section 4.6): 3 in quic-go's test, which also opens
+                # before the limits are known on the server's side.
+                @test sort([(f.bidi, f.limit) for f in blocked]) == [(false, 8), (true, 5)]
+                @test length(blocked) + attempts_blocked == (persp == :client ? 3 : 2)
             end
 
             @testset "handling MAX_STREAMS frames" begin
@@ -2013,10 +2021,9 @@ end
             catch ex
                 ex
             end
-            # BUG?: quic-go stops raising the limit at 2^60; we compute 2^60 + 1
-            # and building the MAX_STREAMS frame throws ArgumentError out of
-            # `_next_datagram!` (RFC 9000 Section 19.11 caps the value at 2^60).
-            @test_broken sent isa Vector && isempty(sent)
+            # The limit stops at 2^60 (RFC 9000 Section 19.11).
+            @test sent isa Vector && isempty(sent)
+            @test h.server.local_max_streams_uni == max_count
         end
     end
 
@@ -2104,8 +2111,8 @@ end
             @test all(_ -> open!(h) !== nothing, 1:6)
             @test isempty(blocked_sent!(h))
             @test open!(h) === nothing
-            # BUG?: no STREAMS_BLOCKED(6) is ever sent (RFC 9000 Section 4.6 SHOULD).
-            @test_broken [(f.bidi, f.limit) for f in blocked_sent!(h)] == [(true, 6)]
+            # RFC 9000 Section 4.6.
+            @test [(f.bidi, f.limit) for f in blocked_sent!(h)] == [(true, 6)]
         end
 
         @testset "only sends one STREAMS_BLOCKED frame for one stream ID" begin
@@ -2115,8 +2122,7 @@ end
             @test isempty(blocked_sent!(h))
             @test open!(h) === nothing
             @test open!(h) === nothing
-            # BUG?: as above.
-            @test_broken [f.limit for f in blocked_sent!(h)] == [1]
+            @test [f.limit for f in blocked_sent!(h)] == [1]
         end
 
         @testset "queues a STREAMS_BLOCKED frame when there more streams waiting for OpenStreamSync than MAX_STREAMS allows" begin
@@ -2130,8 +2136,7 @@ end
             @test open!(h) == 0
             @test open!(h) === nothing
             second_blocked = blocked_sent!(h)
-            # BUG?: as above.
-            @test_broken [f.limit for f in vcat(first_blocked, second_blocked)] == [0, 1]
+            @test [f.limit for f in vcat(first_blocked, second_blocked)] == [0, 1]
         end
     end
 
@@ -2163,8 +2168,8 @@ end
         @testset "opens streams" begin
             ids, limits, blocked, num = run_limits(Xoshiro(6), 100, Int[])
             @test length(ids) == num
-            # BUG?: quic-go sends STREAMS_BLOCKED at each limit it hits.
-            @test_broken blocked == limits
+            # STREAMS_BLOCKED at each limit hit.
+            @test blocked == limits
         end
 
         @testset "opens streams, when some of them are getting canceled" begin
@@ -2172,8 +2177,7 @@ end
             canceled = Set(rand(rng, 1:100, 10))
             ids, limits, blocked, num = run_limits(rng, 100, canceled)
             @test length(ids) == 100 - length(canceled)
-            # BUG?: as above.
-            @test_broken blocked == limits
+            @test blocked == limits
         end
     end
 end
@@ -2267,9 +2271,11 @@ end
             # We reserve 17 bytes for each MAX_STREAM_DATA frame, so the last
             # few bytes of the packet stay empty.
             @test length(p.buf) > max_size - 17
-            # BUG?: quic-go packs max_size ÷ frame length frames (acceptable:
-            # our reservation wastes at most 16 bytes).
-            @test_broken length(p.frames) == num_frames
+            # Differs from quic-go: it packs max_size ÷ frame length frames,
+            # sizing each frame exactly. We reserve the largest frame's 17
+            # bytes, which wastes at most 16 bytes of a packet and saves
+            # encoding each frame twice; a frame left out goes in the next.
+            @test length(p.frames) == (max_size - 17) ÷ frame_len + 1
             rest = 0
             while QGS._app_wants_to_send(conn)
                 rest += length(app_frames!(conn, max_size).frames)
@@ -2289,12 +2295,40 @@ end
             responses = _qgs_of(p1.frames, :path_response)
             @test responses[1].data == 0x0102030405060708
             @test length(_qgs_of(p1.frames, :max_data)) == 1
-            # BUG?: quic-go puts one PATH_RESPONSE in each packet; ours sends all
-            # queued responses in the first.
-            @test_broken length(responses) == 1
+            @test length(responses) == 1
             p2 = app_frames!(conn, 1 << 20)
-            @test_broken [f.data for f in _qgs_of(p2.frames, :path_response)] == [0x0203040506070809]
+            @test [f.data for f in _qgs_of(p2.frames, :path_response)] == [0x0203040506070809]
             @test !QGS._app_wants_to_send(conn)
+        end
+
+        # Not in quic-go's framer tests (its packer pads): RFC 9000 Section
+        # 8.2.2.
+        @testset "pads a datagram with a PATH_RESPONSE to 1200 bytes" begin
+            h = _qgs_handshake()
+            conn = h.client
+            _qcn_inject!(h, false, _qgs_pc(0x0102030405060708))
+            d = QGS._next_datagram!(conn, h.now)
+            @test d !== nothing
+            @test any(f -> f.type == :path_response, _qgs_decode(h, true, d))
+            @test length(d) >= QGS._MAX_DATAGRAM_SIZE
+            # Without a PATH_RESPONSE a small packet stays small.
+            conn.max_data_pending = true
+            d = QGS._next_datagram!(conn, h.now)
+            @test d !== nothing && length(d) < 100
+        end
+
+        @testset "pads a server's PATH_RESPONSE only as far as the anti-amplification limit allows" begin
+            h = _qgs_handshake()
+            conn = h.server
+            _qcn_inject!(h, true, _qgs_pc(0x0102030405060708))
+            # As if the client's address were not yet validated, with room
+            # for 300 more bytes.
+            conn.address_validated = false
+            conn.bytes_sent = 3 * conn.bytes_received - 300
+            d = QGS._next_datagram!(conn, h.now)
+            @test d !== nothing
+            @test any(f -> f.type == :path_response, _qgs_decode(h, false, d))
+            @test length(d) == 300
         end
 
         @testset "limits the number of queued PATH_RESPONSE frames" begin
@@ -2342,9 +2376,10 @@ end
             p = app_frames!(conn, 1000)
             @test length(p.stream) == 1
             @test p.stream[1].offset == 42 && p.stream[1].data == Vector{UInt8}("foobar")
-            # BUG?: quic-go drops the Length field of a packet's last STREAM
-            # frame (acceptable: costs one or two bytes).
-            @test_broken _qgs_stream_length_fields(p.buf) == [false]
+            # Differs from quic-go: it drops the Length field of a packet's
+            # last STREAM frame. Ours keeps it, which costs one or two bytes
+            # but lets frames be appended without rewriting the one before.
+            @test _qgs_stream_length_fields(p.buf) == [true]
         end
 
         @testset "says if it has data" begin
@@ -2398,11 +2433,12 @@ end
             h, conn, id1, id2 = framer()
             w!(conn, id1, zeros(UInt8, 2 * one_frame(id1, _QGS_MIN_STREAM_FRAME)))
             w!(conn, id2, Vector{UInt8}("raboof"))
-            order = [only(app_frames!(conn, _QGS_MIN_STREAM_FRAME).stream).id for _ in 1:3]
-            # BUG?: quic-go serves stream 1, stream 2, then stream 1 again. Ours
-            # also visits stream 2 when the packet is already full, which sends
-            # it to the back of the queue, so stream 1 goes twice in a row.
-            @test_broken order == [id1, id2, id1]
+            # The stream each packet serves first. (quic-go's second packet
+            # holds only stream 2's frame, since it starts no STREAM frame
+            # with under 128 bytes left; ours fills the rest with stream 1,
+            # see "does not pop frames smaller than the minimum size".)
+            order = [first(app_frames!(conn, _QGS_MIN_STREAM_FRAME).stream).id for _ in 1:3]
+            @test order == [id1, id2, id1]
         end
 
         @testset "only dequeues data from each stream once per packet" begin
@@ -2439,23 +2475,24 @@ end
             h, conn, id1, id2 = framer(; unlimited = true)
             w!(conn, id1, zeros(UInt8, 3_000_000))
             one = Bool[]
-            exact = Bool[]
+            unused = Int[]
             for i in _QGS_MIN_STREAM_FRAME:1999
                 p = app_frames!(conn, i)
                 push!(one, length(p.stream) == 1)
-                push!(exact, length(p.buf) == i)
+                push!(unused, i - length(p.buf))
             end
             @test all(one)
-            # BUG?: quic-go fills the packet exactly; we reserve a worst-case
-            # header, leaving up to 9 bytes unused (acceptable).
-            @test_broken all(exact)
+            # Differs from quic-go: it fills the packet exactly. We reserve a
+            # worst-case header (an 8-byte offset and a 2-byte length), which
+            # leaves at most 9 bytes unused and sizes the frame in one pass.
+            @test all(u -> 0 <= u <= 9, unused)
         end
 
         @testset "pops multiple STREAM frames" begin
             h, conn, id1, id2 = framer(; unlimited = true)
             w!(conn, id2, zeros(UInt8, 3_000_000))
             two = Bool[]
-            exact = Bool[]
+            unused = Int[]
             lengths = Bool[]
             for i in (2 * _QGS_MIN_STREAM_FRAME):1999
                 # Stream 1 has a minimum-size frame's worth of data, stream 2 more.
@@ -2466,13 +2503,15 @@ end
                 QGS._queue_stream!(conn, conn.streams[id2])
                 p = app_frames!(conn, i)
                 push!(two, [f.id for f in p.stream] == [id1, id2])
-                push!(exact, length(p.buf) == i)
-                push!(lengths, _qgs_stream_length_fields(p.buf) == [true, false])
+                push!(unused, i - length(p.buf))
+                push!(lengths, _qgs_stream_length_fields(p.buf) == [true, true])
             end
             @test all(two)
-            # BUG?: as above, and the last frame keeps its Length field.
-            @test_broken all(exact)
-            @test_broken all(lengths)
+            # Differs from quic-go: as above, the worst-case header leaves at
+            # most 9 bytes unused, and the last frame keeps its Length field
+            # (see "returns STREAM frames").
+            @test all(u -> 0 <= u <= 9, unused)
+            @test all(lengths)
         end
 
         @testset "pops frames that when asked for the the minimum STREAM frame size" begin
@@ -2484,9 +2523,10 @@ end
         @testset "does not pop frames smaller than the minimum size" begin
             h, conn, id1, id2 = framer()
             w!(conn, id1, Vector{UInt8}("foobar"))
-            # BUG?: quic-go does not start a STREAM frame with fewer than 128
-            # bytes left in the packet; we do (acceptable).
-            @test_broken isempty(app_frames!(conn, _QGS_MIN_STREAM_FRAME - 1).stream)
+            # Differs from quic-go: it does not start a STREAM frame with
+            # fewer than 128 bytes left in the packet. We use whatever room
+            # is left, so small writes ride along with other frames.
+            @test length(app_frames!(conn, _QGS_MIN_STREAM_FRAME - 1).stream) == 1
         end
 
         @testset "stops iterating when the remaining size is smaller than the minimum STREAM frame size" begin
@@ -2531,9 +2571,9 @@ end
 
     @testset "only allows a probe 5 RTTs after the handshake completes" begin
         h, c = discoverer()
-        # BUG?: quic-go waits 5 RTTs after the handshake (and between probes);
-        # we probe at once (acceptable: RFC 8899 sets no such delay).
-        @test_broken !should_send(c)
+        # Differs from quic-go: it waits 5 RTTs after the handshake (and
+        # between probes). We probe at once, which RFC 8899 allows, so larger
+        # datagrams are in use sooner.
         @test should_send(c)
     end
 
@@ -2548,14 +2588,23 @@ end
     @testset "tries a lower size when a probe is lost" begin
         h, c = discoverer()
         size = get_ping!(h, c)
-        # BUG?: quic-go probes the midpoint first (1500 between 1000 and 2000);
-        # we probe the ceiling first, which most paths carry (deliberate).
-        @test_broken size == (start_mtu + max_mtu) ÷ 2
+        # Differs from quic-go: it probes the midpoint first (1500 between
+        # 1000 and 2000). We probe the ceiling first, which most paths carry,
+        # so one probe usually ends the search.
+        @test size == max_mtu
         lost!(c)
         size2 = get_ping!(h, c)
-        # BUG?: quic-go tries a lower size after one loss; we retry the same
-        # size up to `_PMTU_MAX_PROBES` times first (deliberate).
-        @test_broken size2 < size
+        # Differs from quic-go: it tries a lower size after one loss. We
+        # retry the same size up to `_PMTU_MAX_PROBES` times first, so one
+        # lost packet does not give up a size the path carries (RFC 8899
+        # Section 5.1.2's MAX_PROBES).
+        @test size2 == size
+        for _ in 3:QGS._PMTU_MAX_PROBES
+            lost!(c)
+            @test get_ping!(h, c) == size
+        end
+        lost!(c)
+        @test should_send(c) && c.pmtu_probe_size < size
     end
 
     @testset "tries a higher size and calls the callback when a probe is acknowledged" begin
@@ -2563,9 +2612,9 @@ end
         size = get_ping!(h, c)
         acked!(c)
         @test c.max_datagram_size == size
-        # BUG?: quic-go's next probe is higher (1750); our first probe was the
-        # ceiling, so discovery is already over.
-        @test_broken should_send(c) && c.pmtu_probe_size > size
+        # Differs from quic-go: its next probe is higher (1750). Our first
+        # probe was the ceiling, so discovery is already over.
+        @test !should_send(c) && c.pmtu_done
     end
 
     @testset "stops discovery after getting close enough to the MTU" begin
@@ -2575,9 +2624,10 @@ end
             push!(sizes, get_ping!(h, c))
             acked!(c)
         end
-        # BUG?: quic-go's binary search: 1500, 1750, 1875, 1937, 1968, 1984
-        # between 1000 and 2000 (from 1200: below); we hit the ceiling at once.
-        @test_broken sizes == [1600, 1800, 1900, 1950, 1975, 1987]
+        # Differs from quic-go: its binary search probes 1500, 1750, 1875,
+        # 1937, 1968, 1984 between 1000 and 2000. Ours probes the ceiling
+        # first, and the path carries it.
+        @test sizes == [max_mtu]
         @test !should_send(c)
         @test 0 <= max_mtu - c.max_datagram_size <= 20  # maxMTUDiff
     end
@@ -2663,9 +2713,8 @@ end
                     @test wait_available(p, 6)
                     QGS.set_read_deadline!(p, Int64(time_ns()) - 1_000_000_000)
                     err = _qgs_err(() -> read(p, 6))
-                    # BUG?: quic-go fails any Read after the deadline; ours only
-                    # fails reads that would wait, so this returns the data.
-                    @test_broken err isa UDGS.DeadlineExceededError
+                    # Even though the data is there.
+                    @test err isa UDGS.DeadlineExceededError
                 end
             end
 
@@ -2676,9 +2725,7 @@ end
                     reader = _qgs_spawn(() -> read(p, 6))
                     @test !_qgs_finishes(reader, 0.1)
                     QGS.set_read_deadline!(p, Int64(time_ns()) - 3_600_000_000_000)
-                    # BUG?: quic-go wakes the blocked Read; ours keeps waiting
-                    # until something else wakes it (here, the close below).
-                    @test_broken _qgs_finishes(reader, 1.0) && fetch(reader)[1] isa UDGS.DeadlineExceededError
+                    @test _qgs_finishes(reader, 1.0) && fetch(reader)[1] isa UDGS.DeadlineExceededError
                 end
             end
 
@@ -2720,9 +2767,7 @@ end
                     QGS.set_read_deadline!(p, deadline2)
                     err, t = fetch(reader)
                     @test err isa UDGS.DeadlineExceededError
-                    # BUG?: quic-go returns at the new, earlier deadline; ours at
-                    # the one in force when the read started waiting.
-                    @test_broken _qgs_near(t, deadline2)
+                    @test _qgs_near(t, deadline2)
                 end
             end
 
@@ -2863,11 +2908,12 @@ end
                     err = _qgs_err(() -> read(p, 1))
                     # The error indicates a local cancellation.
                     @test err isa QGS.StreamStoppedError && !err.remote && err.code == 1234
-                    # BUG?: quic-go completes the stream once the RESET_STREAM
-                    # arrives; through the public API ours never frees a stream
-                    # stopped locally (reads throw before the reset is consumed),
-                    # so its stream count never returns to the peer.
-                    @test_broken timedwait(() -> !haskey(srv.slot.conn.streams, id), 2) == :ok
+                    # The stream completes once the RESET_STREAM arrives, and its
+                    # stream count returns to the peer.
+                    @test timedwait(() -> lock(() -> !haskey(srv.slot.conn.streams, id), srv.ep.lock), 2) == :ok
+                    # Reads still report the local stop.
+                    err = _qgs_err(() -> read(p, 1))
+                    @test err isa QGS.StreamStoppedError && !err.remote && err.code == 1234
                 end
             end
         end
@@ -2898,9 +2944,10 @@ end
                     s = QGS.open_stream(c)
                     QGS.set_write_deadline!(s, Int64(time_ns()) - 1_000_000_000)
                     err = _qgs_err(() -> write(s, Vector{UInt8}("foobar")))
-                    # BUG?: quic-go fails any Write after the deadline; ours only
-                    # fails writes that would wait, so this one is buffered.
-                    @test_broken err isa UDGS.DeadlineExceededError
+                    # Even though it need not wait.
+                    @test err isa UDGS.DeadlineExceededError
+                    # The FIN goes out regardless, as quic-go's Close does.
+                    @test _qgs_err(() -> closewrite(s)) === nothing
                 end
             end
 
@@ -2922,8 +2969,7 @@ end
                     writer = blocking_write(s)
                     @test !_qgs_finishes(writer, 0.2)
                     QGS.set_write_deadline!(s, Int64(time_ns()) - 3_600_000_000_000)
-                    # BUG?: as for reads, the blocked Write is not woken.
-                    @test_broken _qgs_finishes(writer, 1.0) && fetch(writer)[1] isa UDGS.DeadlineExceededError
+                    @test _qgs_finishes(writer, 1.0) && fetch(writer)[1] isa UDGS.DeadlineExceededError
                 end
             end
 
@@ -2969,8 +3015,7 @@ end
                     QGS.set_write_deadline!(s, deadline2)
                     err, t = fetch(writer)
                     @test err isa UDGS.DeadlineExceededError
-                    # BUG?: as for reads.
-                    @test_broken _qgs_near(t, deadline2)
+                    @test _qgs_near(t, deadline2)
                 end
             end
 
@@ -3107,8 +3152,7 @@ end
             _qgs_api() do c, srv
                 s = QGS.open_stream(c)
                 set_deadline!(s, Int64(time_ns()) - 1_000_000_000)
-                # BUG?: as in Send Stream: a write that need not wait succeeds.
-                @test_broken _qgs_err(() -> write(s, Vector{UInt8}("foobar"))) isa UDGS.DeadlineExceededError
+                @test _qgs_err(() -> write(s, Vector{UInt8}("foobar"))) isa UDGS.DeadlineExceededError
             end
         end
 
@@ -3119,8 +3163,7 @@ end
                 write(s, Vector{UInt8}("foobar"))
                 @test timedwait(() -> bytesavailable(p) >= 6, 10) == :ok
                 set_deadline!(p, Int64(time_ns()) - 1_000_000_000)
-                # BUG?: as in Receive Stream: a read that need not wait succeeds.
-                @test_broken _qgs_err(() -> read(p, 6)) isa UDGS.DeadlineExceededError
+                @test _qgs_err(() -> read(p, 6)) isa UDGS.DeadlineExceededError
             end
         end
     end
@@ -3255,7 +3298,7 @@ end
                 @test !_qgs_finishes(other, 0.1)
                 release!(fetch(first_done), srv)
                 @test _qgs_finishes(other, 10)
-                _qgs_fifo(QGS.stream_id(fetch(t1)) == 4 && QGS.stream_id(fetch(t2)) == 8)
+                @test QGS.stream_id(fetch(t1)) == 4 && QGS.stream_id(fetch(t2)) == 8
             end
         end
 
@@ -3273,7 +3316,7 @@ end
                 first_done, other = istaskdone(t1) ? (t1, t3) : (t3, t1)
                 release!(fetch(first_done), srv)
                 @test _qgs_finishes(other, 10)
-                _qgs_fifo(QGS.stream_id(fetch(t1)) == 4 && QGS.stream_id(fetch(t3)) == 8)
+                @test QGS.stream_id(fetch(t1)) == 4 && QGS.stream_id(fetch(t3)) == 8
             end
         end
 
@@ -3300,7 +3343,7 @@ end
                 opened = filter(istaskdone, collect(tasks))
                 @test length(opened) == 2
                 @test sort([QGS.stream_id(fetch(t)) for t in opened]) == [8, 12]
-                _qgs_fifo(istaskdone(t1) && istaskdone(t2))
+                @test istaskdone(t1) && istaskdone(t2)
                 close(c)
                 @test all(t -> _qgs_finishes(t, 10), tasks)
                 @test count(t -> fetch(t) isa QGS.ConnectionError, tasks) == 1
@@ -3322,13 +3365,11 @@ end
                     QGS._wake!(c.slot, false)
                     _qgs_err(() -> QGS.open_stream(c; deadline_ns = 1))
                 end
-                # BUG?: quic-go fails OpenStream while an OpenStreamSync call is
-                # queued, so the new stream goes to the caller that waited; ours
-                # hands it to whoever asks first.
-                @test_broken err isa UDGS.DeadlineExceededError
-                @test !_qgs_finishes(sync, 0.1)
-                close(c)
+                # OpenStream fails while an OpenStreamSync call is queued, so
+                # the new stream goes to the caller that waited.
+                @test err isa UDGS.DeadlineExceededError
                 @test _qgs_finishes(sync, 10)
+                @test QGS.stream_id(fetch(sync)) == 4
             end
         end
 

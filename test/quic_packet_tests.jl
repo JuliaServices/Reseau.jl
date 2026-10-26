@@ -136,7 +136,12 @@ end
         @test h.version == 0x00000000
         @test _qpk_bytes(vn, h.dcid) == dcid
         @test _qpk_bytes(vn, h.scid) == _QPK_SCID
-        @test QPK._version_negotiation_versions(vn, h) == versions
+        # The versions given, in order, and one greased version among them.
+        listed = QPK._version_negotiation_versions(vn, h)
+        @test length(listed) == length(versions) + 1
+        @test any(eachindex(listed)) do i
+            listed[i] & 0x0f0f0f0f == 0x0a0a0a0a && deleteat!(copy(listed), i) == versions
+        end
         # A version list that is not a whole number of versions is malformed.
         @test QPK._parse_packet(vn, 1, length(vn) - 1, 0) === nothing
         @test QPK._parse_packet(vn, 1, h.scid.stop, 0) === nothing  # no versions at all

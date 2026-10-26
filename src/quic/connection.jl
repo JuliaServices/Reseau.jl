@@ -198,9 +198,18 @@ Base.@kwdef mutable struct _Connection
     peer_closed_uni::Int64 = Int64(0)
     max_streams_bidi_pending::Bool = false
     max_streams_uni_pending::Bool = false
+    # The peer's stream limits last reported with STREAMS_BLOCKED (-1 for
+    # none), and whether that frame is still to be sent.
+    streams_blocked_bidi_at::Int64 = Int64(-1)
+    streams_blocked_uni_at::Int64 = Int64(-1)
+    streams_blocked_bidi_pending::Bool = false
+    streams_blocked_uni_pending::Bool = false
     accept_queue::Vector{UInt64} = UInt64[]
     # Streams with frames to send, served round robin.
     send_queue::Vector{UInt64} = UInt64[]
+    # STOP_SENDING frames (stream ID, error code) of streams freed before
+    # they went out.
+    stop_sending_queue::Vector{Tuple{UInt64, UInt64}} = Tuple{UInt64, UInt64}[]
     # Connection flow control (RFC 9000 Section 4.1): what this endpoint may
     # send and has sent, and the limit it set for the peer, what the peer has
     # sent against it, and what the application has consumed.
@@ -210,6 +219,10 @@ Base.@kwdef mutable struct _Connection
     data_received::Int64 = Int64(0)
     data_consumed::Int64 = Int64(0)
     max_data_pending::Bool = false
+    # The peer's limit last reported with DATA_BLOCKED (-1 for none), and
+    # whether that frame is still to be sent.
+    data_blocked_at::Int64 = Int64(-1)
+    data_blocked_pending::Bool = false
     path_responses::Vector{UInt64} = UInt64[]
     # Where datagrams are built; see `_build_datagram!`.
     tx_buf::Vector{UInt8} = sizehint!(UInt8[], _MAX_DATAGRAM_SIZE)
@@ -1081,6 +1094,7 @@ function _build_datagram!(conn::_Connection, now::Int64)::Union{Nothing, Vector{
     buf = empty!(conn.tx_buf)
     packets = _PendingPacket[]
     padded = false
+    path_padded = false
     for idx in 1:3
         wants[idx] || continue
         space = conn.spaces[idx]
@@ -1137,9 +1151,13 @@ function _build_datagram!(conn::_Connection, now::Int64)::Union{Nothing, Vector{
         idx == _APPLICATION_SPACE && conn.key_phase_first_sent < 0 && (conn.key_phase_first_sent = pn)
         ack_eliciting && idx == _INITIAL_SPACE && (padded = true)
         idx == _INITIAL_SPACE && !conn.is_server && (padded = true)
+        # Datagrams with a PATH_RESPONSE are padded to 1200 bytes too, as far
+        # as the anti-amplification limit allows (RFC 9000 Section 8.2.2).
+        idx == _APPLICATION_SPACE && any(f -> f.kind == _SF_PATH_RESPONSE, frames) && (path_padded = true)
     end
     isempty(packets) && return nothing
     padded && _pad_last_packet!(buf, packets, _MAX_DATAGRAM_SIZE)
+    path_padded && _pad_last_packet!(buf, packets, min(_MAX_DATAGRAM_SIZE, max_size))
     _seal_datagram!(conn, buf, packets, now)
     for (i, p) in enumerate(packets)
         p.ack_eliciting || continue

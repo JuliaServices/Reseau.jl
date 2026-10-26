@@ -84,11 +84,16 @@ _qgwh_key_phase(buf::Vector{UInt8}, h) = (buf[h.first] & 0x04) != 0  # as connec
     @testset "TestParseConnIDLongHeaderPacket" begin
         b = _qgwh_long_header(_QGWH_HANDSHAKE, QGWH._QUIC_V1, UInt8[0xde, 0xca, 0xfb, 0xad], UInt8[1, 2, 3, 4, 5, 6]; pn_len = 2)
         h = _qgwh_parse(b, 8)
-        # BUG?: quic-go reads the DCID of a long header without looking at
-        # Length; we parse the whole header and reject Length 0 (too short to
-        # hold a packet number), so the packet is not routed.
-        @test_broken h !== nothing
-        h === nothing || @test b[h.dcid] == UInt8[0xde, 0xca, 0xfb, 0xad]
+        # Differs from quic-go: it reads the DCID of a long header without
+        # looking at Length. We parse the whole header to route a packet, and
+        # Length 0 cannot even hold a packet number, so the packet could never
+        # be opened; dropping it before routing loses nothing.
+        @test h === nothing
+        # With a Length that covers the packet number it routes.
+        b2 = _qgwh_long_header(_QGWH_HANDSHAKE, QGWH._QUIC_V1, UInt8[0xde, 0xca, 0xfb, 0xad], UInt8[1, 2, 3, 4, 5, 6];
+                               pn_len = 2, length = 2)
+        h2 = _qgwh_parse(b2, 8)
+        @test h2 !== nothing && b2[h2.dcid] == UInt8[0xde, 0xca, 0xfb, 0xad]
     end
 
     @testset "TestParseConnIDTooLong" begin
@@ -100,9 +105,9 @@ _qgwh_key_phase(buf::Vector{UInt8}, h) = (buf[h.first] & 0x04) != 0  # as connec
         b = _qgwh_long_header(_QGWH_HANDSHAKE, QGWH._QUIC_V1, UInt8[0xde, 0xca, 0xfb, 0xad, 0x13, 0x37],
                               UInt8[1, 2, 3, 4, 5, 6, 8, 9]; pn_len = 2)
         data = b[1:(end - 2)]  # cut the packet number
-        # BUG?: as in TestParseConnIDLongHeaderPacket, Length 0 makes us drop
-        # the header where quic-go still returns its DCID.
-        @test_broken _qgwh_parse(data, 8) !== nothing
+        # Differs from quic-go: as in TestParseConnIDLongHeaderPacket, Length
+        # 0 makes us drop the header where quic-go still returns its DCID.
+        @test _qgwh_parse(data, 8) === nothing
         for i in 0:(1 + 4 + 1 + 6 - 1)
             @test _qgwh_parse(data[1:i], 8) === nothing
         end
@@ -188,26 +193,28 @@ _qgwh_key_phase(buf::Vector{UInt8}, h) = (buf[h.first] & 0x04) != 0  # as connec
     @testset "TestParseLongHeaderWithoutDestinationConnectionID" begin
         data = vcat(UInt8[0xc0 ⊻ 0x1 << 4], _qgwh_u32(QGWH._QUIC_V1), UInt8[0], UInt8[4], UInt8[0xde, 0xad, 0xbe, 0xef],
                     _qgwh_v(0), UInt8[0xde, 0xca, 0xfb, 0xad])
+        # Differs from quic-go: Length is 0, which cannot hold a packet number
+        # (see TestParseConnIDLongHeaderPacket); quic-go parses the header, we
+        # reject it. With Length 4 we parse it as quic-go does.
+        @test _qgwh_parse(data) === nothing
+        data[end - 4] = 0x04
         h = _qgwh_parse(data)
-        # BUG?: Length is 0; quic-go parses the header, we reject it.
-        @test_broken h !== nothing
-        if h !== nothing
-            @test h.type == QGWHT.ZeroRTT
-            @test data[h.scid] == UInt8[0xde, 0xad, 0xbe, 0xef]
-            @test isempty(h.dcid)
-        end
+        @test h !== nothing
+        @test h.type == QGWHT.ZeroRTT
+        @test data[h.scid] == UInt8[0xde, 0xad, 0xbe, 0xef]
+        @test isempty(h.dcid)
     end
 
     @testset "TestParseLongHeaderWithoutSourceConnectionID" begin
         data = vcat(UInt8[0xc0 ⊻ 0x2 << 4], _qgwh_u32(QGWH._QUIC_V1), UInt8[10], UInt8.(1:10), UInt8[0],
                     _qgwh_v(0), UInt8[0xde, 0xca, 0xfb, 0xad])
+        # Differs from quic-go: Length 0, as in the test above.
+        @test _qgwh_parse(data) === nothing
+        data[end - 4] = 0x04
         h = _qgwh_parse(data)
-        # BUG?: Length is 0; quic-go parses the header, we reject it.
-        @test_broken h !== nothing
-        if h !== nothing
-            @test isempty(h.scid)
-            @test data[h.dcid] == UInt8.(1:10)
-        end
+        @test h !== nothing
+        @test isempty(h.scid)
+        @test data[h.dcid] == UInt8.(1:10)
     end
 
     @testset "TestErrorOnTooLongDestinationConnectionID" begin
@@ -218,14 +225,15 @@ _qgwh_key_phase(buf::Vector{UInt8}, h) = (buf[h.first] & 0x04) != 0  # as connec
 
     @testset "TestParseLongHeaderWith2BytePacketNumber" begin
         data = vcat(UInt8[0xc0 ⊻ 0x1], _qgwh_u32(QGWH._QUIC_V1), UInt8[0x0, 0x0], _qgwh_v(0), _qgwh_v(0), UInt8[0x1, 0x23])
+        # Differs from quic-go: Length is 0 (the packet number lies past it);
+        # quic-go parses the header and the packet number, we reject the
+        # header. With a Length covering the packet number we read it.
+        @test _qgwh_parse(data) === nothing
+        data[end - 2] = 0x02
         h = _qgwh_parse(data)
-        # BUG?: Length is 0 (the packet number lies past it); quic-go parses
-        # the header and the packet number, we reject the header.
-        @test_broken h !== nothing
-        if h !== nothing
-            @test _qgwh_pn(data, h) == (2, 0x123)
-            @test h.pn_offset + 1 == length(data)
-        end
+        @test h !== nothing
+        @test _qgwh_pn(data, h) == (2, 0x123)
+        @test h.pn_offset + 1 == length(data)
     end
 
     @testset "TestParseRetryPacket" begin
@@ -275,10 +283,15 @@ _qgwh_key_phase(buf::Vector{UInt8}, h) = (buf[h.first] & 0x04) != 0  # as connec
         hdr_len = length(data)
         append!(data, UInt8[0xde, 0xad, 0xbe, 0xef])  # packet number
         # quic-go parses each header (NoError) and then fails to read the
-        # packet number (io.EOF). We already reject the header for Length 0,
-        # so the packet number is never read either.
-        # BUG?: Length 0 header rejected where quic-go accepts it.
-        @test_broken all(i -> _qgwh_parse(data[1:i]) !== nothing, hdr_len:(length(data) - 1))
+        # packet number (io.EOF). Differs from quic-go: we already reject the
+        # header for Length 0 (see TestParseConnIDLongHeaderPacket), so the
+        # packet number is never read either.
+        @test all(i -> _qgwh_parse(data[1:i]) === nothing, hdr_len:(length(data) - 1))
+        # With a Length covering the packet number, a truncated one is the
+        # EOF quic-go reports.
+        data[hdr_len] = 0x04
+        @test all(i -> _qgwh_parse(data[1:i]) === nothing, hdr_len:(length(data) - 1))
+        @test _qgwh_parse(data) !== nothing
     end
 
     @testset "TestParseRetryEOF" begin
@@ -465,9 +478,8 @@ _qgwh_key_phase(buf::Vector{UInt8}, h) = (buf[h.first] & 0x04) != 0  # as connec
         cid = UInt8.(1:8)
         versions = UInt32[0x22334455]
         data = QGWH._version_negotiation_packet(cid, cid, versions)
-        # quic-go removes 8 bytes because its composer adds a greased version;
-        # ours does not, so remove the 4 bytes of the one listed version.
-        data = data[1:(end - 4 * length(versions))]
+        # The listed version and the greased one the composer adds.
+        data = data[1:(end - 4 * (length(versions) + 1))]
         @test _qgwh_parse(data) === nothing  # empty version list
     end
 
@@ -488,9 +500,8 @@ _qgwh_key_phase(buf::Vector{UInt8}, h) = (buf[h.first] & 0x04) != 0  # as connec
             @test v in supported
         end
         reserved = filter(v -> !(v in versions), supported)
-        # BUG?: quic-go adds one greased (0x?a?a?a?a) version to every Version
-        # Negotiation packet; we list only the supported versions.
-        @test_broken length(supported) == length(versions) + 1
-        @test_broken length(reserved) == 1 && reserved[1] != 0 && reserved[1] & 0x0f0f0f0f == 0x0a0a0a0a
+        # One greased (0x?a?a?a?a) version is added (RFC 9000 Section 6.3).
+        @test length(supported) == length(versions) + 1
+        @test length(reserved) == 1 && reserved[1] != 0 && reserved[1] & 0x0f0f0f0f == 0x0a0a0a0a
     end
 end

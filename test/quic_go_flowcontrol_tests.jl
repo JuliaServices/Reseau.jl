@@ -7,8 +7,7 @@ using Reseau
 #   internal/flowcontrol/stream_flow_controller_test.go
 #
 # Each Go `It` is a @testset named after its Describe/Context/It path. Where
-# we behave differently from Go, the Go expectation is kept as @test_broken
-# with a `# BUG?:` note.
+# we behave differently from Go, a `# Differs from quic-go:` note says why.
 #
 # How quic-go's flow controllers map onto a `_Connection`:
 #   - receive side, stream: receiveWindow is `s.recv_max`, receiveWindowSize
@@ -229,21 +228,19 @@ const _QGF_WINDOW_UPDATE_THRESHOLD = 0.25  # protocol.WindowUpdateThreshold
                 # Data waits beyond the limit, as when Go's stream asks.
                 frames = _qgf_send!(conn, s, 150)
                 @test _qgf_bytes_sent(conn, s, level) == 100
-                # BUG?: we never send STREAM_DATA_BLOCKED or DATA_BLOCKED (RFC
-                # 9000 Section 4.1: a sender SHOULD when blocked with data to send).
-                @test_broken _qgf_blocked_at(frames, level, 100)
+                # STREAM_DATA_BLOCKED or DATA_BLOCKED (RFC 9000 Section 4.1).
+                @test _qgf_blocked_at(frames, level, 100)
             end
 
             @testset "doesn't say that it's newly blocked multiple times for the same offset" begin
                 conn, s = _qgf_sender_at(level, 100)
                 frames = _qgf_send!(conn, s, 150)
-                # BUG?: no blocked frames, as above.
-                @test_broken _qgf_blocked_at(frames, level, 100)
+                @test _qgf_blocked_at(frames, level, 100)
                 @test !_qgf_any_blocked(_qgf_build!(conn), level)
                 _qgf_update_send_window!(conn, s, level, 150)
                 frames = _qgf_send!(conn, s, 50)
                 @test _qgf_bytes_sent(conn, s, level) == 150
-                @test_broken _qgf_blocked_at(frames, level, 150)
+                @test _qgf_blocked_at(frames, level, 150)
             end
         end
 
@@ -265,11 +262,8 @@ const _QGF_WINDOW_UPDATE_THRESHOLD = 0.25  # protocol.WindowUpdateThreshold
                 remaining = window_size - consumed
                 read_position = receive_window - remaining
                 offset = _qgf_set_read_and_update!(conn, level, read_position)
-                # BUG?: acceptable: we return credit once half the window is
-                # consumed, quic-go once a quarter is (RFC 9000 Section 4.2
-                # leaves the threshold to the receiver).
-                @test_broken offset == read_position + window_size
-                @test_broken _qgf_receive_window(conn, level) == read_position + window_size
+                @test offset == read_position + window_size
+                @test _qgf_receive_window(conn, level) == read_position + window_size
             end
 
             @testset "doesn't trigger a window update when not necessary" begin
@@ -318,12 +312,9 @@ const _QGF_WINDOW_UPDATE_THRESHOLD = 0.25  # protocol.WindowUpdateThreshold
                     _qgf_read!(conn, 1)
                     @test _qgf_conn_update!(conn) == 0
                     _qgf_read!(conn, 29)
-                    # BUG?: acceptable: half-window threshold, not a quarter
-                    # (see "triggers a window update when necessary").
-                    @test_broken _qgf_conn_update!(conn) != 0
+                    @test _qgf_conn_update!(conn) != 0
                     _qgf_read!(conn, 1)
-                    # BUG?: ours sends its first update one byte later, here.
-                    @test_broken _qgf_conn_update!(conn) == 0
+                    @test _qgf_conn_update!(conn) == 0
                 end
 
                 @testset "gets a window update" begin
@@ -332,8 +323,7 @@ const _QGF_WINDOW_UPDATE_THRESHOLD = 0.25  # protocol.WindowUpdateThreshold
                     old_offset = conn.data_consumed
                     data_read = window_size ÷ 2 - 1  # make sure not to trigger auto-tuning
                     _qgf_read!(conn, data_read)
-                    # BUG?: acceptable: half-window threshold, not a quarter.
-                    @test_broken _qgf_conn_update!(conn) == old_offset + data_read + 60
+                    @test _qgf_conn_update!(conn) == old_offset + data_read + 60
                 end
             end
         end
@@ -453,12 +443,9 @@ const _QGF_WINDOW_UPDATE_THRESHOLD = 0.25  # protocol.WindowUpdateThreshold
                     _qgf_read!(conn, 5)
                     @test _qgf_highest!(conn, 100; fin = true) === nothing
                     QGF._stream_stop_sending!(conn, _QGF_PEER_STREAM, UInt64(0))
-                    # BUG?: after STOP_SENDING we count as consumed only data that
-                    # has arrived; the 95 bytes not yet received (below a known
-                    # final size) are credited only when they or the peer's
-                    # RESET_STREAM arrive. quic-go credits up to the final size
-                    # at once.
-                    @test_broken conn.data_consumed == 100
+                    # Up to the final size, including the 95 bytes that never
+                    # arrived (RFC 9000 Section 4.5).
+                    @test conn.data_consumed == 100
                 end
 
                 @testset "tolerates repeated calls to Abandon" begin
@@ -468,8 +455,7 @@ const _QGF_WINDOW_UPDATE_THRESHOLD = 0.25  # protocol.WindowUpdateThreshold
                     for _ in 1:3
                         QGF._stream_stop_sending!(conn, _QGF_PEER_STREAM, UInt64(0))
                     end
-                    # BUG?: as above.
-                    @test_broken conn.data_consumed == 100
+                    @test conn.data_consumed == 100
                 end
             end
 
@@ -503,12 +489,10 @@ const _QGF_WINDOW_UPDATE_THRESHOLD = 0.25  # protocol.WindowUpdateThreshold
                     _qgf_read!(conn, 1)
                     @test !s.max_stream_data_pending
                     _qgf_read!(conn, 29)
-                    # BUG?: acceptable: half-window threshold, not a quarter.
-                    @test_broken s.max_stream_data_pending
-                    @test_broken _qgf_stream_update!(conn) != 0
+                    @test s.max_stream_data_pending
+                    @test _qgf_stream_update!(conn) != 0
                     _qgf_read!(conn, 1)
-                    # BUG?: ours sends its first update one byte later, here.
-                    @test_broken !s.max_stream_data_pending
+                    @test !s.max_stream_data_pending
                 end
 
                 @testset "sends a connection-level window update when a large stream is abandoned" begin
@@ -516,10 +500,8 @@ const _QGF_WINDOW_UPDATE_THRESHOLD = 0.25  # protocol.WindowUpdateThreshold
                     @test _qgf_highest!(conn, 90; fin = true) === nothing
                     @test _qgf_conn_update!(conn) == 0
                     QGF._stream_stop_sending!(conn, _QGF_PEER_STREAM, UInt64(0))
-                    # BUG?: bytes 40 to 90 have not arrived, so abandoning the
-                    # stream returns no connection credit yet (see "tells the
-                    # connection flow controller when a stream is abandoned").
-                    @test_broken _qgf_conn_update!(conn) != 0
+                    # Bytes 40 to 90 never arrived, but count as consumed.
+                    @test _qgf_conn_update!(conn) != 0
                 end
 
                 @testset "doesn't increase the window after a final offset was already received" begin
@@ -549,8 +531,7 @@ const _QGF_WINDOW_UPDATE_THRESHOLD = 0.25  # protocol.WindowUpdateThreshold
                 conn, s = _qgf_sender(; stream_max = 100, conn_max = 50)
                 frames = _qgf_send!(conn, s, 60)
                 @test conn.data_sent == 50
-                # BUG?: no DATA_BLOCKED (see "says when it's blocked").
-                @test_broken _qgf_blocked_at(frames, :connection, 50)
+                @test _qgf_blocked_at(frames, :connection, 50)
                 @test !_qgf_any_blocked(frames, :stream)
             end
         end
