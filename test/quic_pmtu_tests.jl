@@ -46,7 +46,10 @@ end
 @testset "QUIC path MTU discovery" begin
     @testset "datagrams grow to the local ceiling when the path carries them" begin
         h = _qpm_handshake()
-        @test h.client.max_datagram_size == QPM._MAX_DATAGRAM_SIZE
+        # Datagrams start at the minimum. (The first probe goes out once the
+        # handshake is confirmed and, as the first 1-RTT packet, is
+        # acknowledged at once, so discovery may already be done here.)
+        @test all(s -> length(s.bytes) == QPM._MAX_DATAGRAM_SIZE, filter(s -> s.from_client && _qcn_has_initial(s.bytes), h.log))
         start = h.now
         @test _qpm_transfer!(h, 300_000)
         @test h.client.max_datagram_size == QPM._PMTU_DEFAULT_CEILING

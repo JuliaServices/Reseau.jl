@@ -27,7 +27,8 @@ const _INITIAL_RTT_NS = Int64(333_000_000)  # RFC 9002 Section 6.2.2
 const _GRANULARITY_NS = Int64(1_000_000)
 const _PACKET_THRESHOLD = 3                 # RFC 9002 Section 6.1.1
 const _MAX_ACK_RANGES = 32
-const _MAX_PTO_BACKOFF = 16
+# Backoff stops lengthening the probe timeout here (quic-go's maxPTODuration).
+const _MAX_PTO_NS = Int64(60_000_000_000)
 const _DEFAULT_IDLE_TIMEOUT_MS = UInt64(30_000)
 # Congestion windows (RFC 9002 Section 7.2).
 const _INITIAL_WINDOW = 10 * _MAX_DATAGRAM_SIZE
@@ -57,13 +58,22 @@ Base.@enum T::UInt8 begin
 end
 end
 
-"An ack-eliciting packet awaiting acknowledgment: its size, counted in flight, and its frames."
+"""
+An ack-eliciting packet awaiting acknowledgment: its size, counted in flight,
+and its frames; the largest packet number an ACK frame in it acknowledged (-1
+for none); and whether a probe timeout already queued its frames again.
+"""
 struct _SentPacket
     pn::Int64
     time_sent::Int64
     size::Int
     frames::Vector{_SentFrame}
+    ack_largest::Int64
+    resent::Bool
 end
+
+_SentPacket(pn::Integer, time_sent::Integer, size::Integer, frames::Vector{_SentFrame}) =
+    _SentPacket(Int64(pn), Int64(time_sent), Int(size), frames, Int64(-1), false)
 
 """
     _PacketSpace
@@ -71,7 +81,10 @@ end
 State for one packet number space: its keys, packet numbers sent and received,
 the CRYPTO stream at its encryption level, and packets in flight.
 `ack_pending` means an ack-eliciting packet arrived since the last ACK, which
-is due at `ack_deadline`.
+is due at `ack_deadline`. `last_ack_largest` is the largest packet number the
+last ACK sent reported (-1 before the first), and `ack_floor` the lowest the
+peer has not seen acknowledged. `loss_time` is when the time threshold will
+declare the earliest unacknowledged packet lost (RFC 9002 Section 6.1.2).
 """
 mutable struct _PacketSpace
     read_keys::Union{Nothing, _PacketKeys}
@@ -81,20 +94,23 @@ mutable struct _PacketSpace
     largest_acked::Int64
     largest_received::Int64
     largest_received_time::Int64
-    received::_RangeSet
+    received::_ReceivedPackets
     ack_pending::Bool
     ack_eliciting_received::Int
     ack_deadline::Int64
+    last_ack_largest::Int64
+    ack_floor::Int64
     crypto_send::_CryptoSendBuffer
     crypto_recv::_Reassembly
     sent::Vector{_SentPacket}
     time_of_last_ack_eliciting::Int64
+    loss_time::Int64
     probes::Int
 end
 
 _PacketSpace() = _PacketSpace(
-    nothing, nothing, false, Int64(0), Int64(-1), Int64(-1), Int64(0), _RangeSet(), false, 0, typemax(Int64),
-    _CryptoSendBuffer(), _Reassembly(), _SentPacket[], Int64(0), 0,
+    nothing, nothing, false, Int64(0), Int64(-1), Int64(-1), Int64(0), _ReceivedPackets(), false, 0, typemax(Int64),
+    Int64(-1), Int64(0), _CryptoSendBuffer(), _Reassembly(), _SentPacket[], Int64(0), typemax(Int64), 0,
 )
 
 _ack_due(space::_PacketSpace, now::Int64)::Bool = space.ack_pending && now >= space.ack_deadline
@@ -122,6 +138,9 @@ Base.@kwdef mutable struct _Connection
     # Servers send at most three times what they received until the client's
     # address is validated (RFC 9000 Section 8.1).
     address_validated::Bool = false
+    # A client knows the server validated its address once the server
+    # acknowledges a Handshake or 1-RTT packet (RFC 9002 Appendix A.8).
+    peer_validated_address::Bool = false
     bytes_received::Int = 0
     bytes_sent::Int = 0
     smoothed_rtt::Int64 = Int64(0)
@@ -135,7 +154,8 @@ Base.@kwdef mutable struct _Connection
     cwnd::Int = _INITIAL_WINDOW
     ssthresh::Int = typemax(Int)
     bytes_in_flight::Int = 0
-    # Packets loss detection declared lost (not those a probe timeout resent).
+    # Packets loss detection declared lost, less those whose frames a probe
+    # timeout had already queued again.
     packets_lost::Int = 0
     # CUBIC (RFC 9438): the window before the last reduction, the time from
     # the start of an epoch until the window regains it (seconds), when the
@@ -217,6 +237,12 @@ end
 
 _handshake_complete(conn::_Connection)::Bool = conn.handshake_complete
 _handshake_confirmed(conn::_Connection)::Bool = conn.handshake_confirmed
+
+# PeerCompletedAddressValidation (RFC 9002 Appendix A.8): a server takes the
+# client's address as given; a client knows once a Handshake or 1-RTT packet
+# is acknowledged, or the handshake is confirmed.
+_peer_completed_address_validation(conn::_Connection)::Bool =
+    conn.is_server || conn.peer_validated_address || conn.handshake_confirmed
 
 @inline function _space_index(level::TLS.QUICEncryptionLevel.T)::Int
     level == TLS.QUICEncryptionLevel.Initial && return _INITIAL_SPACE
@@ -477,7 +503,7 @@ function _build_probe_datagram!(conn::_Connection, now::Int64)::Vector{UInt8}
     payload_last = _end_packet!(buf, layout; pad_to = conn.pmtu_probe_size)
     space.next_pn += 1
     conn.key_phase_first_sent < 0 && (conn.key_phase_first_sent = pn)
-    _seal_datagram!(conn, buf, [_PendingPacket(_APPLICATION_SPACE, layout, payload_last, pn, true, _SentFrame[])], now)
+    _seal_datagram!(conn, buf, [_PendingPacket(_APPLICATION_SPACE, layout, payload_last, pn, true, _SentFrame[], Int64(-1))], now)
     conn.pmtu_probe_due = false
     conn.pmtu_probe_pn = pn
     conn.pmtu_probe_time = now
@@ -504,6 +530,7 @@ function _discard_space!(conn::_Connection, idx::Int)::Nothing
     end
     empty!(space.sent)
     space.ack_pending = false
+    space.loss_time = typemax(Int64)
     space.probes = 0
     # Discarding keys is progress, so the probe backoff restarts (RFC 9002 Section 6.4).
     conn.pto_count = 0
@@ -593,7 +620,8 @@ function _receive_packet!(conn::_Connection, buf::Vector{UInt8}, header::_Packet
         return true
     end
     pn in space.received && return true
-    in_order = pn == space.largest_received + 1
+    # Below the largest packet number the last ACK reported, so reported missing there.
+    was_missing = pn < space.last_ack_largest
     # A client switches to the connection ID the server chose in its first
     # Initial (RFC 9000 Section 7.2).
     if !conn.peer_cid_set && idx == _INITIAL_SPACE
@@ -606,11 +634,13 @@ function _receive_packet!(conn::_Connection, buf::Vector{UInt8}, header::_Packet
     end
     push!(space.received, pn:pn)
     _keep_largest_ranges!(space.received, _MAX_ACK_RANGES)
+    _ignore_below!(space.received, space.ack_floor)
     if pn > space.largest_received
         space.largest_received = pn
         space.largest_received_time = now
     end
-    result.ack_eliciting && _schedule_ack!(conn, space, idx, in_order, now)
+    # A packet below the floor was just dropped from the ranges: nothing to report.
+    result.ack_eliciting && pn >= space.ack_floor && _schedule_ack!(conn, space, idx, was_missing, now)
     if result.error !== nothing
         _close!(conn, result.error, now)
         return true
@@ -700,18 +730,26 @@ function _initiate_key_update!(conn::_Connection)::Bool
     return true
 end
 
-# Initial and Handshake packets are acknowledged at once. 1-RTT packets wait
-# for a second ack-eliciting packet or max_ack_delay, unless one arrives out
-# of order (RFC 9000 Section 13.2.1).
-function _schedule_ack!(conn::_Connection, space::_PacketSpace, idx::Int, in_order::Bool, now::Int64)::Nothing
+# Initial and Handshake packets are acknowledged at once, and so is the first
+# 1-RTT packet. Later 1-RTT packets wait for a second ack-eliciting packet or
+# max_ack_delay, unless the last ACK reported this one missing, or it starts a
+# new gap above what that ACK reported (RFC 9000 Section 13.2.1), as in
+# quic-go's receivedPacketTracker.
+function _schedule_ack!(conn::_Connection, space::_PacketSpace, idx::Int, was_missing::Bool, now::Int64)::Nothing
     space.ack_pending = true
-    space.ack_eliciting_received += 1
-    deadline = if idx != _APPLICATION_SPACE || !in_order || space.ack_eliciting_received >= _ACK_ELICITING_THRESHOLD
-        now
-    else
-        now + Int64(conn.local_params.max_ack_delay_ms) * 1_000_000
+    if idx != _APPLICATION_SPACE || space.last_ack_largest < 0
+        space.ack_deadline = min(space.ack_deadline, now)
+        return nothing
     end
-    space.ack_deadline = min(space.ack_deadline, deadline)
+    space.ack_deadline <= now && return nothing  # already due
+    space.ack_eliciting_received += 1
+    highest = space.received.ranges[end]
+    new_gap = first(highest) > space.last_ack_largest + 1 && length(highest) == 1
+    if was_missing || new_gap || space.ack_eliciting_received >= _ACK_ELICITING_THRESHOLD
+        space.ack_deadline = now
+    else
+        space.ack_deadline = min(space.ack_deadline, now + Int64(conn.local_params.max_ack_delay_ms) * 1_000_000)
+    end
     return nothing
 end
 
@@ -756,6 +794,9 @@ end
 function _on_ack!(conn::_Connection, space::_PacketSpace, idx::Int, buf::Vector{UInt8}, frame::_AckFrame, now::Int64)::Union{Nothing, _TransportError}
     largest = Int64(frame.largest)
     largest < space.next_pn || return _TransportError(_PROTOCOL_VIOLATION, UInt64(0x02), "ACK for a packet never sent")
+    # Any acknowledgment beyond the Initial space shows the server validated
+    # this client's address, even one acknowledging nothing new.
+    idx != _INITIAL_SPACE && (conn.peer_validated_address = true)
     ranges = UnitRange{UInt64}[]
     for r in _ack_ranges(buf, frame)
         push!(ranges, r)
@@ -784,7 +825,7 @@ function _on_ack!(conn::_Connection, space::_PacketSpace, idx::Int, buf::Vector{
     for p in newly_acked
         p.pn == largest || continue
         # Only ack-eliciting packets are tracked, so this one qualifies (RFC 9002 Section 5.1).
-        ack_delay = idx == _APPLICATION_SPACE ? _ack_delay_ns(conn, frame.delay) : Int64(0)
+        ack_delay = idx == _APPLICATION_SPACE ? _trusted_ack_delay_ns(conn, frame.delay) : Int64(0)
         _update_rtt!(conn, now - p.time_sent, ack_delay)
     end
     # Whether the window was in use is judged once, before this ACK empties it.
@@ -794,14 +835,22 @@ function _on_ack!(conn::_Connection, space::_PacketSpace, idx::Int, buf::Vector{
         for f in p.frames
             _on_frame_acked!(conn, space, f)
         end
+        # The peer has seen the ACK this packet carried, so need not hear
+        # about those packets again (RFC 9000 Section 13.2.4).
+        p.ack_largest >= 0 && (space.ack_floor = max(space.ack_floor, p.ack_largest + 1))
     end
     # A client keeps backing off until it knows the server validated its
     # address, which an Initial acknowledgment does not show (RFC 9002 Section 6.2.1).
-    (conn.is_server || idx != _INITIAL_SPACE) && (conn.pto_count = 0)
+    _peer_completed_address_validation(conn) && (conn.pto_count = 0)
+    # The path delivers again: probes still owed are no longer needed.
+    for s in conn.spaces
+        s.probes = 0
+    end
     _detect_lost_packets!(conn, space, now)
     return nothing
 end
 
+# The ACK Delay field in nanoseconds.
 function _ack_delay_ns(conn::_Connection, delay::UInt64)::Int64
     params = conn.peer_params
     params === nothing && return Int64(0)
@@ -809,15 +858,24 @@ function _ack_delay_ns(conn::_Connection, delay::UInt64)::Int64
     # Microseconds become nanoseconds below, so keep `delay << exponent` under
     # 2^53, where multiplying by 1000 still fits an Int64.
     delay > (UInt64(typemax(Int64)) >> (exponent + 10)) && return Int64(params.max_ack_delay_ms) * 1_000_000
-    ns = Int64(delay << exponent) * 1_000
-    # Once confirmed, delays beyond the peer's max_ack_delay are not trusted.
-    conn.handshake_confirmed && (ns = min(ns, Int64(params.max_ack_delay_ms) * 1_000_000))
-    return ns
+    return Int64(delay << exponent) * 1_000
+end
+
+# The ACK delay an RTT sample is adjusted by. Delays beyond the peer's
+# max_ack_delay are not trusted: RFC 9002 Section 5.3 lets them count before
+# the handshake is confirmed, but like quic-go this never does, so a peer
+# cannot shrink RTT samples by claiming long delays.
+function _trusted_ack_delay_ns(conn::_Connection, delay::UInt64)::Int64
+    params = conn.peer_params
+    params === nothing && return Int64(0)
+    return min(_ack_delay_ns(conn, delay), Int64(params.max_ack_delay_ms) * 1_000_000)
 end
 
 "RTT estimation (RFC 9002 Section 5.3)."
 function _update_rtt!(conn::_Connection, latest::Int64, ack_delay::Int64)::Nothing
-    latest = max(latest, Int64(0))
+    # A sample that is not positive (a coarse or stepped clock) says nothing
+    # about the path; as in quic-go, it is ignored rather than pinning min_rtt at 0.
+    latest <= 0 && return nothing
     conn.latest_rtt = latest
     if !conn.has_rtt_sample
         conn.has_rtt_sample = true
@@ -833,18 +891,25 @@ function _update_rtt!(conn::_Connection, latest::Int64, ack_delay::Int64)::Nothi
     return nothing
 end
 
-"Declare packets lost by packet or time threshold (RFC 9002 Section 6.1)."
+"""
+Declare packets lost by packet or time threshold (RFC 9002 Section 6.1), and
+set the space's loss time for the earliest packet below the largest
+acknowledged that is not lost yet (Appendix A.10).
+"""
 function _detect_lost_packets!(conn::_Connection, space::_PacketSpace, now::Int64)::Nothing
     rtt = conn.has_rtt_sample ? max(conn.smoothed_rtt, conn.latest_rtt) : _INITIAL_RTT_NS
-    lost_before = now - max(9 * rtt ÷ 8, _GRANULARITY_NS)
+    loss_delay = max(9 * rtt ÷ 8, _GRANULARITY_NS)
+    lost_before = now - loss_delay
+    space.loss_time = typemax(Int64)
     latest_lost_sent = typemin(Int64)
     kept = 0
     for p in space.sent
         if p.pn < space.largest_acked && (space.largest_acked - p.pn >= _PACKET_THRESHOLD || p.time_sent <= lost_before)
             _requeue_lost!(conn, space, p)
-            conn.packets_lost += 1
+            p.resent || (conn.packets_lost += 1)
             latest_lost_sent = max(latest_lost_sent, p.time_sent)
         else
+            p.pn < space.largest_acked && (space.loss_time = min(space.loss_time, p.time_sent + loss_delay))
             kept += 1
             space.sent[kept] = p
         end
@@ -854,10 +919,11 @@ function _detect_lost_packets!(conn::_Connection, space::_PacketSpace, now::Int6
     return nothing
 end
 
-# Takes a packet out of flight and queues whatever it carried that still
-# needs delivering.
+# Takes a lost packet out of flight and queues whatever it carried that still
+# needs delivering, unless a probe timeout queued that already.
 function _requeue_lost!(conn::_Connection, space::_PacketSpace, p::_SentPacket)::Nothing
     conn.bytes_in_flight -= p.size
+    p.resent && return nothing
     for f in p.frames
         _on_frame_lost!(conn, space, f)
     end
@@ -996,10 +1062,12 @@ struct _PendingPacket
     pn::Int64
     ack_eliciting::Bool
     frames::Vector{_SentFrame}
+    # The largest packet number its ACK frame acknowledges, or -1.
+    ack_largest::Int64
 end
 
 _PendingPacket(space::Int, layout::_PacketLayout, payload_last::Int, pn::Int64) =
-    _PendingPacket(space, layout, payload_last, pn, false, _SentFrame[])
+    _PendingPacket(space, layout, payload_last, pn, false, _SentFrame[], Int64(-1))
 
 function _begin_packet!(conn::_Connection, buf::Vector{UInt8}, idx::Int)::Tuple{_PacketLayout, Int64}
     space = conn.spaces[idx]
@@ -1027,7 +1095,7 @@ function _pad_last_packet!(buf::Vector{UInt8}, packets::Vector{_PendingPacket}, 
         len = payload_last + _AEAD_TAG_LEN - last.layout.pn_offset + 1
         _write_varint!(buf, last.layout.length_pos, UInt64(len), _LENGTH_FIELD_LEN)
     end
-    packets[end] = _PendingPacket(last.space, last.layout, payload_last, last.pn, last.ack_eliciting, last.frames)
+    packets[end] = _PendingPacket(last.space, last.layout, payload_last, last.pn, last.ack_eliciting, last.frames, last.ack_largest)
     return nothing
 end
 
@@ -1091,6 +1159,7 @@ function _build_datagram!(conn::_Connection, now::Int64)::Union{Nothing, Vector{
             break
         end
         frames = _SentFrame[]
+        ack_largest = Int64(-1)
         if space.ack_pending && !isempty(space.received)
             ack = UInt8[]
             _append_ack_frame!(ack, _descending_ranges(space.received), _local_ack_delay(conn, space, idx, now))
@@ -1099,6 +1168,8 @@ function _build_datagram!(conn::_Connection, now::Int64)::Union{Nothing, Vector{
                 space.ack_pending = false
                 space.ack_eliciting_received = 0
                 space.ack_deadline = typemax(Int64)
+                ack_largest = last(space.received.ranges[end])
+                space.last_ack_largest = ack_largest
             end
         end
         # Probes may exceed the congestion window.
@@ -1132,7 +1203,7 @@ function _build_datagram!(conn::_Connection, now::Int64)::Union{Nothing, Vector{
         end
         ack_eliciting = !isempty(frames)
         payload_last = _end_packet!(buf, layout)
-        push!(packets, _PendingPacket(idx, layout, payload_last, pn, ack_eliciting, frames))
+        push!(packets, _PendingPacket(idx, layout, payload_last, pn, ack_eliciting, frames, ack_largest))
         space.next_pn += 1
         idx == _APPLICATION_SPACE && conn.key_phase_first_sent < 0 && (conn.key_phase_first_sent = pn)
         ack_eliciting && idx == _INITIAL_SPACE && (padded = true)
@@ -1145,7 +1216,7 @@ function _build_datagram!(conn::_Connection, now::Int64)::Union{Nothing, Vector{
         p.ack_eliciting || continue
         size = (i < length(packets) ? packets[i + 1].layout.first : length(buf) + 1) - p.layout.first
         space = conn.spaces[p.space]
-        push!(space.sent, _SentPacket(p.pn, now, size, p.frames))
+        push!(space.sent, _SentPacket(p.pn, now, size, p.frames, p.ack_largest, false))
         space.time_of_last_ack_eliciting = now
         conn.bytes_in_flight += size
     end
@@ -1197,18 +1268,27 @@ end
 
 # Timers.
 
-"Probe timeout for a packet number space (RFC 9002 Section 6.2.1), with backoff."
+"""
+Probe timeout for a packet number space (RFC 9002 Section 6.2.1), with backoff
+that stops at 60 s (`_MAX_PTO_NS`), as in quic-go.
+"""
 function _pto_duration(conn::_Connection, idx::Int)::Int64
     srtt = conn.has_rtt_sample ? conn.smoothed_rtt : _INITIAL_RTT_NS
     rttvar = conn.has_rtt_sample ? conn.rttvar : _INITIAL_RTT_NS ÷ 2
     duration = srtt + max(4 * rttvar, _GRANULARITY_NS)
     params = conn.peer_params
     idx == _APPLICATION_SPACE && params !== nothing && (duration += Int64(params.max_ack_delay_ms) * 1_000_000)
-    return duration << min(conn.pto_count, _MAX_PTO_BACKOFF)
+    # Shifting no further than the cap allows also keeps this from overflowing.
+    cap = max(duration, _MAX_PTO_NS)
+    shift = min(conn.pto_count, 62)
+    return duration > (cap >> shift) ? cap : duration << shift
 end
 
 # The earliest probe timeout and its space, or nothing.
 function _pto_deadline(conn::_Connection)::Union{Nothing, Tuple{Int64, Int}}
+    # A server that may not send must not arm the timer; a datagram from the
+    # client re-arms it (RFC 9002 Section 6.2.2.1).
+    conn.is_server && _send_budget(conn) <= 0 && return nothing
     best = nothing
     for idx in 1:3
         space = conn.spaces[idx]
@@ -1218,13 +1298,24 @@ function _pto_deadline(conn::_Connection)::Union{Nothing, Tuple{Int64, Int}}
         t = space.time_of_last_ack_eliciting + _pto_duration(conn, idx)
         (best === nothing || t < best[1]) && (best = (t, idx))
     end
-    # A client with nothing in flight still probes until the handshake is
-    # confirmed, in case the server is blocked by its amplification limit
-    # (RFC 9002 Section 6.2.2.1).
-    if best === nothing && !conn.is_server && !conn.handshake_confirmed
+    # A client with nothing in flight still probes until it knows the server
+    # validated its address, in case the server is blocked by its
+    # amplification limit (RFC 9002 Section 6.2.2.1).
+    if best === nothing && !_peer_completed_address_validation(conn)
         idx = conn.spaces[_HANDSHAKE_SPACE].write_keys !== nothing && !conn.spaces[_HANDSHAKE_SPACE].discarded ?
             _HANDSHAKE_SPACE : _INITIAL_SPACE
         conn.spaces[idx].discarded || (best = (conn.last_send_time + _pto_duration(conn, idx), idx))
+    end
+    return best
+end
+
+# The earliest time-threshold loss time and its space, or nothing.
+function _loss_time_deadline(conn::_Connection)::Union{Nothing, Tuple{Int64, Int}}
+    best = nothing
+    for idx in 1:3
+        space = conn.spaces[idx]
+        (space.discarded || space.loss_time == typemax(Int64)) && continue
+        (best === nothing || space.loss_time < best[1]) && (best = (space.loss_time, idx))
     end
     return best
 end
@@ -1239,8 +1330,10 @@ function _next_timeout(conn::_Connection)::Union{Nothing, Int64}
     state == _ConnState.Closed && return nothing
     (state == _ConnState.Closing || state == _ConnState.Draining) && return conn.close_deadline
     t = conn.last_activity + conn.idle_timeout_ns
-    pto = _pto_deadline(conn)
-    pto === nothing || (t = min(t, pto[1]))
+    # A pending loss time stands in for the probe timeout (RFC 9002 Appendix A.8).
+    loss = _loss_time_deadline(conn)
+    recovery = loss === nothing ? _pto_deadline(conn) : loss
+    recovery === nothing || (t = min(t, recovery[1]))
     for space in conn.spaces
         space.ack_pending && !space.discarded && (t = min(t, space.ack_deadline))
     end
@@ -1252,8 +1345,9 @@ end
     _handle_timeout!(conn, now)
 
 Act on whichever timers have expired: closing or draining ends, the idle
-timeout closes the connection silently, and a probe timeout sends probes. A
-due ACK needs nothing here; `_next_datagram!` sends it.
+timeout closes the connection silently, a loss time declares packets lost,
+and a probe timeout sends probes. A due ACK needs nothing here;
+`_next_datagram!` sends it.
 """
 function _handle_timeout!(conn::_Connection, now::Int64)::Nothing
     state = conn.state
@@ -1267,6 +1361,11 @@ function _handle_timeout!(conn::_Connection, now::Int64)::Nothing
         return nothing
     end
     _pmtu_check_probe!(conn, now)
+    loss = _loss_time_deadline(conn)
+    if loss !== nothing
+        now >= loss[1] && _detect_lost_packets!(conn, conn.spaces[loss[2]], now)
+        return nothing
+    end
     pto = _pto_deadline(conn)
     if pto !== nothing && now >= pto[1]
         idx = pto[2]
@@ -1274,15 +1373,23 @@ function _handle_timeout!(conn::_Connection, now::Int64)::Nothing
         conn.pto_count += 1
         conn.pto_count >= _PMTU_BLACK_HOLE_PTOS && conn.max_datagram_size > _MAX_DATAGRAM_SIZE && _pmtu_black_hole!(conn)
         # Probes carry the oldest unacknowledged data again: all of it during
-        # the handshake, and up to two packets' worth in 1-RTT, where two
-        # probes go out (RFC 9002 Section 6.2.4). Taken out of flight, those
-        # packets do not count as lost for congestion control.
-        n = idx == _APPLICATION_SPACE ? min(2, length(space.sent)) : length(space.sent)
-        for i in 1:n
-            _requeue_lost!(conn, space, space.sent[i])
+        # the handshake, and up to two packets' worth in 1-RTT (RFC 9002
+        # Section 6.2.4). A timeout is not a loss (Section 6.2), so those
+        # packets stay in flight, and an ACK for them still counts.
+        n = idx == _APPLICATION_SPACE ? 2 : typemax(Int)
+        for i in eachindex(space.sent)
+            n == 0 && break
+            p = space.sent[i]
+            p.resent && continue
+            for f in p.frames
+                _on_frame_lost!(conn, space, f)
+            end
+            space.sent[i] = _SentPacket(p.pn, p.time_sent, p.size, p.frames, p.ack_largest, true)
+            n -= 1
         end
-        deleteat!(space.sent, 1:n)
-        space.probes = idx == _APPLICATION_SPACE ? 2 : 1
+        # Two probes, as quic-go sends; one when nothing is in flight, where
+        # the probe only unblocks a server at its amplification limit.
+        space.probes = isempty(space.sent) ? 1 : 2
     end
     return nothing
 end

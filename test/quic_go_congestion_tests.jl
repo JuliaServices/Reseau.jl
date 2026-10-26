@@ -10,8 +10,9 @@ using Reseau
 #
 # Each Go `It` (or `func Test...`) is a @testset named after it. Units are
 # translated to ours (bytes, nanoseconds) and quic-go's maxDatagramSize (1280)
-# to ours, `_MAX_DATAGRAM_SIZE` (1200). Where we behave differently from Go,
-# the Go expectation is kept as @test_broken with a `# BUG?:` note.
+# to ours, `_MAX_DATAGRAM_SIZE` (1200). Where we deliberately behave
+# differently from Go, a `# Differs from quic-go:` note says why, and what we
+# do instead is tested.
 #
 # How the Go APIs map onto ours:
 #   - Cubic.CongestionWindowAfterAck(acked, cwnd, minRTT, t): set `conn.cwnd`
@@ -139,8 +140,9 @@ end
 # cubic_test.go's parameters: emulated connections, datagram size, β, the
 # extra backoff for a loss before the last maximum was regained, and the
 # Reno-friendly α. `ours` says whether the suite runs on our controller,
-# where Go's expectations that we miss are @test_broken; otherwise it runs on
-# `_QgcGoCubic` with Go's own parameters, which checks the port itself.
+# where Go's expectations that we deliberately miss are replaced by checks of
+# what we do; otherwise it runs on `_QgcGoCubic` with Go's own parameters,
+# which checks the port itself.
 struct _QgcCubicParams
     n::Int
     mss::Int
@@ -165,13 +167,6 @@ _qgc_reno_cwnd(p::_QgcCubicParams, cwnd::Int) =
 function _qgc_cubic_convex_cwnd(p::_QgcCubicParams, initial::Int, rtt::Int64, elapsed::Int64)
     offset = (((elapsed + rtt) ÷ _QGC_US) << 10) ÷ 1_000_000
     return initial + ((410 * offset * offset * offset * p.mss) >> 40)
-end
-
-# `@_qgc_test broken ex` is `@test_broken ex` when `broken`, else `@test ex`.
-macro _qgc_test(broken, ex)
-    t = Expr(:macrocall, Symbol("@test"), __source__, ex)
-    b = Expr(:macrocall, Symbol("@test_broken"), __source__, ex)
-    return esc(:($broken ? $b : $t))
 end
 
 # Our congestion controller standing in for quic-go's Cubic.
@@ -223,6 +218,7 @@ function _qgc_cubic_suite(p::_QgcCubicParams)
         # where the cubic and Reno curves meet.
         max_reno_rtts = trunc(Int, sqrt(Float64(p.alpha / (Float32(0.4) * rtt_min_s * rtt_min_s * rtt_min_s))) - 2)
         reno_mismatches = 0
+        reno_max_miss = 0
         epoch_changes = Int[]
         for _ in 1:max_reno_rtts
             # The window grows by about one MSS every current_cwnd/Alpha acks.
@@ -232,15 +228,22 @@ function _qgc_cubic_suite(p::_QgcCubicParams)
                 expected_next = _qgc_reno_cwnd(p, current)
                 current = _qgc_ack!(cubic, mss, current, rtt_min, now)
                 reno_mismatches += current != expected_next
+                reno_max_miss = max(reno_max_miss, abs(current - expected_next))
             end
             # Byte-wise Reno is an estimate: within half a packet of one MSS.
             push!(epoch_changes, current - initial_this_epoch)
             now += 100 * _QGC_MS
         end
-        # BUG?: Reno-friendly growth is not byte-exact: ours keeps W_est as a
-        # float and carries sub-byte growth, Chromium truncates every
-        # increment (and divides by W_est rather than cwnd).
-        @_qgc_test p.ours reno_mismatches == 0
+        if p.ours
+            # Differs from quic-go: Chromium truncates every Reno-friendly
+            # increment (and divides by W_est rather than cwnd); ours keeps
+            # W_est as a float and carries sub-byte growth to the next ACK
+            # (RFC 9438 Section 4.3), so it is never more than a couple of
+            # bytes off.
+            @test reno_max_miss <= 2
+        else
+            @test reno_mismatches == 0
+        end
         @test all(d -> abs(d - mss) <= mss ÷ 2, epoch_changes)
 
         convex_mismatches = 0
@@ -255,15 +258,19 @@ function _qgc_cubic_suite(p::_QgcCubicParams)
                 convex_mismatches += current != expected
             end
         end
-        # BUG?: Chromium sets cwnd to W_cubic(t + min_rtt) on every ACK; ours
-        # moves (target - cwnd)/cwnd per ACK (RFC 9438 Section 4.4), so it
-        # trails the curve. (With N = 1, Chromium's own algorithm also leaves
-        # this closed form on 436 ACKs; ours on all 6365.)
-        @_qgc_test p.ours convex_mismatches == 0
         expected = _qgc_cubic_convex_cwnd(p, initial, rtt_min, now - initial_time)
         current = _qgc_ack!(cubic, mss, current, rtt_min, now)
-        # BUG?: as above; ours ends about 3% below the curve.
-        @_qgc_test p.ours current == expected
+        if p.ours
+            # Differs from quic-go: Chromium sets cwnd to W_cubic(t + min_rtt)
+            # on every ACK; ours moves (target - cwnd)/cwnd per ACK (RFC 9438
+            # Section 4.4), so it trails the curve and ends about 3% below
+            # it. (With N = 1, Chromium's own algorithm also leaves this
+            # closed form on 436 ACKs.)
+            @test 0.95 * expected < current < expected
+        else
+            @test convex_mismatches == 0
+            @test current == expected
+        end
     end
 
     @testset "works above the origin with fine grained cubing" begin
@@ -282,7 +289,9 @@ function _qgc_cubic_suite(p::_QgcCubicParams)
         # Only non-zero, fine-grained cubic increases on every ack.
         not_expected = 0
         not_increasing = 0
+        decreasing = 0
         too_large = 0
+        start = current
         for _ in 1:100
             now += 10 * _QGC_MS
             expected = _qgc_cubic_convex_cwnd(p, initial, rtt_min, now - initial_time)
@@ -291,14 +300,22 @@ function _qgc_cubic_suite(p::_QgcCubicParams)
             not_expected += next != expected
             # ...that are non-zero and less than a tenth of a packet.
             not_increasing += !(next > current)
+            decreasing += next < current
             too_large += !(mss ÷ 10 > next - current)
             current = next
         end
-        # BUG?: one ACK per 10 ms on a 1000-packet window: Chromium jumps to
-        # the curve, ours adds (target - cwnd)/cwnd per ACK (RFC 9438
-        # Section 4.4), under a byte on 29 of these ACKs, carried over.
-        @_qgc_test p.ours not_expected == 0
-        @_qgc_test p.ours not_increasing == 0
+        if p.ours
+            # Differs from quic-go: one ACK per 10 ms on a 1000-packet window.
+            # Chromium jumps to the curve; ours adds (target - cwnd)/cwnd per
+            # ACK (RFC 9438 Section 4.4), under a byte on some of these ACKs,
+            # carried over to the next, so the window never shrinks and still
+            # grows over the run.
+            @test decreasing == 0
+            @test current > start
+        else
+            @test not_expected == 0
+            @test not_increasing == 0
+        end
         @test too_large == 0
     end
 
@@ -323,12 +340,19 @@ function _qgc_cubic_suite(p::_QgcCubicParams)
         # less than one byte, so the cwnd doesn't change.
         now += interval
         r_cwnd = _qgc_reno_cwnd(p, r_cwnd)
-        # BUG?: ours grows by 4 bytes here: its first ACK left cwnd on the
-        # Reno-friendly estimate (Chromium's on the cubic curve shifted by
-        # min_rtt), and the next ACK grows that estimate again.
-        @_qgc_test p.ours _qgc_ack!(cubic, mss, current, rtt_min, now) == current
+        next = _qgc_ack!(cubic, mss, current, rtt_min, now)
+        if p.ours
+            # Differs from quic-go: Chromium's first ACK left cwnd on the cubic
+            # curve shifted by min_rtt, so this one adds under a byte; ours
+            # left it on the Reno-friendly estimate (RFC 9438 Section 4.3),
+            # which this ACK grows again, by a few bytes.
+            @test 0 < next - current < mss ÷ 100
+        else
+            @test next == current
+        end
         not_increasing = 0
         not_reno = 0
+        reno_max_miss = 0
         for _ in 1:(max_acks - 1)
             now += interval
             next = _qgc_ack!(cubic, mss, current, rtt_min, now)
@@ -337,12 +361,19 @@ function _qgc_cubic_suite(p::_QgcCubicParams)
             not_increasing += !(next > current)
             # ...exactly as the Reno estimate does.
             not_reno += next != r_cwnd
+            reno_max_miss = max(reno_max_miss, abs(next - r_cwnd))
             current = next
         end
         @test not_increasing == 0
-        # BUG?: byte-exact Reno estimate again (see "works above origin").
-        # With N = 1 Chromium's own algorithm also misses it on 2 ACKs.
-        @_qgc_test p.ours not_reno == 0
+        if p.ours
+            # Differs from quic-go: the Reno estimate is not byte-exact (see
+            # "works above origin"): ours stays within one Reno increment,
+            # under a tenth of a datagram, of Chromium's. With N = 1
+            # Chromium's own algorithm also misses it on 2 ACKs.
+            @test reno_max_miss < mss ÷ 10
+        else
+            @test not_reno == 0
+        end
 
         # After a window of acks, the cwnd has grown by nearly one packet.
         minimum_expected_increase = mss * 9 ÷ 10
@@ -361,10 +392,16 @@ function _qgc_cubic_suite(p::_QgcCubicParams)
         # On the first loss, the last max congestion window is set to the
         # congestion window before the loss.
         pre_loss = current
-        # BUG?: ours keeps the curve's origin in W_max, so it is already the
-        # window from the start of the epoch; acceptable, as the next check
-        # shows the first loss still records the window before it.
-        @_qgc_test p.ours _qgc_last_max(cubic) == 0
+        if p.ours
+            # Differs from quic-go: Go's last max stays 0 until a loss; ours
+            # keeps the curve's origin in W_max, so it is already the window
+            # from the start of the epoch (RFC 9438 Section 4.2 sets W_max to
+            # cwnd when there was no loss). The next checks show the first
+            # loss still records the window before it.
+            @test _qgc_last_max(cubic) == pre_loss
+        else
+            @test _qgc_last_max(cubic) == 0
+        end
         expected = trunc(Int, Float32(current) * p.beta)
         @test _qgc_loss!(cubic, current, now) == expected
         @test _qgc_last_max(cubic) == pre_loss
@@ -389,13 +426,21 @@ function _qgc_cubic_suite(p::_QgcCubicParams)
         current = trunc(Int, _qgc_last_max(cubic)) - 1
         pre_loss = current
         expected = trunc(Int, Float32(current) * p.beta)
-        # BUG?: ours rounds β·cwnd (210915), Chromium truncates (210914).
-        @_qgc_test p.ours _qgc_loss!(cubic, current, now) == expected
-        expected_last_max = pre_loss
-        # BUG?: Chromium applies the extra backoff only when cwnd + MSS <
-        # W_max; ours whenever cwnd < W_max (RFC 9438 Section 4.7), so a
-        # window one byte short of W_max lowers W_max to 0.85·cwnd.
-        @_qgc_test p.ours _qgc_last_max(cubic) == expected_last_max
+        reduced = _qgc_loss!(cubic, current, now)
+        if p.ours
+            # Differs from quic-go: Chromium truncates β·cwnd (210914); ours
+            # rounds it (210915). RFC 9438 Section 4.6 leaves this open.
+            @test reduced == round(Int, current * 0.7)
+            # Differs from quic-go: Chromium applies the extra backoff only
+            # when cwnd + MSS < W_max, so W_max stays the window before the
+            # loss; ours whenever cwnd < W_max, as RFC 9438 Section 4.7 says,
+            # so a window one byte short of W_max lowers W_max to
+            # cwnd·(1 + β)/2.
+            @test _qgc_last_max(cubic) ≈ pre_loss * (1 + 0.7) / 2
+        else
+            @test reduced == expected
+            @test _qgc_last_max(cubic) == pre_loss
+        end
     end
 
     @testset "works below origin" begin
@@ -411,6 +456,7 @@ function _qgc_cubic_suite(p::_QgcCubicParams)
         expected = trunc(Int, Float32(current) * p.beta)
         @test _qgc_loss!(cubic, current, now) == expected
         current = expected
+        after_loss = current
         # First update after loss to initialize the epoch.
         current = _qgc_ack!(cubic, mss, current, rtt_min, now)
         # Cubic phase.
@@ -434,11 +480,15 @@ function _qgc_cubic_suite(p::_QgcCubicParams)
             end
             w
         end
-        # BUG?: one ACK per RTT: Chromium grows by its cap of half the acked
-        # bytes per ACK toward the curve; ours by (target - cwnd)/cwnd per ACK
-        # (RFC 9438 Section 4.4): 11951 bytes over the 41 ACKs
-        # against Chromium's 24600.
-        @_qgc_test p.ours current == expected
+        if p.ours
+            # Differs from quic-go: one ACK per RTT. Chromium grows by its
+            # cap of half the acked bytes per ACK toward the curve; ours by
+            # (target - cwnd)/cwnd per ACK (RFC 9438 Section 4.4): 11951
+            # bytes over the 41 ACKs against Chromium's 24600.
+            @test after_loss < current < expected
+        else
+            @test current == expected
+        end
     end
     return nothing
 end
@@ -688,11 +738,12 @@ const _QGC_RENO_BETA = 0.7
             end
             @test all(in_recovery)
             @test all(unchanged[1:(end - 1)])
-            # BUG?: acceptable, Reno mode: the last of these ACKs is for a
-            # packet sent after recovery began, which ends recovery (RFC 9002
-            # Section 7.3.2); CUBIC grows by its Reno-friendly 45 bytes, where
-            # Go's Reno waits for a whole window of ACKs.
-            @test_broken unchanged[end]
+            # Differs from quic-go: Go expects no growth on the last ACK too,
+            # in Reno mode, which waits for a whole window of ACKs. That ACK
+            # is for a packet sent after recovery began, which ends recovery
+            # (RFC 9002 Section 7.3.2), and our CUBIC grows by its
+            # Reno-friendly estimate, a fraction of a datagram.
+            @test expected < s.conn.cwnd < expected + _QGC_MSS
             @test !_qgc_in_recovery(s)
             # The rest (no growth for the next window of ACKs, then exactly
             # one MSS) is Reno mode: N/A.
@@ -744,9 +795,12 @@ const _QGC_RENO_BETA = 0.7
                 conn.bytes_in_flight = conn.cwnd
                 QGC._cc_on_acked!(conn, QGC._SentPacket(i, Int64(i), 1350, QGC._SentFrame[]), Int64(i + 1), true)
             end
-            # BUG?: we have no maximum window, and slow start adds the bytes
-            # acknowledged (RFC 9002 Section 7.3.1) where Go adds one datagram.
-            @test_broken conn.cwnd == initial_max_cwnd
+            # Differs from quic-go: Go caps the window at initial_max_cwnd.
+            # RFC 9002 has no maximum window, and its slow start adds the
+            # bytes acknowledged (Section 7.3.1) where Go adds one datagram
+            # per packet, so ours grows by every 1350-byte packet.
+            @test conn.cwnd > initial_max_cwnd
+            @test conn.cwnd == QGC._INITIAL_WINDOW + (10000 - 1) * 1350
         end
 
         @testset "slow starts up to maximum congestion window, if larger packets are sent" begin
@@ -759,8 +813,9 @@ const _QGC_RENO_BETA = 0.7
             end
             max_cwnd = 10000 * packet_size
             @test conn.cwnd > max_cwnd
-            # BUG?: no maximum window (see above).
-            @test_broken conn.cwnd <= max_cwnd + packet_size
+            # Differs from quic-go: Go caps the window at max_cwnd plus a
+            # packet; RFC 9002 has no maximum window (see above).
+            @test conn.cwnd == QGC._INITIAL_WINDOW + (10000 - 1) * packet_size
         end
 
         @testset "limit cwnd increase in congestion avoidance" begin
@@ -789,10 +844,11 @@ const _QGC_RENO_BETA = 0.7
             end
             # Bytes in flight may be larger than the CWND if the CWND isn't an
             # exact multiple of the packet sizes being sent.
-            # BUG?: acceptable: we never send past the window (RFC 9002
-            # Section 7: bytes in flight MUST NOT exceed it); Go's CanSend only
-            # needs bytes in flight below it, so it overshoots.
-            @test_broken s.conn.bytes_in_flight >= s.conn.cwnd
+            # Differs from quic-go: Go expects bytes in flight >= cwnd, since
+            # its CanSend only needs bytes in flight below the window and so
+            # overshoots it. RFC 9002 Section 7 says bytes in flight MUST NOT
+            # exceed the window, and ours never sends past it.
+            @test s.conn.bytes_in_flight <= s.conn.cwnd
             saved = s.conn.cwnd
 
             # Advance time 2 seconds waiting for an ack.
@@ -800,11 +856,11 @@ const _QGC_RENO_BETA = 0.7
 
             # Ack two packets. The CWND should increase by only one packet.
             _qgc_ack!(s, 2)
-            # BUG?: acceptable: Chromium jumps to the curve, capped at half the
-            # acked bytes per ACK (one MSS for two ACKs); ours adds
-            # (target - cwnd)/cwnd per ACK (RFC 9438 Section 4.4), 899 bytes
-            # here, so the limit holds but not the exact value.
-            @test_broken s.conn.cwnd == saved + _QGC_MSS
+            # Differs from quic-go: Chromium jumps to the curve, capped at half
+            # the acked bytes per ACK, so grows by exactly one MSS for two
+            # ACKs; ours moves (target - cwnd)/cwnd per ACK (RFC 9438 Section
+            # 4.4), 899 bytes here, so the limit holds but not the exact value.
+            @test saved < s.conn.cwnd <= saved + _QGC_MSS
         end
     end
 
@@ -823,10 +879,10 @@ const _QGC_RENO_BETA = 0.7
             @test conn.smoothed_rtt == 300 * _QGC_MS
             # Smoothed RTT includes max ack delay if it's reasonable.
             QGC._update_rtt!(conn, 350 * _QGC_MS, 50 * _QGC_MS)
-            # BUG?: acceptable: Go's LatestRTT is the sample less the ack
-            # delay; our latest_rtt is the raw sample, as RFC 9002 Section 5.3
-            # defines it (the adjusted value only feeds smoothed_rtt).
-            @test_broken conn.latest_rtt == 300 * _QGC_MS
+            # Differs from quic-go: Go's LatestRTT (300 ms) is the sample less
+            # the ack delay; our latest_rtt is the raw sample, as RFC 9002
+            # Section 5.3 defines it (the adjusted value only feeds smoothed_rtt).
+            @test conn.latest_rtt == 350 * _QGC_MS
             @test conn.smoothed_rtt == 300 * _QGC_MS
             # A large erroneous ack_delay does not change Smoothed RTT.
             QGC._update_rtt!(conn, 200 * _QGC_MS, 300 * _QGC_MS)
@@ -882,10 +938,8 @@ const _QGC_RENO_BETA = 0.7
                 push!(min_kept, conn.min_rtt == initial_rtt)
                 push!(smoothed_kept, conn.smoothed_rtt == initial_rtt)
             end
-            # BUG?: a zero or negative sample is clamped to 0 and taken:
-            # min_rtt becomes 0 for good and smoothed_rtt drops. Go ignores it.
-            @test_broken all(min_kept)
-            @test_broken all(smoothed_kept)
+            @test all(min_kept)
+            @test all(smoothed_kept)
         end
     end
 end

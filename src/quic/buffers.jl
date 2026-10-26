@@ -91,6 +91,37 @@ function _keep_largest_ranges!(s::_RangeSet, n::Int)::Nothing
     return nothing
 end
 
+"""
+    _ReceivedPackets
+
+The packet numbers received in one packet number space, as sorted ranges for
+ACK frames. Nothing below `ignore_below` is reported any more, since the peer
+has seen it acknowledged (RFC 9000 Section 13.2.4), and a packet below it
+counts as already received.
+"""
+mutable struct _ReceivedPackets
+    ranges::Vector{UnitRange{Int64}}
+    ignore_below::Int64
+end
+
+_ReceivedPackets() = _ReceivedPackets(UnitRange{Int64}[], Int64(0))
+# A plain set of ranges, with nothing ignored yet.
+Base.convert(::Type{_ReceivedPackets}, s::_RangeSet) = _ReceivedPackets(s.ranges, Int64(0))
+
+Base.isempty(s::_ReceivedPackets) = isempty(s.ranges)
+Base.in(x::Integer, s::_ReceivedPackets)::Bool = x < s.ignore_below || x in _RangeSet(s.ranges)
+Base.push!(s::_ReceivedPackets, r::UnitRange{Int64})::_ReceivedPackets = (push!(_RangeSet(s.ranges), r); s)
+_keep_largest_ranges!(s::_ReceivedPackets, n::Int)::Nothing = _keep_largest_ranges!(_RangeSet(s.ranges), n)
+_descending_ranges(s::_ReceivedPackets)::Vector{UnitRange{UInt64}} = _descending_ranges(_RangeSet(s.ranges))
+
+"Stop reporting packets below `pn`, as quic-go's receivedPacketTracker.IgnoreBelow does."
+function _ignore_below!(s::_ReceivedPackets, pn::Int64)::Nothing
+    pn <= s.ignore_below && return nothing
+    s.ignore_below = pn
+    delete!(_RangeSet(s.ranges), Int64(0):(pn - 1))
+    return nothing
+end
+
 # How far past the delivered offset a peer's CRYPTO data may reach. RFC 9000
 # Section 7.5 requires at least 4096 bytes.
 const _CRYPTO_BUFFER_LIMIT = 65536
@@ -212,7 +243,8 @@ end
 
 _crypto_bytes(sb::_CryptoSendBuffer, r::UnitRange{Int64}) = @view sb.data[(first(r) + 1):(last(r) + 1)]
 
-_crypto_on_acked!(sb::_CryptoSendBuffer, r::UnitRange{Int64})::Nothing = (push!(sb.acked, r); nothing)
+# Acknowledged data a probe timeout queued again need not go out.
+_crypto_on_acked!(sb::_CryptoSendBuffer, r::UnitRange{Int64})::Nothing = (push!(sb.acked, r); delete!(sb.pending, r); nothing)
 
 "Queue `r` for resending, less anything acknowledged since it was sent."
 function _crypto_on_lost!(sb::_CryptoSendBuffer, r::UnitRange{Int64})::Nothing
@@ -306,8 +338,13 @@ function _send_bytes(sb::_StreamSendBuffer, r::UnitRange{Int64})
 end
 
 function _send_on_acked!(sb::_StreamSendBuffer, r::UnitRange{Int64}, fin::Bool)::Nothing
-    fin && (sb.fin_acked = true)
-    isempty(r) || push!(sb.acked, r)
+    # A probe timeout may have queued this again while it was in flight; it
+    # need not go out now, and must not once released below.
+    if fin
+        sb.fin_acked = true
+        sb.fin_pending = false
+    end
+    isempty(r) || (push!(sb.acked, r); delete!(sb.pending, r))
     # Release the acknowledged prefix.
     if !isempty(sb.acked) && first(sb.acked.ranges[1]) <= sb.base
         new_base = last(sb.acked.ranges[1]) + 1
