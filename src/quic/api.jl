@@ -9,7 +9,8 @@
 # change allows at once, and pulls the receive task's next wakeup earlier
 # when the connection now has an earlier timer, by lowering the socket's read
 # deadline. A task waiting with a deadline registers it the same way, and the
-# receive task wakes every waiter each time round.
+# receive task wakes every waiter each time round. Changing a stream's
+# deadline wakes the tasks waiting on it, which wait again with the new one.
 
 """
     ConnectionError
@@ -90,6 +91,11 @@ mutable struct _ConnSlot
     write_cond::Threads.Condition
     read_waiting::Vector{UInt64}
     write_waiting::Vector{UInt64}
+    # Tickets of the tasks waiting in `open_stream`, in the order they began
+    # to wait, for each kind of stream; `tickets` numbers them.
+    open_waiting_bidi::Vector{Int}
+    open_waiting_uni::Vector{Int}
+    tickets::Int
     handshake_seen::Bool
     peer::Union{Nothing, UDP.SocketEndpoint}
     failure::Union{Nothing, String}
@@ -448,7 +454,7 @@ function _new_slot!(ep::_Endpoint, conn::_Connection, peer::Union{Nothing, UDP.S
     lk = ep.lock
     slot = _ConnSlot(
         conn, Threads.Condition(lk), Threads.Condition(lk), Threads.Condition(lk), Threads.Condition(lk),
-        UInt64[], UInt64[], false, peer, nothing, Vector{UInt8}[], false,
+        UInt64[], UInt64[], Int[], Int[], 0, false, peer, nothing, Vector{UInt8}[], false,
     )
     push!(ep.slots, slot)
     _add_route!(ep, slot, conn.local_cid)
@@ -891,21 +897,40 @@ end
 
 Open a bidirectional stream, or a unidirectional one this endpoint sends
 on. Waits while the peer's stream limit allows no more; throws
-`UDP.DeadlineExceededError` when `deadline_ns` passes first.
+`UDP.DeadlineExceededError` when `deadline_ns` passes first. Callers that
+wait get streams in the order they began to wait, before any later caller,
+as in quic-go: a deadline already past opens a stream only if one is free
+and no other caller is waiting for it.
 """
 function open_stream(c::Connection; bidi::Bool = true, deadline_ns::Integer = 0)::Stream
     ep = c.ep
     slot = c.slot
     deadline = Int64(deadline_ns)
+    queue = bidi ? slot.open_waiting_bidi : slot.open_waiting_uni
+    ticket = 0
     lock(ep.lock)
     try
         while true
             _check_conn!(slot)
-            id = _open_stream!(slot.conn; bidi)
-            id === nothing || return Stream(c, id::UInt64)
+            # Only the longest waiting caller, or anyone while none waits.
+            if isempty(queue) || first(queue) == ticket
+                id = _open_stream!(slot.conn; bidi)
+                id === nothing || return Stream(c, id::UInt64)
+            end
+            if ticket == 0
+                slot.tickets += 1
+                ticket = slot.tickets
+                push!(queue, ticket)
+            end
             _wait!(ep, slot.cond, deadline) || throw(UDP.DeadlineExceededError())
         end
     finally
+        if ticket != 0
+            i = findfirst(==(ticket), queue)
+            i === nothing || deleteat!(queue, i)
+            # The next caller in line may find a stream free now.
+            isempty(queue) || notify(slot.cond; all = true)
+        end
         unlock(ep.lock)
     end
 end
@@ -943,17 +968,48 @@ isbidi(s::Stream)::Bool = _is_bidi(s.id)
 """
     set_read_deadline!(stream, deadline_ns)
 
-Make reads that would wait past `deadline_ns` throw
-`UDP.DeadlineExceededError`; 0 clears it.
+Make reads throw `UDP.DeadlineExceededError` once the monotonic clock
+(`time_ns()`) reaches `deadline_ns`, as for TCP connections: a read after
+then fails even when data is waiting, and a read already waiting fails when
+the deadline passes. The new deadline applies to reads already waiting too,
+waking them at once if it has passed. 0 clears it. The end of the stream,
+its reset, and a closed connection are reported first.
 """
-set_read_deadline!(s::Stream, deadline_ns::Integer) = (s.read_deadline_ns = Int64(deadline_ns); nothing)
+function set_read_deadline!(s::Stream, deadline_ns::Integer)::Nothing
+    ep = s.conn.ep
+    slot = s.conn.slot
+    lock(ep.lock)
+    try
+        s.read_deadline_ns = Int64(deadline_ns)
+        # Tasks waiting to read the stream wait again with the new deadline.
+        s.id in slot.read_waiting && notify(slot.read_cond; all = true)
+    finally
+        unlock(ep.lock)
+    end
+    return nothing
+end
 
 """
     set_write_deadline!(stream, deadline_ns)
 
-As [`set_read_deadline!`](@ref), for writes that wait for buffer space.
+As [`set_read_deadline!`](@ref), for writes, including those waiting for
+buffer space. `closewrite` (and `close`) send the FIN regardless.
 """
-set_write_deadline!(s::Stream, deadline_ns::Integer) = (s.write_deadline_ns = Int64(deadline_ns); nothing)
+function set_write_deadline!(s::Stream, deadline_ns::Integer)::Nothing
+    ep = s.conn.ep
+    slot = s.conn.slot
+    lock(ep.lock)
+    try
+        s.write_deadline_ns = Int64(deadline_ns)
+        s.id in slot.write_waiting && notify(slot.write_cond; all = true)
+    finally
+        unlock(ep.lock)
+    end
+    return nothing
+end
+
+# Whether a stream deadline (0 for none) has passed.
+_deadline_passed(deadline_ns::Int64)::Bool = deadline_ns != 0 && _monotonic_ns() >= deadline_ns
 
 function _end_reads(s::Stream, err::Union{StreamResetError, StreamStoppedError})
     s.read_end = err
@@ -985,25 +1041,37 @@ function _check_read_end!(s::Stream, ep::_Endpoint, slot::_ConnSlot, st::_Stream
     return nothing
 end
 
-# Reads up to `max_len` bytes, waiting for at least one; empty at the end of
-# the stream.
+# Throws once the stream's read or write deadline (`deadline_ns`) has passed,
+# reporting a closed connection first.
+function _check_deadline!(slot::_ConnSlot, deadline_ns::Int64)::Nothing
+    _deadline_passed(deadline_ns) || return nothing
+    _check_conn!(slot)
+    throw(UDP.DeadlineExceededError())
+end
+
 # With `ep.lock` held, waits until the stream has bytes to read (`true`) or
 # has ended (`false`), throwing for resets, closed connections, and deadlines.
+# Each time round the deadline is read again, since `set_read_deadline!`
+# wakes waiting readers when it changes.
 function _wait_readable!(s::Stream, ep::_Endpoint, slot::_ConnSlot)::Bool
     while true
+        # Another task may have stopped the stream meanwhile.
+        err = s.read_end
+        err === nothing || throw(err)
         conn = slot.conn
         _can_receive(conn, s.id) || throw(ArgumentError("QUIC stream $(s.id) is send-only here"))
         st = get(conn.streams, s.id, nothing)
         st === nothing && return false
         _check_read_end!(s, ep, slot, st)
         rb = st.recv::_StreamReceiveBuffer
-        _recv_readable(rb) > 0 && return true
         if _recv_finished(rb)
             # Reading nothing at the end lets the stream be freed.
             _stream_read!(conn, s.id, 0)
             _after_op!(ep, slot)
             return false
         end
+        _check_deadline!(slot, s.read_deadline_ns)
+        _recv_readable(rb) > 0 && return true
         _check_conn!(slot)
         _wait_stream!(ep, slot.read_cond, slot.read_waiting, s.id, s.read_deadline_ns) || throw(UDP.DeadlineExceededError())
     end
@@ -1044,14 +1112,16 @@ function _read_into!(s::Stream, dst::AbstractVector{UInt8}, doff::Int, max_len::
     end
 end
 
+# Data already waiting is no end, whatever the deadline, as for TCP
+# connections; waiting for more respects it.
 function Base.eof(s::Stream)::Bool
-    err = s.read_end
-    err === nothing || throw(err)
     ep = s.conn.ep
     slot = s.conn.slot
     lock(ep.lock)
     try
         while true
+            err = s.read_end
+            err === nothing || throw(err)
             conn = slot.conn
             st = get(conn.streams, s.id, nothing)
             st === nothing && return true
@@ -1169,6 +1239,8 @@ function _write_bytes!(s::Stream, data::AbstractVector{UInt8}, fin::Bool)::Nothi
                 _end_writes(s, StreamStoppedError(s.id, st.peer_stop_code, true))
             end
             st.reset_code == _NO_CODE || _end_writes(s, StreamResetError(s.id, st.reset_code, false))
+            # A FIN alone goes out whatever the deadline.
+            (n > 0 || !fin) && _check_deadline!(slot, s.write_deadline_ns)
             sb = st.send::_StreamSendBuffer
             room = _SEND_BUFFER_LIMIT - Int(_send_end(sb) - sb.base)
             if room > 0 || pos > n
@@ -1257,15 +1329,24 @@ end
     stop_sending!(stream, code)
 
 Ask the peer to stop sending (STOP_SENDING with application error `code`)
-and drop whatever it still sends. Does nothing once the connection has
-closed.
+and drop whatever it still sends. Reads then throw
+[`StreamStoppedError`](@ref); the receiving side is over, without reading,
+once the peer's FIN or RESET_STREAM arrives. Does nothing once the
+connection has closed, or after the peer reset the stream or the stream
+ended.
 """
 function stop_sending!(s::Stream, code::Integer)::Nothing
     ep = s.conn.ep
     lock(ep.lock)
     try
-        _conn_open(s.conn.slot.conn) || return nothing
-        _stream_stop_sending!(s.conn.slot.conn, s.id, UInt64(code))
+        conn = s.conn.slot.conn
+        _conn_open(conn) || return nothing
+        st = get(conn.streams, s.id, nothing)
+        _stream_stop_sending!(conn, s.id, UInt64(code))
+        # The stream may be freed already, so reads remember the stop.
+        if st !== nothing && st.stop_sending_code != _NO_CODE && s.read_end === nothing
+            s.read_end = StreamStoppedError(s.id, st.stop_sending_code, false)
+        end
         _after_op!(ep, s.conn.slot)
     finally
         unlock(ep.lock)

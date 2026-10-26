@@ -373,9 +373,12 @@ end
 """
     _version_negotiation_packet(dcid, scid, versions) -> Vector{UInt8}
 
-A Version Negotiation packet listing `versions` (RFC 9000 Section 17.2.1).
-`dcid` and `scid` echo the client's Source and Destination Connection IDs, and
-may be up to 255 bytes since the client's version is unknown.
+A Version Negotiation packet listing `versions` (RFC 9000 Section 17.2.1),
+and, at a random place among them, one random reserved version of the form
+0x?a?a?a?a (Section 15), as quic-go does, so that clients do not come to
+depend on the list being exact (Section 6.3). `dcid` and `scid` echo the
+client's Source and Destination Connection IDs, and may be up to 255 bytes
+since the client's version is unknown.
 """
 function _version_negotiation_packet(
         dcid::AbstractVector{UInt8},
@@ -392,8 +395,12 @@ function _version_negotiation_packet(
     append!(buf, dcid)
     push!(buf, UInt8(length(scid)))
     append!(buf, scid)
-    for v in versions
+    greased = (rand(UInt32) & 0xf0f0f0f0) | 0x0a0a0a0a
+    greased_pos = rand(0:length(versions))
+    greased_pos == 0 && _append_u32!(buf, greased)
+    for (i, v) in enumerate(versions)
         _append_u32!(buf, v)
+        i == greased_pos && _append_u32!(buf, greased)
     end
     return buf
 end

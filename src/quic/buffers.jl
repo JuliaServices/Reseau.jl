@@ -140,18 +140,25 @@ end
 
 _Reassembly() = _Reassembly(Int64(0), Tuple{Int64, Vector{UInt8}}[])
 
+# The most gaps held data may leave, counting the one past the highest byte
+# held, as in quic-go (protocol.MaxStreamFrameSorterGaps). Each held
+# fragment costs memory and time, so a peer may not scatter data without end.
+const _MAX_REASSEMBLY_GAPS = 1000
+
 """
-    _reassemble!(out, rb, start, data)
+    _reassemble!(out, rb, start, data) -> Bool
 
 Take `data` at offset `start` and append to `out` the bytes that are now
-contiguous with what was delivered before, possibly none.
+contiguous with what was delivered before, possibly none. Returns `false`
+when the data held out of order leaves more than `_MAX_REASSEMBLY_GAPS`
+gaps, which ends the connection (quic-go: "too many gaps in received data").
 """
-function _reassemble!(out::Vector{UInt8}, rb::_Reassembly, start::Int64, data::AbstractVector{UInt8})::Nothing
+function _reassemble!(out::Vector{UInt8}, rb::_Reassembly, start::Int64, data::AbstractVector{UInt8})::Bool
     stop = start + length(data)  # exclusive
-    stop <= rb.delivered && return nothing
+    stop <= rb.delivered && return true
     if start > rb.delivered
         _hold_fragment!(rb, start, data)
-        return nothing
+        return _reassembly_gaps(rb) <= _MAX_REASSEMBLY_GAPS
     end
     append!(out, @view(data[(rb.delivered - start + 1):end]))
     rb.delivered = stop
@@ -164,7 +171,22 @@ function _reassemble!(out::Vector{UInt8}, rb::_Reassembly, start::Int64, data::A
             rb.delivered = frag_stop
         end
     end
-    return nothing
+    return true
+end
+
+# The gaps below and between held fragments (adjacent ones leave none), and
+# the one past the last. Only counted once there are enough fragments to
+# leave too many.
+function _reassembly_gaps(rb::_Reassembly)::Int
+    frags = rb.fragments
+    length(frags) < _MAX_REASSEMBLY_GAPS && return length(frags) + 1
+    gaps = 1
+    pos = rb.delivered
+    for (frag_start, frag) in frags
+        frag_start > pos && (gaps += 1)
+        pos = frag_start + length(frag)
+    end
+    return gaps
 end
 
 # Holds the parts of `data` (at `start`) that no held fragment covers yet.
@@ -199,7 +221,8 @@ function _crypto_receive!(rb::_Reassembly, offset::UInt64, data::AbstractVector{
     start + length(data) > rb.delivered + _CRYPTO_BUFFER_LIMIT &&
         return _TransportError(_CRYPTO_BUFFER_EXCEEDED, UInt64(0x06), "CRYPTO data too far ahead")
     out = UInt8[]
-    _reassemble!(out, rb, start, data)
+    _reassemble!(out, rb, start, data) ||
+        return _TransportError(_INTERNAL_ERROR, UInt64(0x06), "too many gaps in received data")
     return out
 end
 
@@ -400,8 +423,9 @@ _StreamReceiveBuffer() = _StreamReceiveBuffer(_Reassembly(), UInt8[], 1, Int64(0
     _recv_insert!(rb, offset, data, fin) -> nothing or error code
 
 Take a STREAM frame's data. Returns FINAL_SIZE_ERROR for data past the final
-size or a FIN that contradicts it (RFC 9000 Section 4.5). Flow control is the
-caller's to check, against `offset + length(data)`.
+size or a FIN that contradicts it (RFC 9000 Section 4.5), and INTERNAL_ERROR,
+as quic-go does, when it leaves too many gaps (see `_reassemble!`). Flow
+control is the caller's to check, against `offset + length(data)`.
 """
 function _recv_insert!(rb::_StreamReceiveBuffer, offset::Int64, data::AbstractVector{UInt8}, fin::Bool)::Union{Nothing, UInt64}
     stop = offset + length(data)
@@ -413,7 +437,7 @@ function _recv_insert!(rb::_StreamReceiveBuffer, offset::Int64, data::AbstractVe
         rb.final_size = stop
     end
     rb.max_received = max(rb.max_received, stop)
-    _reassemble!(rb.ready, rb.reassembly, offset, data)
+    _reassemble!(rb.ready, rb.reassembly, offset, data) || return _INTERNAL_ERROR
     return nothing
 end
 

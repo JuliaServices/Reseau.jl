@@ -171,9 +171,12 @@ const _QGWF_ACK_ECN = 0x03
         @test ok
         ns = _qgwf_ack_delay_ns(f.delay, _QGWF_ACK_DELAY_EXPONENT)
         @test ns > 0
-        # BUG?: quic-go saturates an overflowing ACK Delay to the largest
-        # time.Duration (~292 years); we substitute the peer's max_ack_delay (25 ms).
-        @test_broken abs(ns / 3.6e12 - 292 * 365 * 24) <= 365 * 24
+        # Differs from quic-go: it saturates an overflowing ACK Delay to the
+        # largest time.Duration (~292 years). We substitute the peer's
+        # max_ack_delay (25 ms by default): RTT estimation subtracts the delay,
+        # so either way an absurd value must not reach it, and max_ack_delay
+        # is what RFC 9002 Section 5.3 caps a confirmed connection's delay at.
+        @test ns == 25_000_000
     end
 
     @testset "TestParseACKErrorOnEOF" begin
@@ -267,9 +270,11 @@ const _QGWF_ACK_ECN = 0x03
         ok, b, f = _qgwf_ack_roundtrip(QGWF._descending_ranges(received))
         @test ok
         @test length(b) <= max_ack_frame_size
-        # BUG?: quic-go packs the frame up to just under MaxAckFrameSize; we
-        # keep at most _MAX_ACK_RANGES (32) ranges, so the frame is far smaller.
-        @test_broken length(b) > max_ack_frame_size - 5
+        # Differs from quic-go: it packs the frame up to just under
+        # MaxAckFrameSize. We keep at most _MAX_ACK_RANGES (32) ranges, the
+        # most recent, so the frame is far smaller; older ranges matter
+        # little, since a sender declares those packets lost long before.
+        @test f.range_count + 1 == QGWF._MAX_ACK_RANGES
         @test f.range_count > 0
         @test f.range_count + 1 < num_ranges
     end
@@ -771,9 +776,13 @@ const _QGWF_ACK_ECN = 0x03
     @testset "TestParseStreamFrameRejectsLongFrames" begin
         max_packet_buffer_size = 1452  # protocol.MaxPacketBufferSize
         data = vcat(_qgwf_v(0x12345), _qgwf_v(max_packet_buffer_size + 1), zeros(UInt8, max_packet_buffer_size + 1))
-        # BUG?: quic-go rejects a STREAM frame longer than its 1452-byte pooled
-        # buffer even when the data is present; we accept it.
-        @test_broken _qgwf_malformed(0x08 ⊻ 0x02, data)
+        # Differs from quic-go: it rejects a STREAM frame longer than its
+        # 1452-byte pooled buffer even when the data is present. We accept any
+        # frame that fits its packet, which may be larger after path MTU
+        # discovery (RFC 9000 sets no such limit).
+        frames, result = _qgwf_decode(vcat(UInt8[0x08 ⊻ 0x02], data))
+        @test result.error === nothing && length(frames) == 1
+        @test length(frames[1].data) == max_packet_buffer_size + 1
     end
 
     @testset "TestParseStreamFrameRejectsFramesExceedingRemainingSize" begin
@@ -828,9 +837,9 @@ const _QGWF_ACK_ECN = 0x03
     end
 
     @testset "TestWriteStreamFrameEmptyFrameWithoutFIN" begin
-        # BUG?: quic-go refuses to write an empty STREAM frame without FIN
-        # ("attempting to write empty frame without FIN"); our encoder writes it.
-        @test_broken _qgwf_throws(() -> QGWF._append_stream_frame!(UInt8[], UInt64(0x42), UInt64(0x1337), UInt8[]; explicit_length = false))
+        # "attempting to write empty frame without FIN"
+        @test _qgwf_throws(() -> QGWF._append_stream_frame!(UInt8[], UInt64(0x42), UInt64(0x1337), UInt8[]; explicit_length = false))
+        @test _qgwf_throws(() -> QGWF._append_stream_frame!(UInt8[], UInt64(0x42), UInt64(0x1337), UInt8[]))
     end
 
     # frame_parser_test.go

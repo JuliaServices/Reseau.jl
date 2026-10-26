@@ -548,7 +548,9 @@ end
     _append_stream_frame!(buf, stream_id, offset, data; fin = false, explicit_length = true)
 
 Append a STREAM frame. The Offset field is omitted when `offset` is 0. Without
-`explicit_length` the frame has no Length field and must end the packet.
+`explicit_length` the frame has no Length field and must end the packet. A
+frame without data says nothing unless it carries the FIN, so as in quic-go
+writing one throws `ArgumentError`.
 """
 function _append_stream_frame!(
         buf::Vector{UInt8},
@@ -558,6 +560,7 @@ function _append_stream_frame!(
         fin::Bool = false,
         explicit_length::Bool = true,
     )::Nothing
+    isempty(data) && !fin && throw(ArgumentError("a QUIC STREAM frame without data must carry the FIN"))
     push!(buf, 0x08 | (offset > 0 ? 0x04 : 0x00) | (explicit_length ? 0x02 : 0x00) | (fin ? 0x01 : 0x00))
     _append_varint!(buf, stream_id)
     offset > 0 && _append_varint!(buf, offset)

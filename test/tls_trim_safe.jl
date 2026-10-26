@@ -764,7 +764,9 @@ function _run_quic_packet_protection_trim!()::Nothing
     vn = QP._version_negotiation_packet(UInt8[0x01], UInt8[0x02], UInt32[QP._QUIC_V1])
     header = QP._parse_packet(vn, 1, length(vn), 0)
     header === nothing && error("QUIC trim Version Negotiation did not parse")
-    QP._version_negotiation_versions(vn, header) == UInt32[QP._QUIC_V1] || error("QUIC trim Version Negotiation versions mismatch")
+    # Version 1 and a greased version.
+    listed = QP._version_negotiation_versions(vn, header)
+    (length(listed) == 2 && QP._QUIC_V1 in listed) || error("QUIC trim Version Negotiation versions mismatch")
     return nothing
 end
 
