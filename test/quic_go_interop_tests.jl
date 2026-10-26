@@ -4,9 +4,10 @@ using Reseau
 # Interop with quic-go over loopback UDP, through the helper in
 # quic_go_interop/: a Reseau client against a quic-go server, and a quic-go
 # client against a Reseau server, moving data on bidirectional and
-# unidirectional streams. quic-go starts a key update after 100 packets, so
-# these transfers also cover key updates. Runs when a Go 1.22+ toolchain is on
-# PATH and the quic-go module is cached or can be downloaded.
+# unidirectional streams, and resuming TLS sessions both ways. quic-go starts
+# a key update after 100 packets, so these transfers also cover key updates.
+# Runs when a Go 1.22+ toolchain is on PATH and the quic-go module is cached or
+# can be downloaded.
 
 const QGI = Reseau.QUIC
 const TLGI = Reseau.TLS
@@ -165,8 +166,20 @@ _qgi_closed(conn) = conn.state == QGI._ConnState.Closed || conn.state == QGI._Co
                 @test app.uni_reply !== nothing && app.got[app.uni_reply] == app.uni_sent
                 @test client.error === nothing && client.peer_error === nothing
                 @test client.key_updates >= 1
+                # quic-go sent its session ticket with HANDSHAKE_DONE.
+                @test !TLGI.connection_state(client.tls).did_resume
+                @test TLGI.connection_state(client.tls).has_resumable_session
                 QGI._close_connection!(client, UInt64(0), "done", Int64(time_ns()))
                 QGI._drive_connection!(client, sock, nothing, _qgi_closed; deadline_ns = Int64(time_ns()) + 5_000_000_000)
+
+                # A second connection with the same config resumes.
+                close(sock)
+                sock = UDGI.connect(UDGI.loopback_addr(port))
+                client2 = QGI._client_connection(config, Int64(time_ns()))
+                @test QGI._drive_connection!(client2, sock, nothing, QGI._handshake_complete; deadline_ns = Int64(time_ns()) + 30_000_000_000)
+                @test TLGI.connection_state(client2.tls).did_resume
+                QGI._close_connection!(client2, UInt64(0), "done", Int64(time_ns()))
+                QGI._drive_connection!(client2, sock, nothing, _qgi_closed; deadline_ns = Int64(time_ns()) + 5_000_000_000)
             finally
                 sock === nothing || close(sock)
                 close(stdin_pipe)
@@ -197,6 +210,36 @@ _qgi_closed(conn) = conn.state == QGI._ConnState.Closed || conn.state == QGI._Co
                     err = server.peer_error
                     @test err !== nothing && err.app && err.code == 0
                     @test server.key_updates >= 1
+                end
+                wait(proc)
+                @test success(proc)
+                @test strip(read(out_log, String)) == "OK"
+            finally
+                close(sock)
+            end
+            log = read(err_log, String)
+            isempty(log) || @info "quic-go client log" log
+        end
+
+        @testset "quic-go client resumes against a Reseau server" begin
+            sock = UDGI.listen(UDGI.loopback_addr(0))
+            out_log = joinpath(dir, "resume.out")
+            err_log = joinpath(dir, "resume.log")
+            try
+                port = UDGI.local_addr(sock).port
+                proc = run(pipeline(_qgi_cmd(`$bin resume -addr 127.0.0.1:$port`); stdout = out_log, stderr = err_log); wait = false)
+                deadline = Int64(time_ns()) + 60_000_000_000
+                config = TLGI.Config(verify_peer = false, cert_file = _QGI_CERT, key_file = _QGI_KEY, alpn_protocols = [_QGI_ALPN])
+                # The client closes each connection once it has checked it.
+                for resumed in (false, true)
+                    accepted = QGI._accept_over_udp(config, sock; deadline_ns = deadline)
+                    @test accepted !== nothing
+                    accepted === nothing && break
+                    server, peer = accepted
+                    @test QGI._drive_connection!(server, sock, peer, c -> c.peer_error !== nothing; deadline_ns = deadline)
+                    @test TLGI.connection_state(server.tls).did_resume == resumed
+                    err = server.peer_error
+                    @test err !== nothing && err.app && err.code == 0
                 end
                 wait(proc)
                 @test success(proc)

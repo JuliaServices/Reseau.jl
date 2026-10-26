@@ -541,6 +541,36 @@ end
         @test_throws TLQ.TLSError TLQ.start!(cli.conn)
     end
 
+    @testset "dropped events have their traffic secrets zeroed" begin
+        # The server's first flight, its secrets included, is queued
+        # unread when its handshake ends, by a failure or by `close`.
+        for fail in (true, false)
+            cli = _quic_test_client(_quic_client_config())
+            srv = _quic_test_server(_quic_server_config())
+            try
+                TLQ.start!(cli.conn)
+                TLQ.start!(srv.conn)
+                hello = TLQ.next_event!(cli.conn)
+                @test hello.kind == QEK.WriteData
+                TLQ.handle_data!(srv.conn, QEL.Initial, hello.data)
+                queued = [e for e in srv.conn.events if e.kind == QEK.SetReadSecret || e.kind == QEK.SetWriteSecret]
+                # Handshake read and write, and 1-RTT write.
+                @test length(queued) == 3 && all(e -> any(!iszero, e.data), queued)
+                if fail
+                    # A malformed client Finished.
+                    @test_throws TLQ.TLSError TLQ.handle_data!(srv.conn, QEL.Handshake, UInt8[0x14, 0x00, 0x00, 0x01, 0x00])
+                    @test TLQ.next_event!(srv.conn).kind == QEK.Error
+                    @test TLQ.next_event!(srv.conn).kind == QEK.NoEvent
+                else
+                    close(srv.conn)
+                end
+                @test all(e -> all(iszero, e.data), queued)
+            finally
+                _quic_close_all!(cli, srv)
+            end
+        end
+    end
+
     @testset "start! runs once" begin
         cli = _quic_test_client(_quic_client_config())
         try
