@@ -11,6 +11,7 @@ module QUIC
 
 using Random
 using ..Reseau: TLS, UDP, IOPoll
+using ..Reseau.IOPoll: _monotonic_ns
 using ..Reseau.TLS:
     _HASH_SHA256,
     _LIBCRYPTO_PATH,
@@ -42,7 +43,6 @@ include("quic/buffers.jl")
 include("quic/stream_state.jl")
 include("quic/connection.jl")
 include("quic/streams.jl")
-include("quic/udp.jl")
 include("quic/api.jl")
 
 end

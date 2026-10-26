@@ -4,7 +4,7 @@ using Reseau
 # Interop with quic-go over loopback UDP, through the helper in
 # quic_go_interop/: a Reseau client against a quic-go server, and a quic-go
 # client against a Reseau server, moving data on bidirectional and
-# unidirectional streams. quic-go starts a key update after 100 packets, so
+# unidirectional streams through the public endpoint API. quic-go starts a key update after 100 packets, so
 # these transfers also cover key updates. Runs when a Go 1.22+ toolchain is on
 # PATH and the quic-go module is cached or can be downloaded.
 
@@ -49,86 +49,76 @@ _qgi_data(n) = rand(UInt8, n)
 # quic-go warns when it cannot enlarge the socket buffers; the transfers here are small.
 _qgi_cmd(cmd) = addenv(cmd, "QUIC_GO_DISABLE_RECEIVE_BUFFER_WARNING" => "true")
 
+# Reads `f(conn)` for a connection's internal state under its endpoint's lock.
+_qgi_state(f, c::QGI.Connection) = lock(() -> f(c.slot.conn), c.ep.lock)
+
 # A Reseau client opens `_QGI_STREAMS` bidirectional streams and one
-# unidirectional stream to the quic-go server, and checks what comes back.
-mutable struct _QgiClientApp
-    sent::Dict{UInt64, Vector{UInt8}}
-    got::Dict{UInt64, Vector{UInt8}}
-    done::Set{UInt64}
-    uni_sent::Vector{UInt8}
-    uni_reply::Union{Nothing, UInt64}
-    started::Bool
-end
-
-_QgiClientApp() = _QgiClientApp(Dict{UInt64, Vector{UInt8}}(), Dict{UInt64, Vector{UInt8}}(), Set{UInt64}(), UInt8[], nothing, false)
-
-function _qgi_client_step!(conn, app::_QgiClientApp)::Bool
-    QGI._handshake_complete(conn) || return false
-    if !app.started
-        app.started = true
-        for _ in 1:_QGI_STREAMS
-            id = QGI._open_stream!(conn)::UInt64
-            app.sent[id] = _qgi_data(_QGI_SIZE)
-            app.got[id] = UInt8[]
-            QGI._stream_write!(conn, id, app.sent[id]; fin = true)
-        end
-        uni = QGI._open_stream!(conn; bidi = false)::UInt64
-        app.uni_sent = _qgi_data(_QGI_SIZE)
-        QGI._stream_write!(conn, uni, app.uni_sent; fin = true)
+# unidirectional stream to the quic-go server, each from its own task, and
+# returns what it sent and what came back on each, keyed by stream ID. The
+# reply to the unidirectional stream is under `uni_reply`.
+function _qgi_client_transfer(conn::QGI.Connection, deadline::Int64)
+    sent = Dict{UInt64, Vector{UInt8}}()
+    got = Dict{UInt64, Vector{UInt8}}()
+    tasks = Task[]
+    for _ in 1:_QGI_STREAMS
+        s = QGI.open_stream(conn; deadline_ns = deadline)
+        data = _qgi_data(_QGI_SIZE)
+        sent[QGI.stream_id(s)] = data
+        QGI.set_read_deadline!(s, deadline)
+        QGI.set_write_deadline!(s, deadline)
+        push!(tasks, Threads.@spawn begin
+            writer = Threads.@spawn (write(s, data); closewrite(s))
+            echoed = read(s)
+            wait(writer)
+            QGI.stream_id(s) => echoed
+        end)
     end
-    if app.uni_reply === nothing
-        id = QGI._accept_stream!(conn)
-        if id !== nothing
-            app.uni_reply = id
-            app.got[id] = UInt8[]
-        end
+    uni = QGI.open_stream(conn; bidi = false, deadline_ns = deadline)
+    uni_sent = _qgi_data(_QGI_SIZE)
+    QGI.set_write_deadline!(uni, deadline)
+    uni_writer = Threads.@spawn (write(uni, uni_sent); closewrite(uni))
+    reply = QGI.accept_stream(conn; deadline_ns = deadline)
+    QGI.set_read_deadline!(reply, deadline)
+    uni_reply = QGI.stream_id(reply)
+    got[uni_reply] = read(reply)
+    wait(uni_writer)
+    for t in tasks
+        id, echoed = fetch(t)
+        got[id] = echoed
     end
-    for (id, got) in app.got
-        id in app.done && continue
-        r = QGI._stream_read!(conn, id)
-        append!(got, r.data)
-        r.fin && push!(app.done, id)
-    end
-    return length(app.done) == _QGI_STREAMS + 1
+    return (; sent, got, uni_sent, uni_reply, reply_bidi = QGI.isbidi(reply))
 end
 
 # The Reseau server echoes bidirectional streams and answers each
 # unidirectional stream with one of its own carrying the same bytes, as the
-# quic-go server does.
-mutable struct _QgiServerApp
-    open::Vector{UInt64}
-    uni_data::Dict{UInt64, Vector{UInt8}}
-    echoed::Int
-end
-
-_QgiServerApp() = _QgiServerApp(UInt64[], Dict{UInt64, Vector{UInt8}}(), 0)
-
-function _qgi_server_step!(conn, app::_QgiServerApp)::Bool
-    while (id = QGI._accept_stream!(conn)) !== nothing
-        push!(app.open, id)
-        QGI._is_bidi(id) || (app.uni_data[id] = UInt8[])
-    end
-    for id in copy(app.open)
-        r = QGI._stream_read!(conn, id)
-        if QGI._is_bidi(id)
-            QGI._stream_write!(conn, id, r.data; fin = r.fin)
-        else
-            append!(app.uni_data[id], r.data)
-            if r.fin
-                reply = QGI._open_stream!(conn; bidi = false)::UInt64
-                QGI._stream_write!(conn, reply, app.uni_data[id]; fin = true)
-            end
+# quic-go server does, until the peer closes the connection. Returns how many
+# streams it finished and the error that ended the connection.
+function _qgi_serve(conn::QGI.Connection)
+    tasks = Task[]
+    err = try
+        while true
+            s = QGI.accept_stream(conn)
+            push!(tasks, Threads.@spawn begin
+                data = read(s)
+                if QGI.isbidi(s)
+                    write(s, data)
+                    closewrite(s)
+                else
+                    reply = QGI.open_stream(conn; bidi = false)
+                    write(reply, data)
+                    closewrite(reply)
+                end
+                true
+            end)
         end
-        if r.fin
-            filter!(!=(id), app.open)
-            app.echoed += 1
-        end
+    catch ex
+        ex isa QGI.ConnectionError || rethrow()
+        ex
     end
-    # The quic-go client closes the connection once it has checked everything.
-    return conn.peer_error !== nothing
+    # The quic-go client closes the connection only once it has checked
+    # everything, so every stream has finished by now.
+    return count(fetch, tasks), err
 end
-
-_qgi_closed(conn) = conn.state == QGI._ConnState.Closed || conn.state == QGI._ConnState.Draining
 
 @testset "QUIC interop with quic-go" begin
     go = _qgi_go()
@@ -147,28 +137,29 @@ _qgi_closed(conn) = conn.state == QGI._ConnState.Closed || conn.state == QGI._Co
             proc = run(pipeline(_qgi_cmd(`$bin server -cert $_QGI_CERT -key $_QGI_KEY -addr 127.0.0.1:0`);
                 stdin = stdin_pipe, stdout = stdout_pipe, stderr = stderr_log); wait = false)
             close(stdout_pipe.in)
-            sock = nothing
+            client = nothing
             try
                 line = readline(stdout_pipe)
                 m = match(r"^ADDR 127\.0\.0\.1:(\d+)$", line)
                 @test m !== nothing
                 port = parse(Int, m[1])
-                sock = UDGI.connect(UDGI.loopback_addr(port))
                 deadline = Int64(time_ns()) + 60_000_000_000
                 config = TLGI.Config(verify_peer = false, server_name = "localhost", alpn_protocols = [_QGI_ALPN])
-                client = QGI._client_connection(config, Int64(time_ns()))
-                app = _QgiClientApp()
-                @test QGI._drive_connection!(client, sock, nothing, c -> _qgi_client_step!(c, app); deadline_ns = deadline)
-                for (id, sent) in app.sent
-                    @test app.got[id] == sent
+                client = QGI.connect(UDGI.loopback_addr(port), config; deadline_ns = deadline)
+                @test QGI.alpn_protocol(client) == _QGI_ALPN
+                r = _qgi_client_transfer(client, deadline)
+                @test length(r.sent) == _QGI_STREAMS
+                for (id, sent) in r.sent
+                    @test r.got[id] == sent
                 end
-                @test app.uni_reply !== nothing && app.got[app.uni_reply] == app.uni_sent
-                @test client.error === nothing && client.peer_error === nothing
-                @test client.key_updates >= 1
-                QGI._close_connection!(client, UInt64(0), "done", Int64(time_ns()))
-                QGI._drive_connection!(client, sock, nothing, _qgi_closed; deadline_ns = Int64(time_ns()) + 5_000_000_000)
+                @test !r.reply_bidi && r.got[r.uni_reply] == r.uni_sent
+                @test _qgi_state(c -> c.error === nothing && c.peer_error === nothing, client)
+                @test _qgi_state(c -> c.key_updates, client) >= 1
+                close(client; code = 0, reason = "done")
+                # Wait out the closing period, so quic-go sees the close.
+                QGI._wait_endpoint_done(client.ep, Int64(time_ns()) + 5_000_000_000)
             finally
-                sock === nothing || close(sock)
+                client === nothing || close(client)
                 close(stdin_pipe)
                 wait(proc)
             end
@@ -177,32 +168,29 @@ _qgi_closed(conn) = conn.state == QGI._ConnState.Closed || conn.state == QGI._Co
         end
 
         @testset "quic-go client, Reseau server" begin
-            sock = UDGI.listen(UDGI.loopback_addr(0))
+            config = TLGI.Config(verify_peer = false, cert_file = _QGI_CERT, key_file = _QGI_KEY, alpn_protocols = [_QGI_ALPN])
+            listener = QGI.listen(UDGI.loopback_addr(0), config)
             out_log = joinpath(dir, "client.out")
             err_log = joinpath(dir, "client.log")
+            server = nothing
             try
-                port = UDGI.local_addr(sock).port
+                port = QGI.local_addr(listener).port
                 proc = run(pipeline(_qgi_cmd(`$bin client -addr 127.0.0.1:$port -size $_QGI_SIZE -streams $_QGI_STREAMS`);
                     stdout = out_log, stderr = err_log); wait = false)
                 deadline = Int64(time_ns()) + 60_000_000_000
-                config = TLGI.Config(verify_peer = false, cert_file = _QGI_CERT, key_file = _QGI_KEY, alpn_protocols = [_QGI_ALPN])
-                accepted = QGI._accept_over_udp(config, sock; deadline_ns = deadline)
-                @test accepted !== nothing
-                if accepted !== nothing
-                    server, peer = accepted
-                    app = _QgiServerApp()
-                    @test QGI._drive_connection!(server, sock, peer, c -> _qgi_server_step!(c, app); deadline_ns = deadline)
-                    @test app.echoed == _QGI_STREAMS + 1
-                    @test server.error === nothing
-                    err = server.peer_error
-                    @test err !== nothing && err.app && err.code == 0
-                    @test server.key_updates >= 1
-                end
+                server = QGI.accept(listener; deadline_ns = deadline)
+                @test QGI.alpn_protocol(server) == _QGI_ALPN
+                echoed, err = _qgi_serve(server)
+                @test echoed == _QGI_STREAMS + 1
+                @test err.remote && err.app && err.code == 0
+                @test _qgi_state(c -> c.error === nothing, server)
+                @test _qgi_state(c -> c.key_updates, server) >= 1
                 wait(proc)
                 @test success(proc)
                 @test strip(read(out_log, String)) == "OK"
             finally
-                close(sock)
+                server === nothing || close(server)
+                close(listener)
             end
             log = read(err_log, String)
             isempty(log) || @info "quic-go client log" log

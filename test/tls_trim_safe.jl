@@ -492,60 +492,6 @@ function _quic_trim_frames!()::Nothing
     return nothing
 end
 
-# Callable structs rather than closures drive the UDP connections, so nothing
-# captured gets boxed.
-
-# Sends `data` on a bidirectional stream and reads back the echo.
-mutable struct _QuicTrimEchoClient
-    data::Vector{UInt8}
-    got::Vector{UInt8}
-    id::UInt64
-    started::Bool
-end
-
-function (c::_QuicTrimEchoClient)(conn::Reseau.QUIC._Connection)::Bool
-    QP = Reseau.QUIC
-    QP._handshake_complete(conn) || return false
-    if !c.started
-        c.started = true
-        c.id = QP._open_stream!(conn)::UInt64
-        QP._stream_write!(conn, c.id, c.data; fin = true)
-    end
-    r = QP._stream_read!(conn, c.id)
-    append!(c.got, r.data)
-    return r.fin
-end
-
-# Echoes every stream until the peer closes the connection.
-struct _QuicTrimEchoServer
-    open::Vector{UInt64}
-end
-
-function (e::_QuicTrimEchoServer)(conn::Reseau.QUIC._Connection)::Bool
-    QP = Reseau.QUIC
-    while true
-        id = QP._accept_stream!(conn)
-        id === nothing && break
-        push!(e.open, id)
-    end
-    for id in copy(e.open)
-        r = QP._stream_read!(conn, id)
-        QP._stream_write!(conn, id, r.data; fin = r.fin)
-        r.fin && filter!(!=(id), e.open)
-    end
-    return conn.peer_error !== nothing
-end
-
-_quic_trim_closed(conn::Reseau.QUIC._Connection)::Bool =
-    conn.state == Reseau.QUIC._ConnState.Closed || conn.state == Reseau.QUIC._ConnState.Draining
-
-function _quic_trim_server_entry(config::TL.Config, sock::Reseau.UDP.Conn, deadline::Int64)::Bool
-    accepted = Reseau.QUIC._accept_over_udp(config, sock; deadline_ns = deadline)
-    accepted === nothing && return false
-    conn, peer = accepted
-    return Reseau.QUIC._drive_connection!(conn, sock, peer, _QuicTrimEchoServer(UInt64[]); deadline_ns = deadline)
-end
-
 # Moves datagrams both ways until neither side sends, then fires timers due
 # within 100 ms, until the next is further off. Returns the advanced clock.
 function _quic_trim_settle!(client::Reseau.QUIC._Connection, server::Reseau.QUIC._Connection, now::Int64)::Int64
@@ -634,8 +580,7 @@ function _quic_trim_streams!(client::Reseau.QUIC._Connection, server::Reseau.QUI
     return nothing
 end
 
-# A QUIC connection in memory, through streams and closing, then an echo over
-# loopback UDP.
+# A QUIC connection in memory, through streams and closing.
 function _quic_trim_connection!()::Nothing
     QP = Reseau.QUIC
     client_config = TL.Config(verify_peer = false, server_name = "localhost", alpn_protocols = ["h3"])
@@ -660,29 +605,11 @@ function _quic_trim_connection!()::Nothing
     end
     (QP._handshake_confirmed(client) && QP._handshake_confirmed(server)) || error("QUIC trim in-memory handshake did not confirm")
     _quic_trim_streams!(client, server, _quic_trim_settle!(client, server, now))
-
-    server_sock = Reseau.UDP.listen(Reseau.UDP.loopback_addr(0))
-    client_sock = Reseau.UDP.connect(Reseau.UDP.local_addr(server_sock)::Reseau.UDP.SocketAddrV4)
-    try
-        deadline = Int64(time_ns()) + 20_000_000_000
-        server_task = Threads.@spawn _quic_trim_server_entry(server_config, server_sock, deadline)
-        udp_client = QP._client_connection(client_config, Int64(time_ns()))
-        echo = _QuicTrimEchoClient(rand(UInt8, 200_000), UInt8[], UInt64(0), false)
-        QP._drive_connection!(udp_client, client_sock, nothing, echo; deadline_ns = deadline) ||
-            error("QUIC trim UDP echo did not finish")
-        echo.got == echo.data || error("QUIC trim UDP echo mismatch")
-        QP._close_connection!(udp_client, UInt64(0), "done", Int64(time_ns()))
-        QP._drive_connection!(udp_client, client_sock, nothing, _quic_trim_closed; deadline_ns = deadline)
-        fetch(server_task)::Bool || error("QUIC trim UDP server did not see the close")
-    finally
-        close(client_sock)
-        close(server_sock)
-    end
     return nothing
 end
 
-# The public QUIC API: a listener and a connection driven by their receive
-# tasks, with streams used as IO from another task.
+# The public QUIC API over loopback UDP: a listener and a connection driven by
+# their receive tasks, with streams used as IO from another task.
 function _quic_trim_api_server(listener::Reseau.QUIC.Listener)::Int
     QP = Reseau.QUIC
     conn = QP.accept(listener; deadline_ns = Int64(time_ns()) + 20_000_000_000)
@@ -701,6 +628,9 @@ function _quic_trim_api_server(listener::Reseau.QUIC.Listener)::Int
         QP.accept_stream(conn)
     catch err
         err isa QP.ConnectionError || rethrow()
+        # Only the client's application close ends the connection.
+        e = err::QP.ConnectionError
+        (e.remote && e.app && e.code == 0x100) || return -1
     end
     return echoed
 end
@@ -716,7 +646,7 @@ function _quic_trim_public_api!()::Nothing
         conn = QP.connect(addr, client_config; deadline_ns = Int64(time_ns()) + 20_000_000_000)
         QP.alpn_protocol(conn) == "h3" || error("QUIC trim API ALPN mismatch")
         s = QP.open_stream(conn)
-        payload = rand(UInt8, 50_000)
+        payload = rand(UInt8, 200_000)
         write(s, payload)
         closewrite(s)
         QP.set_read_deadline!(s, Int64(time_ns()) + 20_000_000_000)
