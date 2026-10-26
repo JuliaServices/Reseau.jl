@@ -478,22 +478,9 @@ function _tls13_read_record!(tcp::TCP.Conn, state::_TLS13NativeClientState; bloc
 end
 
 function _tls13_try_take_handshake_message!(state::_TLS13NativeClientState)::Union{Nothing, Vector{UInt8}}
-    available = _tls_buffer_available(state.handshake_buffer, state.handshake_buffer_pos)
-    available == 0 && return nothing
-    available >= 4 || return nothing
-    pos = state.handshake_buffer_pos
-    msg_len = 4 +
-        (Int(state.handshake_buffer[pos + 1]) << 16) +
-        (Int(state.handshake_buffer[pos + 2]) << 8) +
-        Int(state.handshake_buffer[pos + 3])
-    msg_type = state.handshake_buffer[pos]
-    # The cap is on the body, as in Go's readHandshake; `msg_len` includes the header.
-    msg_len - 4 <= _tls_max_handshake_frame_size(msg_type) ||
-        _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received oversized handshake message")
-    available >= msg_len || return nothing
-    raw = Vector{UInt8}(undef, msg_len)
-    copyto!(raw, 1, state.handshake_buffer, pos, msg_len)
-    state.handshake_buffer_pos += msg_len
+    raw = _tls_peek_handshake_message(state.handshake_buffer, state.handshake_buffer_pos)
+    raw === nothing && return nothing
+    state.handshake_buffer_pos += length(raw)
     state.handshake_buffer_pos = _tls_compact_buffer!(state.handshake_buffer, state.handshake_buffer_pos)
     return raw
 end

@@ -1483,20 +1483,34 @@ function _native_tls12_client_handshake!(conn::Conn)::Nothing
 end
 
 function _finish_native_tls13_client_handshake!(conn::Conn, state::_TLS13ClientHandshakeState, cache_key::String)::Nothing
-    native_state = _native_tls13_state(conn)
-    # Publish before the conn-level release below so a reader that clears
-    # `_ensure_handshake!` also observes the record layer as post-handshake.
+    # The helper marks the record layer post-handshake. Do that before the
+    # conn-level release below so a reader that clears `_ensure_handshake!`
+    # also observes the record layer as post-handshake.
+    negotiated_alpn = _tls13_record_client_session!(_native_tls13_state(conn), conn.config, state, cache_key)
+    _set_handshake_complete!(conn, TLS1_3_VERSION, "TLSv1.3", negotiated_alpn)
+    return nothing
+end
+
+@inline function _tls13_client_negotiated_alpn(state::_TLS13ClientHandshakeState)::Union{Nothing, String}
+    !isempty(state.client_protocol) && return state.client_protocol
+    !isempty(state.client_hello.alpn_protocols) && return ""
+    return nothing
+end
+
+# Records what a completed TLS 1.3 client handshake leaves behind for tickets
+# and `connection_state`, shared by `Conn` and `QUICConn`. Returns the
+# negotiated ALPN.
+function _tls13_record_client_session!(
+        native_state::_TLS13NativeClientState,
+        config::Config,
+        state::_TLS13ClientHandshakeState,
+        cache_key::String,
+    )::Union{Nothing, String}
     native_state.handshake_complete = true
     if state.using_psk
-        _tls_session_cache_put!(conn.config._client_session_cache, cache_key, nothing, _securezero_tls13_client_session!)
+        _tls_session_cache_put!(config._client_session_cache, cache_key, nothing, _securezero_tls13_client_session!)
     end
-    negotiated_alpn = if !isempty(state.client_protocol)
-        state.client_protocol
-    elseif !isempty(state.client_hello.alpn_protocols)
-        ""
-    else
-        nothing
-    end
+    negotiated_alpn = _tls13_client_negotiated_alpn(state)
     _securezero!(native_state.resumption_secret)
     for cert in native_state.session_certificates
         _securezero!(cert)
@@ -1520,8 +1534,7 @@ function _finish_native_tls13_client_handshake!(conn::Conn, state::_TLS13ClientH
     native_state.did_resume = state.using_psk
     native_state.did_hello_retry_request = state.did_hello_retry_request
     native_state.curve_id = state.server_hello.server_share === nothing ? UInt16(0) : (state.server_hello.server_share::_TLSKeyShare).group
-    _set_handshake_complete!(conn, TLS1_3_VERSION, "TLSv1.3", negotiated_alpn)
-    return nothing
+    return negotiated_alpn
 end
 
 function _finish_native_tls12_client_handshake!(conn::Conn, state::_TLS12ClientHandshakeState)::Nothing
@@ -1542,22 +1555,30 @@ function _finish_native_tls12_client_handshake!(conn::Conn, state::_TLS12ClientH
 end
 
 function _finish_native_tls13_server_handshake!(conn::Conn, state::_TLS13ServerHandshakeState)::Nothing
-    native_state = _native_tls13_state(conn)
+    negotiated_alpn = _tls13_record_server_session!(_native_tls13_state(conn), conn.config, state)
+    _set_handshake_complete!(conn, TLS1_3_VERSION, "TLSv1.3", negotiated_alpn)
+    return nothing
+end
+
+@inline function _tls13_server_negotiated_alpn(config::Config, state::_TLS13ServerHandshakeState)::Union{Nothing, String}
+    !isempty(state.selected_alpn) && return state.selected_alpn
+    !isempty(state.client_hello.alpn_protocols) && !isempty(config.alpn_protocols) && return ""
+    return nothing
+end
+
+# Server counterpart of `_tls13_record_client_session!`.
+function _tls13_record_server_session!(
+        native_state::_TLS13NativeClientState,
+        config::Config,
+        state::_TLS13ServerHandshakeState,
+    )::Union{Nothing, String}
     native_state.handshake_complete = true
     native_state.session_cipher_suite = state.cipher_suite
     native_state.session_alpn = state.selected_alpn
     native_state.did_resume = state.using_psk
     native_state.did_hello_retry_request = state.did_hello_retry_request
     native_state.curve_id = state.selected_group
-    negotiated_alpn = if !isempty(state.selected_alpn)
-        state.selected_alpn
-    elseif !isempty(state.client_hello.alpn_protocols) && !isempty(conn.config.alpn_protocols)
-        ""
-    else
-        nothing
-    end
-    _set_handshake_complete!(conn, TLS1_3_VERSION, "TLSv1.3", negotiated_alpn)
-    return nothing
+    return _tls13_server_negotiated_alpn(config, state)
 end
 
 function _finish_native_tls12_server_handshake!(conn::Conn, state::_TLS12ServerHandshakeState)::Nothing
@@ -2859,8 +2880,11 @@ end
 end
 
 function _tls13_has_resumable_session(config::Config, tcp::TCP.Conn)::Bool
+    return _tls13_has_resumable_session(config, _tls13_client_session_cache_key(config, tcp))
+end
+
+function _tls13_has_resumable_session(config::Config, cache_key::String)::Bool
     config.session_tickets_disabled && return false
-    cache_key = _tls13_client_session_cache_key(config, tcp)
     isempty(cache_key) && return false
     session = _tls_session_cache_peek(config._client_session_cache, cache_key)
     session === nothing && return false
@@ -3281,5 +3305,7 @@ function listen(
     listener = TCP.listen(local_addr; backlog = backlog, reuseaddr = reuseaddr)
     return Listener(listener, config)
 end
+
+include("tls/quic.jl")
 
 end

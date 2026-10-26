@@ -1114,6 +1114,139 @@ function sendto_ptr!(
     end
 end
 
+# The segment size in a UDP_GRO control message among `controllen` bytes of
+# control data at `control`, or 0 when there is none.
+function _gro_segment_size(control::Ptr{UInt8}, controllen::Int)::Int
+    off = 0
+    while off + 16 <= controllen
+        len = Int(unsafe_load(Ptr{UInt64}(control + off)))
+        len < 16 && return 0
+        level = unsafe_load(Ptr{Int32}(control + off + 8))
+        type = unsafe_load(Ptr{Int32}(control + off + 12))
+        if level == SocketOps.SOL_UDP && type == SocketOps.UDP_GRO && len >= 16 + 2
+            return Int(unsafe_load(Ptr{UInt16}(control + off + 16)))
+        end
+        off += (len + 7) & ~7
+    end
+    return 0
+end
+
+"""
+    recvmsg_segments_ptr!(fd, p, nbytes, root, wait) -> (nread, peer, segment_size, truncated)
+
+Receive into `p` as [`recvfrom_ptr!`](@ref) does, and on Linux also report
+the size of the datagrams the kernel coalesced into this buffer (UDP generic
+receive offload), or 0 when it holds one datagram. With `wait = false` it
+returns `nread = -1` instead of waiting, as [`try_recvfrom_ptr!`](@ref).
+"""
+function recvmsg_segments_ptr!(
+        fd::FD,
+        p::Ptr{UInt8},
+        nbytes::Int,
+        root,
+        wait::Bool,
+    )::Tuple{Int, SocketOps.AcceptPeer, Int, Bool}
+    @static if !Sys.islinux() || ENDIAN_BOM != 0x04030201
+        n, peer, truncated = wait ? recvfrom_ptr!(fd, p, nbytes, root) : try_recvfrom_ptr!(fd, p, nbytes, root)
+        return n, peer, 0, truncated
+    else
+        _fd_read_lock!(fd)
+        try
+            wait && prepareread(fd.pd, fd.is_file, false)
+            namebuf = Ref{NTuple{128, UInt8}}()
+            control = Ref{NTuple{8, UInt64}}()
+            iov = Ref(SocketOps.IOVec(Ptr{Cvoid}(p), Csize_t(nbytes)))
+            GC.@preserve namebuf control iov root begin
+                name_ptr = Base.unsafe_convert(Ptr{Cvoid}, namebuf)
+                control_ptr = Base.unsafe_convert(Ptr{Cvoid}, control)
+                iov_ptr = Base.unsafe_convert(Ptr{SocketOps.IOVec}, iov)
+                while true
+                    msg = Ref(SocketOps.MsgHdr(name_ptr, SocketOps.SockLen(128), iov_ptr, Csize_t(1), control_ptr, Csize_t(64), Cint(0)))
+                    n = SocketOps.recv_msg!(fd.sysfd, msg)
+                    if n >= 0
+                        hdr = msg[]
+                        peer = SocketOps.decode_sockaddr(Ptr{UInt8}(name_ptr), Int(hdr.msg_namelen))
+                        truncated = (hdr.msg_flags & SocketOps.MSG_TRUNC) != Cint(0)
+                        segment = _gro_segment_size(Ptr{UInt8}(control_ptr), Int(hdr.msg_controllen))
+                        return Int(n), peer, segment, truncated
+                    end
+                    errno = SocketOps.last_error()
+                    if errno == Int32(Base.Libc.EAGAIN) || errno == Int32(Base.Libc.EINTR)
+                        wait || return -1, nothing, 0, false
+                        if pollable(fd.pd)
+                            waitread(fd.pd, fd.is_file)
+                            continue
+                        end
+                    end
+                    throw(SystemError("recvmsg", Int(errno)))
+                end
+            end
+        finally
+            _fd_read_unlock!(fd)
+        end
+    end
+end
+
+"""
+    sendmsg_segments_ptr!(fd, p, nbytes, root, dest, destlen, segment_size) -> Int
+
+Linux only: send `nbytes` from `p` as datagrams of `segment_size` bytes, the
+last perhaps shorter, with one `sendmsg` through UDP generic segmentation
+offload (a UDP_SEGMENT control message). `dest` is as for
+[`sendto_ptr!`](@ref). Throws `SystemError` when the kernel or the device
+cannot segment the buffer, in which case nothing was sent.
+"""
+function sendmsg_segments_ptr!(
+        fd::FD,
+        p::Ptr{UInt8},
+        nbytes::Int,
+        root,
+        dest::_DatagramDest,
+        destlen::Int,
+        segment_size::Int,
+    )::Int
+    @static if !Sys.islinux() || ENDIAN_BOM != 0x04030201
+        throw(SystemError("sendmsg", Int(Base.Libc.ENOSYS)))
+    else
+        _fd_write_lock!(fd)
+        try
+            preparewrite(fd.pd, fd.is_file)
+            # struct cmsghdr { size_t cmsg_len; int cmsg_level; int cmsg_type; }
+            # followed by the uint16 segment size, padded to CMSG_SPACE(2).
+            control = Ref((
+                UInt64(16 + 2),
+                UInt64(UInt32(SocketOps.SOL_UDP)) | (UInt64(UInt32(SocketOps.UDP_SEGMENT)) << 32),
+                UInt64(UInt16(segment_size)),
+            ))
+            iov = Ref(SocketOps.IOVec(Ptr{Cvoid}(p), Csize_t(nbytes)))
+            GC.@preserve control iov root dest begin
+                name_ptr = dest === nothing ? C_NULL : Base.unsafe_convert(Ptr{Cvoid}, dest)
+                msg = Ref(SocketOps.MsgHdr(
+                    name_ptr,
+                    SocketOps.SockLen(dest === nothing ? 0 : destlen),
+                    Base.unsafe_convert(Ptr{SocketOps.IOVec}, iov),
+                    Csize_t(1),
+                    Base.unsafe_convert(Ptr{Cvoid}, control),
+                    Csize_t(24),
+                    Cint(0),
+                ))
+                while true
+                    n = SocketOps.send_msg!(fd.sysfd, msg)
+                    n >= 0 && return Int(n)
+                    errno = SocketOps.last_error()
+                    if errno == Int32(Base.Libc.EAGAIN) && pollable(fd.pd)
+                        waitwrite(fd.pd, fd.is_file)
+                        continue
+                    end
+                    throw(SystemError("sendmsg", Int(errno)))
+                end
+            end
+        finally
+            _fd_write_unlock!(fd)
+        end
+    end
+end
+
 """
     recvfrom_ptr!(fd, p, nbytes, root) -> (nread, peer, truncated)
 
@@ -1205,5 +1338,48 @@ function recvfrom_ptr!(
         end
     finally
         _fd_read_unlock!(fd)
+    end
+end
+
+"""
+    try_recvfrom_ptr!(fd, p, nbytes, root) -> (nread, peer, truncated)
+
+Like [`recvfrom_ptr!`](@ref), but never waits: `nread` is `-1` when no
+datagram is queued. On Windows, where receives complete through IOCP, it
+always returns `-1`, so callers fall back to blocking receives. Errors and
+deadlines are left for the next blocking receive to report, except that a
+failing `recvmsg` other than EAGAIN throws `SystemError`.
+"""
+function try_recvfrom_ptr!(
+        fd::FD,
+        p::Ptr{UInt8},
+        nbytes::Int,
+        root,
+    )::Tuple{Int, SocketOps.AcceptPeer, Bool}
+    @static if Sys.iswindows()
+        return -1, nothing, false
+    else
+        _fd_read_lock!(fd)
+        try
+            namebuf = Ref{NTuple{128, UInt8}}()
+            iov = Ref(SocketOps.IOVec(Ptr{Cvoid}(p), Csize_t(nbytes)))
+            GC.@preserve namebuf iov root begin
+                name_ptr = Base.unsafe_convert(Ptr{Cvoid}, namebuf)
+                iov_ptr = Base.unsafe_convert(Ptr{SocketOps.IOVec}, iov)
+                msg = Ref(SocketOps.MsgHdr(name_ptr, SocketOps.SockLen(128), iov_ptr, 1, C_NULL, 0, Cint(0)))
+                n = SocketOps.recv_msg!(fd.sysfd, msg)
+                if n >= 0
+                    hdr = msg[]
+                    peer = SocketOps.decode_sockaddr(Ptr{UInt8}(name_ptr), Int(hdr.msg_namelen))
+                    truncated = (hdr.msg_flags & SocketOps.MSG_TRUNC) != Cint(0)
+                    return Int(n), peer, truncated
+                end
+                errno = SocketOps.last_error()
+                (errno == Int32(Base.Libc.EAGAIN) || errno == Int32(Base.Libc.EINTR)) && return -1, nothing, false
+                throw(SystemError("recvmsg", Int(errno)))
+            end
+        finally
+            _fd_read_unlock!(fd)
+        end
     end
 end

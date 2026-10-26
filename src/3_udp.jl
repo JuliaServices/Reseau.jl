@@ -113,6 +113,15 @@ const _V4_MAPPED_PREFIX = (
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff,
 )
 
+# Compares element by element: slicing the tuple would lose its length and
+# leave a dynamic `==` that `juliac --trim` cannot compile.
+@inline function _is_v4_mapped(ip::NTuple{16, UInt8})::Bool
+    for i in 1:12
+        ip[i] == _V4_MAPPED_PREFIX[i] || return false
+    end
+    return true
+end
+
 """
     _coerce_family(addr, family) -> SocketEndpoint
 
@@ -131,7 +140,7 @@ mismatched family throws `ArgumentError`.
     end
     if family == SocketOps.AF_INET && addr isa SocketAddrV6
         ip = addr.ip
-        if ip[1:12] == _V4_MAPPED_PREFIX && addr.scope_id == 0
+        if _is_v4_mapped(ip) && addr.scope_id == 0
             return SocketAddrV4((ip[13], ip[14], ip[15], ip[16]), addr.port)
         end
     end
@@ -297,6 +306,26 @@ function _send_payload!(conn::Conn, data::AbstractVector{UInt8}, dest)::Int
     return _send_payload!(conn, Vector{UInt8}(data), dest)
 end
 
+@inline _segments_dest(addr::SocketAddrV4) = (Ref(_to_sockaddr(addr)), sizeof(SocketOps.SockAddrIn))
+@inline _segments_dest(addr::SocketAddrV6) = (Ref(_to_sockaddr(addr)), sizeof(SocketOps.SockAddrIn6))
+
+# Linux only: sends `nbytes` of `buf` as datagrams of `segment_size` bytes,
+# the last perhaps shorter, with one system call (UDP generic segmentation
+# offload), to the connected peer when `addr` is `nothing`. Throws
+# `SystemError` when segmentation is unavailable; nothing was sent then.
+function _send_segments!(conn::Conn, buf::Vector{UInt8}, nbytes::Int, segment_size::Int, addr::Union{Nothing, SocketAddr})::Nothing
+    0 <= nbytes <= length(buf) || throw(ArgumentError("nbytes exceeds the buffer"))
+    if addr === nothing
+        _is_connected(conn) || throw(ArgumentError("sending without an address requires a connected UDP socket"))
+        GC.@preserve buf IOPoll.sendmsg_segments_ptr!(conn.fd.pfd, pointer(buf), nbytes, buf, nothing, 0, segment_size)
+    else
+        _is_connected(conn) && throw(ArgumentError("sending to an address on a connected UDP socket"))
+        dest, destlen = _segments_dest(_coerce_family(addr, conn.fd.family))
+        GC.@preserve buf IOPoll.sendmsg_segments_ptr!(conn.fd.pfd, pointer(buf), nbytes, buf, dest, destlen, segment_size)
+    end
+    return nothing
+end
+
 """
     send(conn::Conn, data) -> Nothing
 
@@ -349,6 +378,111 @@ function _recv_datagram!(conn::Conn, buf::MutableByteBuffer, allow_truncate::Boo
         throw(TruncatedDatagramError(n))
     end
     return n, _peer_endpoint(peer)
+end
+
+# Receives one datagram into `buf` only if one is already queued: `(-1,
+# nothing)` otherwise, and always on Windows. Used to drain a socket after a
+# blocking receive returned, without waiting again.
+function _try_recvfrom!(conn::Conn, buf::Vector{UInt8})::Tuple{Int, Union{Nothing, SocketEndpoint}}
+    n, peer, truncated = GC.@preserve buf IOPoll.try_recvfrom_ptr!(conn.fd.pfd, pointer(buf), length(buf), buf)
+    n < 0 && return -1, nothing
+    truncated && throw(TruncatedDatagramError(n))
+    return n, _peer_endpoint(peer)
+end
+
+# Linux only: lets the kernel coalesce runs of datagrams from one peer into
+# one receive (UDP generic receive offload); read them with
+# `_recv_segments!`. Returns whether the option took effect.
+function _enable_gro!(conn::Conn)::Bool
+    @static if Sys.islinux()
+        try
+            SocketOps.set_sockopt_int(conn.fd.pfd.sysfd, SocketOps.SOL_UDP, SocketOps.UDP_GRO, 1)
+            return true
+        catch
+            return false
+        end
+    else
+        return false
+    end
+end
+
+# Receives into `buf`: the byte count, the sender, and the size of each
+# datagram when the kernel coalesced several (0 for a single datagram). With
+# `wait = false`, returns `(-1, nothing, 0)` when nothing is queued.
+function _recv_segments!(conn::Conn, buf::Vector{UInt8}, wait::Bool)::Tuple{Int, Union{Nothing, SocketEndpoint}, Int}
+    n, peer, segment, truncated = GC.@preserve buf IOPoll.recvmsg_segments_ptr!(conn.fd.pfd, pointer(buf), length(buf), buf, wait)
+    n < 0 && return -1, nothing, 0
+    truncated && throw(TruncatedDatagramError(n))
+    return n, _peer_endpoint(peer), segment
+end
+
+# Path MTU options: linux/in.h and linux/in6.h; Darwin's netinet/in.h and
+# netinet6/in6.h.
+@static if Sys.islinux()
+    const _IP_MTU_DISCOVER = Cint(10)
+    const _IP_MTU = Cint(14)
+    const _IPV6_MTU_DISCOVER = Cint(23)
+    const _IPV6_MTU = Cint(24)
+    # Set Don't Fragment and ignore the kernel's cached path MTU, so that a
+    # datagram too large for the path is lost (or refused locally) instead of
+    # fragmented: what path MTU probing needs.
+    const _PMTUDISC_PROBE = 3
+elseif Sys.isapple()
+    const _IP_DONTFRAG = Cint(28)
+    const _IPV6_DONTFRAG = Cint(62)
+end
+
+# Sets Don't Fragment on outgoing datagrams (Linux and macOS); returns whether
+# it took effect. On an IPv6 socket the IPv4 option is set too, for IPv4
+# traffic on a dual-stack socket.
+function _set_dont_fragment!(conn::Conn)::Bool
+    sysfd = conn.fd.pfd.sysfd
+    v6 = conn.fd.family == SocketOps.AF_INET6
+    @static if Sys.islinux()
+        try
+            if v6
+                SocketOps.set_sockopt_int(sysfd, SocketOps.IPPROTO_IPV6, _IPV6_MTU_DISCOVER, _PMTUDISC_PROBE)
+                try
+                    SocketOps.set_sockopt_int(sysfd, SocketOps.IPPROTO_IP, _IP_MTU_DISCOVER, _PMTUDISC_PROBE)
+                catch
+                end
+            else
+                SocketOps.set_sockopt_int(sysfd, SocketOps.IPPROTO_IP, _IP_MTU_DISCOVER, _PMTUDISC_PROBE)
+            end
+            return true
+        catch
+            return false
+        end
+    elseif Sys.isapple()
+        try
+            if v6
+                SocketOps.set_sockopt_int(sysfd, SocketOps.IPPROTO_IPV6, _IPV6_DONTFRAG, 1)
+            else
+                SocketOps.set_sockopt_int(sysfd, SocketOps.IPPROTO_IP, _IP_DONTFRAG, 1)
+            end
+            return true
+        catch
+            return false
+        end
+    else
+        return false
+    end
+end
+
+# The MTU of a connected socket's route, from the kernel (Linux), or 0 when
+# unknown, as for an unconnected socket.
+function _path_mtu(conn::Conn)::Int
+    @static if Sys.islinux()
+        _is_connected(conn) || return 0
+        v6 = conn.fd.family == SocketOps.AF_INET6
+        try
+            return Int(SocketOps.get_sockopt_int(conn.fd.pfd.sysfd, v6 ? SocketOps.IPPROTO_IPV6 : SocketOps.IPPROTO_IP, v6 ? _IPV6_MTU : _IP_MTU))
+        catch
+            return 0
+        end
+    else
+        return 0
+    end
 end
 
 const _RECV_SCRATCH_BYTES = 65535

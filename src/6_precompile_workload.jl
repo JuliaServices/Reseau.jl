@@ -858,6 +858,63 @@ function _pc_run_tls_workload!()
     return nothing
 end
 
+# A QUIC connection over loopback through the public API: handshake, one
+# stream echoed by a server task, and close.
+function _pc_quic_echo_server(listener::QUIC.Listener)::Int
+    conn = QUIC.accept(listener; deadline_ns = _pc_deadline_ns())
+    try
+        s = QUIC.accept_stream(conn; deadline_ns = _pc_deadline_ns())
+        QUIC.set_read_deadline!(s, _pc_deadline_ns())
+        data = read(s)
+        write(s, data)
+        closewrite(s)
+        return length(data)
+    finally
+        close(conn)
+    end
+end
+
+function _pc_run_quic_workload!()
+    IP._runtime_supported() || return nothing
+    cert = _pc_tls_resource_file("unittests.crt")
+    key = _pc_tls_resource_file("unittests.key")
+    (cert === nothing || key === nothing) && return nothing
+    server_config = TL.Config(
+        _verification_time_s = _PC_TLS_VERIFICATION_TIME_S,
+        verify_peer = false, cert_file = cert, key_file = key, alpn_protocols = ["h3"],
+    )
+    client_config = TL.Config(
+        _verification_time_s = _PC_TLS_VERIFICATION_TIME_S,
+        verify_peer = false, server_name = "localhost", alpn_protocols = ["h3"],
+    )
+    listener = QUIC.listen(NU.loopback_addr(0), server_config)
+    conn = nothing
+    try
+        server = Threads.@spawn _pc_quic_echo_server(listener)
+        addr = QUIC.local_addr(listener)::NU.SocketAddrV4
+        conn = QUIC.connect(addr, client_config; deadline_ns = _pc_deadline_ns())
+        s = QUIC.open_stream(conn; deadline_ns = _pc_deadline_ns())
+        QUIC.set_read_deadline!(s, _pc_deadline_ns())
+        QUIC.set_write_deadline!(s, _pc_deadline_ns())
+        payload = UInt8[0x51, 0x55, 0x49, 0x43]
+        write(s, payload)
+        closewrite(s)
+        read(s) == payload || throw(ArgumentError("quic workload echo mismatch"))
+        _pc_wait_task_done(server)
+        fetch(server)::Int == length(payload) || throw(ArgumentError("quic workload server mismatch"))
+    finally
+        conn === nothing || _pc_close_nothrow(conn)
+        _pc_close_nothrow(listener)
+        # Precompilation must not end with sockets registered with the poller
+        # or receive tasks running, so wait out the connections' closing
+        # periods.
+        conn === nothing || QUIC._wait_endpoint_done((conn::QUIC.Connection).ep, _pc_deadline_ns())
+        QUIC._wait_endpoint_done(listener.ep, _pc_deadline_ns())
+        IP.shutdown!()
+    end
+    return nothing
+end
+
 function _pc_run_selected_workloads!()::Nothing
     _pc_workload_enabled("eventloops") && _pc_run_eventloops_workload!()
     _pc_workload_enabled("internal_poll") && _pc_run_internal_poll_workload!()
@@ -866,6 +923,7 @@ function _pc_run_selected_workloads!()::Nothing
     _pc_workload_enabled("tcp") && _pc_run_tcp_workload!()
     _pc_workload_enabled("host_resolvers") && _pc_run_host_resolvers_workload!()
     _pc_workload_enabled("tls") && _pc_run_tls_workload!()
+    _pc_workload_enabled("quic") && _pc_run_quic_workload!()
     return nothing
 end
 
