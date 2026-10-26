@@ -479,6 +479,57 @@ end
         end
     end
 
+    @testset "application error codes must fit a varint" begin
+        listener, client, server = _qa_pair()
+        try
+            s = QA.open_stream(client)
+            write(s, "x")
+            too_big = UInt64(1) << 62
+            @test_throws ArgumentError QA.reset_stream!(s, too_big)
+            @test_throws ArgumentError QA.stop_sending!(s, too_big)
+            @test_throws ArgumentError close(client; code = too_big)
+            # Nothing broke: the connection and its endpoint still work.
+            peer = QA.accept_stream(server; deadline_ns = _qa_deadline())
+            @test read(peer, 1) == UInt8[UInt8('x')]
+            QA.reset_stream!(s, too_big - 1)
+            close(client; code = too_big - 1)
+            err = try
+                QA.accept_stream(server; deadline_ns = _qa_deadline())
+                nothing
+            catch ex
+                ex
+            end
+            @test err isa QA.ConnectionError && err.code == too_big - 1 && err.app
+        finally
+            _qa_close_all(listener, client, server)
+        end
+    end
+
+    @testset "listen checks the server's TLS config" begin
+        no_cert = TLA.Config(verify_peer = false, alpn_protocols = [_QA_ALPN])
+        @test_throws TLA.ConfigError QA.listen(UDA.loopback_addr(0), no_cert)
+        tls12 = TLA.Config(verify_peer = false, cert_file = _QA_CERT, key_file = _QA_KEY,
+            alpn_protocols = [_QA_ALPN], max_version = TLA.TLS1_2_VERSION)
+        @test_throws TLA.ConfigError QA.listen(UDA.loopback_addr(0), tls12)
+    end
+
+    @testset "a connection that closes while waiting to be accepted is not handed out" begin
+        listener = QA.listen(UDA.loopback_addr(0), _qa_server_config())
+        port = QA.local_addr(listener).port
+        try
+            c = QA.connect(UDA.loopback_addr(port), _qa_client_config(); deadline_ns = _qa_deadline())
+            ep = listener.ep
+            queued() = lock(() -> length(ep.accept_queue), ep.lock)
+            @test timedwait(() -> queued() == 1, 10) == :ok
+            close(c)
+            # Once the server has finished closing it, it leaves the queue.
+            @test timedwait(() -> queued() == 0, 10) == :ok
+            @test_throws UDA.DeadlineExceededError QA.accept(listener; deadline_ns = _qa_deadline(0.2))
+        finally
+            close(listener)
+        end
+    end
+
     @testset "connecting does not pin the calling task to a thread" begin
         # Scheduling a sticky task makes the scheduling task sticky too.
         if Threads.threadpoolsize() > 1

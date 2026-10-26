@@ -393,6 +393,40 @@ end
 # Linux only: lets the kernel coalesce runs of datagrams from one peer into
 # one receive (UDP generic receive offload); read them with
 # `_recv_segments!`. Returns whether the option took effect.
+# The running kernel's major version (Linux), or 0 when unknown.
+function _kernel_major()::Int
+    @static if Sys.islinux()
+        try
+            release = read("/proc/sys/kernel/osrelease", String)
+            dot = findfirst(==('.'), release)
+            dot === nothing && return 0
+            v = tryparse(Int, release[1:prevind(release, dot)])
+            return v === nothing ? 0 : v
+        catch
+            return 0
+        end
+    else
+        return 0
+    end
+end
+
+# Whether the kernel segments UDP sends (UDP_SEGMENT): as quic-go's
+# isGSOEnabled, kernel 5 or later and the socket option known. Before 4.18
+# the control message is ignored and a batch goes out as one datagram.
+function _gso_supported(conn::Conn)::Bool
+    @static if IOPoll._UDP_OFFLOAD
+        _kernel_major() >= 5 || return false
+        try
+            SocketOps.get_sockopt_int(conn.fd.pfd.sysfd, SocketOps.SOL_UDP, SocketOps.UDP_SEGMENT)
+            return true
+        catch
+            return false
+        end
+    else
+        return false
+    end
+end
+
 function _enable_gro!(conn::Conn)::Bool
     @static if IOPoll._UDP_OFFLOAD
         try

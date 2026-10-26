@@ -101,6 +101,8 @@ mutable struct _ConnSlot
     failure::Union{Nothing, String}
     routes::Vector{Vector{UInt8}}
     announced::Bool
+    # Datagrams arrived (or the connection failed) since it was last serviced.
+    dirty::Bool
 end
 
 mutable struct _Endpoint
@@ -132,7 +134,7 @@ function _Endpoint(sock::UDP.Conn, is_server::Bool, config::Union{Nothing, TLS.C
     return _Endpoint(
         sock, lk, is_server, config, limits, _ConnSlot[], Dict{Vector{UInt8}, _ConnSlot}(),
         typemax(Int64), Int64[], _ConnSlot[], Threads.Condition(lk), is_server, false,
-        IOPoll._UDP_OFFLOAD, Vector{UInt8}(undef, _GSO_MAX_BYTES), _MAX_DATAGRAM_SIZE,
+        UDP._gso_supported(sock), Vector{UInt8}(undef, _GSO_MAX_BYTES), _MAX_DATAGRAM_SIZE,
     )
 end
 
@@ -205,6 +207,11 @@ end
 
 # The receive task's next wakeup. Waiters whose deadline has passed were just
 # woken and remove their deadline when they run, so they are left out.
+function _timer_due(conn::_Connection, now::Int64)::Bool
+    timeout = _next_timeout(conn)
+    return timeout !== nothing && timeout <= now
+end
+
 function _endpoint_deadline(ep::_Endpoint, now::Int64)::Int64
     t = typemax(Int64)
     for slot in ep.slots
@@ -247,6 +254,7 @@ end
 function _fail_slot!(slot::_ConnSlot, @nospecialize(ex))::Nothing
     slot.failure === nothing && (slot.failure = _failure_reason(ex))
     slot.conn.state = _ConnState.Closed
+    slot.dirty = true
     return nothing
 end
 
@@ -291,14 +299,16 @@ function _send_gathered!(ep::_Endpoint, slot::_ConnSlot, nbytes::Int, segment::I
         end
         _transient_socket_error(ex) && return true  # lost, as on the network
         errno = ex isa SystemError ? Int32(ex.errnum) : Int32(0)
-        if errno in _GSO_UNSUPPORTED
+        # EINVAL means the segments are larger than the route now takes:
+        # sent one by one, they get EMSGSIZE, which shrinks the datagram
+        # size. At the smallest size it cannot mean that, so segmentation
+        # itself is failing.
+        if errno in _GSO_UNSUPPORTED || (errno == Int32(Base.Libc.EINVAL) && segment <= _MAX_DATAGRAM_SIZE)
             ep.gso = false
         elseif errno != Int32(Base.Libc.EINVAL)
             _fail_slot!(slot, ex)
             return false
         end
-        # EINVAL: the segments are larger than the route now takes. Sent one
-        # by one, they get EMSGSIZE, which shrinks the datagram size.
     end
     off = 0
     while off < nbytes
@@ -384,6 +394,8 @@ function _remove_slot!(ep::_Endpoint, slot::_ConnSlot)::Nothing
     for cid in slot.routes
         get(ep.routes, cid, nothing) === slot && delete!(ep.routes, cid)
     end
+    j = findfirst(x -> x === slot, ep.accept_queue)
+    j === nothing || deleteat!(ep.accept_queue, j)
     # Ends a handshake still in progress and drops its secrets.
     close(slot.conn.tls)
     return nothing
@@ -461,6 +473,7 @@ function _service!(ep::_Endpoint, slot::_ConnSlot, now::Int64, force::Bool = fal
         end
     end
     _wake!(slot, force)
+    slot.dirty = false
     conn.state == _ConnState.Closed && _remove_slot!(ep, slot)
     return nothing
 end
@@ -480,7 +493,7 @@ function _new_slot!(ep::_Endpoint, conn::_Connection, peer::Union{Nothing, UDP.S
     lk = ep.lock
     slot = _ConnSlot(
         conn, Threads.Condition(lk), Threads.Condition(lk), Threads.Condition(lk), Threads.Condition(lk),
-        UInt64[], UInt64[], Int[], Int[], 0, false, peer, nothing, Vector{UInt8}[], false,
+        UInt64[], UInt64[], Int[], Int[], 0, false, peer, nothing, Vector{UInt8}[], false, true,
     )
     push!(ep.slots, slot)
     _add_route!(ep, slot, conn.local_cid)
@@ -514,6 +527,7 @@ function _route_datagram!(ep::_Endpoint, buf::Vector{UInt8}, first::Int, last::I
         return nothing
     end
     _receive_datagram!(slot.conn, buf, first, last, now)
+    slot.dirty = true
     return nothing
 end
 
@@ -556,8 +570,12 @@ function _run_endpoint!(ep::_Endpoint)::Nothing
                 now = _monotonic_ns()
                 # Waiters whose deadline passed must run to see it.
                 force = any(w -> w <= now, ep.waiters)
+                # Only connections with something to do: datagrams, a timer
+                # due, or a waiter whose deadline passed.
                 for slot in copy(ep.slots)
-                    _service!(ep, slot, now, force)
+                    if force || slot.dirty || _timer_due(slot.conn, now)
+                        _service!(ep, slot, now, force)
+                    end
                 end
                 (force || !ep.accepting || !isempty(ep.accept_queue)) && notify(ep.accept_cond; all = true)
                 _endpoint_finished(ep) && return nothing
@@ -622,6 +640,7 @@ function _run_endpoint!(ep::_Endpoint)::Nothing
                 close(slot.conn.tls)
             end
             empty!(ep.slots)
+            empty!(ep.accept_queue)
             notify(ep.accept_cond; all = true)
         finally
             unlock(ep.lock)
@@ -768,7 +787,10 @@ function connect(
                 # and closes the socket.
                 lock(ep.lock)
                 try
-                    slot === nothing || ((slot::_ConnSlot).conn.state = _ConnState.Closed)
+                    if slot !== nothing
+                        (slot::_ConnSlot).conn.state = _ConnState.Closed
+                        (slot::_ConnSlot).dirty = true
+                    end
                     _set_socket_deadline!(ep, Int64(1))
                 finally
                     unlock(ep.lock)
@@ -801,6 +823,10 @@ function listen(
         max_datagram_size::Integer = 0,
     )::Listener
     limits = _stream_limits(max_data, max_stream_data, max_streams_bidi, max_streams_uni)
+    # Each connection's TLS starts in the receive task; a config it would
+    # refuse is refused here instead.
+    TLS._validate_config(config; is_server = true)
+    TLS._config_allows_tls_version(config, TLS.TLS1_3_VERSION) || throw(TLS.ConfigError("QUIC requires TLS 1.3"))
     sock = UDP.listen(local_addr)
     ceiling = _configure_socket!(sock, max_datagram_size)
     ep = _Endpoint(sock, true, config, limits)
@@ -887,12 +913,19 @@ Close the connection with application error `code` (RFC 9000 Section
 10.2). Blocked operations on it, and later ones, throw
 [`ConnectionError`](@ref).
 """
+# Application error codes travel as varints (RFC 9000 Section 20.2).
+function _check_app_code(code::Integer)::UInt64
+    0 <= code < (UInt64(1) << 62) || throw(ArgumentError("QUIC application error code $code is not below 2^62"))
+    return UInt64(code)
+end
+
 function Base.close(c::Connection; code::Integer = 0, reason::AbstractString = "")::Nothing
+    app_code = _check_app_code(code)
     ep = c.ep
     lock(ep.lock)
     try
         _conn_open(c.slot.conn) || return nothing
-        _close_connection!(c.slot.conn, UInt64(code), String(reason), _monotonic_ns())
+        _close_connection!(c.slot.conn, app_code, String(reason), _monotonic_ns())
         _after_op!(ep, c.slot)
     finally
         unlock(ep.lock)
@@ -1341,6 +1374,7 @@ Abandon the sending side with RESET_STREAM and application error `code`.
 Does nothing once the connection has closed.
 """
 function reset_stream!(s::Stream, code::Integer)::Nothing
+    _check_app_code(code)
     ep = s.conn.ep
     lock(ep.lock)
     try
@@ -1367,6 +1401,7 @@ connection has closed, or after the peer reset the stream or the stream
 ended.
 """
 function stop_sending!(s::Stream, code::Integer)::Nothing
+    _check_app_code(code)
     ep = s.conn.ep
     lock(ep.lock)
     try

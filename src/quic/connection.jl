@@ -197,6 +197,9 @@ Base.@kwdef mutable struct _Connection
     last_activity::Int64
     idle_timeout_ns::Int64 = Int64(_DEFAULT_IDLE_TIMEOUT_MS) * 1_000_000
     handshake_idle_timeout_ns::Int64 = _HANDSHAKE_IDLE_TIMEOUT_NS
+    # When the first ack-eliciting packet after the last one received went
+    # out, which restarts the idle timer too (RFC 9000 Section 10.1).
+    ack_eliciting_sent_after_receipt::Int64 = typemin(Int64)
     created::Int64 = Int64(0)
     close_pending::Bool = false
     close_deadline::Int64 = Int64(0)
@@ -540,6 +543,7 @@ function _build_probe_datagram!(conn::_Connection, now::Int64)::Vector{UInt8}
     space.next_pn += 1
     conn.key_phase_first_sent < 0 && (conn.key_phase_first_sent = pn)
     _seal_datagram!(conn, buf, [_PendingPacket(_APPLICATION_SPACE, layout, payload_last, pn, true, _SentFrame[], Int64(-1))], now)
+    conn.ack_eliciting_sent_after_receipt == typemin(Int64) && (conn.ack_eliciting_sent_after_receipt = now)
     conn.pmtu_probe_due = false
     conn.pmtu_probe_pn = pn
     conn.pmtu_probe_time = now
@@ -679,6 +683,7 @@ function _receive_packet!(conn::_Connection, buf::Vector{UInt8}, header::_Packet
         conn.peer_cid_set = true
     end
     conn.last_activity = now
+    conn.ack_eliciting_sent_after_receipt = typemin(Int64)
     result = _decode_frames(buf, payload_first, payload_last, header.type) do frame
         _on_frame!(conn, space, idx, buf, frame, now)
     end
@@ -1366,6 +1371,7 @@ function _build_datagram!(conn::_Connection, now::Int64)::Union{Nothing, Vector{
         push!(space.sent, _SentPacket(p.pn, now, size, p.frames, p.ack_largest, false))
         space.time_of_last_ack_eliciting = now
         conn.bytes_in_flight += size
+        conn.ack_eliciting_sent_after_receipt == typemin(Int64) && (conn.ack_eliciting_sent_after_receipt = now)
     end
     # A client drops its Initial keys once it sends a Handshake packet (RFC 9001 Section 4.9.1).
     if !conn.is_server && any(p -> p.space == _HANDSHAKE_SPACE, packets)
@@ -1422,16 +1428,22 @@ end
 
 # Timers.
 
-"""
-Probe timeout for a packet number space (RFC 9002 Section 6.2.1), with backoff
-that stops at 60 s (`_MAX_PTO_NS`), as in quic-go.
-"""
-function _pto_duration(conn::_Connection, idx::Int)::Int64
+# The probe timeout before backoff (RFC 9002 Section 6.2.1).
+function _base_pto(conn::_Connection, idx::Int)::Int64
     srtt = conn.has_rtt_sample ? conn.smoothed_rtt : _INITIAL_RTT_NS
     rttvar = conn.has_rtt_sample ? conn.rttvar : _INITIAL_RTT_NS ÷ 2
     duration = srtt + max(4 * rttvar, _GRANULARITY_NS)
     params = conn.peer_params
     idx == _APPLICATION_SPACE && params !== nothing && (duration += Int64(params.max_ack_delay_ms) * 1_000_000)
+    return duration
+end
+
+"""
+Probe timeout for a packet number space (RFC 9002 Section 6.2.1), with backoff
+that stops at 60 s (`_MAX_PTO_NS`), as in quic-go.
+"""
+function _pto_duration(conn::_Connection, idx::Int)::Int64
+    duration = _base_pto(conn, idx)
     # Shifting no further than the cap allows also keeps this from overflowing.
     cap = max(duration, _MAX_PTO_NS)
     shift = min(conn.pto_count, 62)
@@ -1482,13 +1494,23 @@ function _negotiated_idle_timeout_ns(local_ns::Int64, peer_ms::UInt64)::Int64
     return min(local_ns, Int64(peer_ms) * 1_000_000)
 end
 
-# When inactivity ends the connection: until the handshake completes, after
-# the handshake idle timeout, or at twice that from its creation, as in
-# quic-go; afterwards after the idle timeout.
+# When inactivity ends the connection, as in quic-go. The timer runs from
+# the last packet received, or the first ack-eliciting one sent after it
+# (RFC 9000 Section 10.1). Until the handshake completes it is the handshake
+# idle timeout, and the handshake must end by twice that from creation;
+# afterwards it is the idle timeout, but at least three probe timeouts.
 function _idle_deadline(conn::_Connection)::Int64
-    conn.handshake_complete && return conn.last_activity + conn.idle_timeout_ns
-    return min(conn.last_activity + conn.handshake_idle_timeout_ns, conn.created + 2 * conn.handshake_idle_timeout_ns)
+    start = max(conn.last_activity, conn.ack_eliciting_sent_after_receipt)
+    if !conn.handshake_complete
+        return min(start + conn.handshake_idle_timeout_ns, conn.created + 2 * conn.handshake_idle_timeout_ns)
+    end
+    return start + max(conn.idle_timeout_ns, 3 * _base_pto(conn, _APPLICATION_SPACE))
 end
+
+# A server at its anti-amplification limit sends nothing until the client
+# does (RFC 9000 Section 8.1), so a due ACK must not keep waking it.
+_amplification_blocked(conn::_Connection)::Bool =
+    conn.is_server && !conn.address_validated && _send_budget(conn) < _MAX_DATAGRAM_SIZE
 
 """
     _next_timeout(conn) -> Int64 or nothing
@@ -1504,8 +1526,10 @@ function _next_timeout(conn::_Connection)::Union{Nothing, Int64}
     loss = _loss_time_deadline(conn)
     recovery = loss === nothing ? _pto_deadline(conn) : loss
     recovery === nothing || (t = min(t, recovery[1]))
-    for space in conn.spaces
-        space.ack_pending && !space.discarded && (t = min(t, space.ack_deadline))
+    if !_amplification_blocked(conn)
+        for space in conn.spaces
+            space.ack_pending && !space.discarded && (t = min(t, space.ack_deadline))
+        end
     end
     conn.pmtu_probe_pn >= 0 && (t = min(t, _pmtu_probe_deadline(conn)))
     return t

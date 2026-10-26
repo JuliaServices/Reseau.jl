@@ -410,6 +410,66 @@ using Reseau
         @test conn.idle_timeout_ns > QCN._HANDSHAKE_IDLE_TIMEOUT_NS  # the handshake's no longer applies
     end
 
+    @testset "doesn't time out when it just sent a packet" begin
+        # quic-go connection_test.go: the idle timer restarts with the first
+        # ack-eliciting packet sent after one is received (RFC 9000 Section 10.1).
+        h = _QcnHarness()
+        @test _qcn_run!(h)
+        conn = h.client
+        conn.idle_timeout_ns = 30_000_000_000
+        received = h.now
+        now = received + 60 * 60_000_000_000  # an hour after the last receipt
+        sent = now - 1_000_000_000            # sent a second ago
+        conn.last_activity = received
+        conn.ack_eliciting_sent_after_receipt = sent
+        QCN._handle_timeout!(conn, now)
+        @test conn.state != QCN._ConnState.Closed
+        @test QCN._idle_deadline(conn) == sent + conn.idle_timeout_ns
+    end
+
+    @testset "times out earliest after 3 times the PTO" begin
+        # quic-go connection_test.go: the idle timeout is at least three PTOs
+        # (RFC 9000 Section 10.1).
+        h = _QcnHarness()
+        @test _qcn_run!(h)
+        conn = h.client
+        conn.idle_timeout_ns = 1_000_000
+        pto = QCN._pto_duration(conn, QCN._APPLICATION_SPACE)
+        @test QCN._idle_deadline(conn) - conn.last_activity >= 3 * pto
+        QCN._handle_timeout!(conn, conn.last_activity + 3 * pto - 1)
+        @test conn.state != QCN._ConnState.Closed
+    end
+
+    @testset "sending an ack-eliciting packet restarts the idle timer once per receipt" begin
+        h = _QcnHarness()
+        @test _qcn_run!(h)
+        conn = h.client
+        @test conn.ack_eliciting_sent_after_receipt == typemin(Int64)
+        h.now += 1_000_000_000
+        id = QCN._open_stream!(conn)::UInt64
+        QCN._stream_write!(conn, id, Vector{UInt8}("ping"))
+        first_send = h.now
+        @test QCN._next_datagram!(conn, h.now) !== nothing
+        @test conn.ack_eliciting_sent_after_receipt == first_send
+        h.now += 1_000_000_000
+        QCN._stream_write!(conn, id, Vector{UInt8}("more"))
+        @test QCN._next_datagram!(conn, h.now) !== nothing
+        @test conn.ack_eliciting_sent_after_receipt == first_send  # the first one counts
+    end
+
+    @testset "a server at its amplification limit does not wake for an ACK it cannot send" begin
+        h = _QcnHarness(drop = (from_client, n) -> from_client && n > 1)
+        @test !_qcn_run!(h; max_time = _QCN_START + 2_000_000_000)
+        server = h.server
+        server.bytes_sent = 3 * server.bytes_received - 50
+        space = server.spaces[QCN._INITIAL_SPACE]
+        space.ack_pending = true
+        space.ack_deadline = h.now - 1
+        @test QCN._next_datagram!(server, h.now) === nothing
+        t = QCN._next_timeout(server)
+        @test t === nothing || t > h.now
+    end
+
     @testset "a huge peer max_idle_timeout does not overflow" begin
         # 2^62 - 1 ms is a valid varint; the idle timeout stays the local one.
         ns = QCN._negotiated_idle_timeout_ns(Int64(30_000_000_000), UInt64(2)^62 - 1)

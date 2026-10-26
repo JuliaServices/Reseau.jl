@@ -1114,6 +1114,9 @@ function sendto_ptr!(
     end
 end
 
+# UDP segmentation and receive offload (UDP_SEGMENT, UDP_GRO) are Linux's.
+const _UDP_OFFLOAD = Sys.islinux()
+
 # Control messages: `struct cmsghdr { size_t cmsg_len; int cmsg_level; int
 # cmsg_type; }` followed by the data, each aligned to a size_t, as glibc's
 # CMSG_ALIGN, CMSG_LEN and CMSG_SPACE compute them.
@@ -1151,9 +1154,6 @@ the size of the datagrams the kernel coalesced into this buffer (UDP generic
 receive offload), or 0 when it holds one datagram. With `wait = false` it
 returns `nread = -1` instead of waiting, as [`try_recvfrom_ptr!`](@ref).
 """
-# UDP segmentation and receive offload (UDP_SEGMENT, UDP_GRO) are Linux's.
-const _UDP_OFFLOAD = Sys.islinux()
-
 function recvmsg_segments_ptr!(
         fd::FD,
         p::Ptr{UInt8},

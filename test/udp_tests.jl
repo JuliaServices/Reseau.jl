@@ -510,6 +510,8 @@ end
     connected = UDP.connect(UDP.local_addr(receiver)::UDP.SocketAddrV4)
     unconnected = UDP.listen(UDP.loopback_addr(0))
     try
+        # quic-go's isGSOEnabled: kernel 5 or later, and UDP_SEGMENT known.
+        @test UDP._gso_supported(connected) == (UDP._kernel_major() >= 5)
         payload = UInt8[UInt8(i % 251) for i in 1:350]
         buf = vcat(payload, zeros(UInt8, 50))  # bytes past `nbytes` are not sent
         for (sock, addr) in ((connected, nothing), (unconnected, UDP.local_addr(receiver)))
