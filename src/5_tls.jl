@@ -898,6 +898,10 @@ function _validate_config(config::Config; is_server::Bool)
     if !isempty(config.curve_preferences)
         _native_curve_preferences(config)
     end
+    # ALPN protocol names are 1 to 255 bytes (RFC 7301 Section 3.1).
+    for proto in config.alpn_protocols
+        1 <= ncodeunits(proto) <= 255 || throw(ConfigError("`alpn_protocols` entries must be 1 to 255 bytes long"))
+    end
     return nothing
 end
 

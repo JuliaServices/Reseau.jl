@@ -631,10 +631,8 @@ end
             @testset "errors if there's still data to read at a higher offset after finishing" begin
                 h = initial_leftover(10, Vector{UInt8}("foobar"))
                 @test h.client.spaces[1].discarded
-                # BUG?: quic-go closes with PROTOCOL_VIOLATION ("encryption level
-                # changed, but crypto stream has more data to read"); we drop the
-                # held fragment with the keys and the handshake completes.
-                @test_broken _qgs_code(h.client) == QGS._PROTOCOL_VIOLATION
+                @test _qgs_code(h.client) == QGS._PROTOCOL_VIOLATION
+                @test h.client.error.reason == "encryption level changed, but crypto stream has more data to read"
             end
 
             @testset "works with reordered data" begin
@@ -721,9 +719,9 @@ end
         _qgs_inject_space!(h, false, 1, (b = UInt8[]; QGS._append_crypto_frame!(b, UInt64(5000), Vector{UInt8}("foo")); b); pad_to = 1200)
         _qcn_run!(h; max_time = h.now + 5_000_000_000)
         @test h.client.spaces[1].discarded
-        # BUG?: quic-go fails with "encryption level changed, but crypto stream
-        # has more data to read" (PROTOCOL_VIOLATION, RFC 9001 Section 4.1.3).
-        @test_broken _qgs_code(h.client) == QGS._PROTOCOL_VIOLATION
+        # quic-go: "encryption level changed, but crypto stream has more data
+        # to read" (RFC 9001 Section 4.1.3).
+        @test _qgs_code(h.client) == QGS._PROTOCOL_VIOLATION
     end
 
     @testset "drops Handshake" begin
@@ -745,8 +743,7 @@ end
         end
         _qcn_run!(h; max_time = h.now + 5_000_000_000)
         @test h.server.spaces[2].discarded
-        # BUG?: as for Initial: quic-go closes with PROTOCOL_VIOLATION.
-        @test_broken _qgs_code(h.server) == QGS._PROTOCOL_VIOLATION
+        @test _qgs_code(h.server) == QGS._PROTOCOL_VIOLATION
     end
 end
 

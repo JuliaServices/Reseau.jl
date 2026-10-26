@@ -177,6 +177,15 @@ function _destroy_packet_keys!(keys::_PacketKeys)::Nothing
     return nothing
 end
 
+# AEAD usage limits (RFC 9001 Section 6.6). The confidentiality limit caps the
+# packets protected with one key, which a key update resets; ChaCha20-Poly1305's
+# exceeds the packet number space, so it never applies. The integrity limit
+# caps the packets that fail authentication over the whole connection.
+_aead_confidentiality_limit(suite::UInt16)::Int64 =
+    suite == _TLS13_CHACHA20_POLY1305_SHA256_ID ? typemax(Int64) : Int64(1) << 23
+_aead_integrity_limit(suite::UInt16)::Int64 =
+    suite == _TLS13_CHACHA20_POLY1305_SHA256_ID ? Int64(1) << 36 : Int64(1) << 52
+
 """
     _initial_secrets(dcid) -> (client_secret, server_secret)
 

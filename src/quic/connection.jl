@@ -37,6 +37,14 @@ const _MINIMUM_WINDOW = 2 * _MAX_DATAGRAM_SIZE
 const _ACK_ELICITING_THRESHOLD = 2
 # Bound on PATH_RESPONSE frames waiting to be sent.
 const _MAX_PATH_RESPONSES = 8
+# Automatic 1-RTT key updates, as quic-go makes them: the first soon after the
+# handshake, to exercise the mechanism, then after this many packets sent or
+# received with one key (RFC 9001 Section 6).
+const _FIRST_KEY_UPDATE_INTERVAL = Int64(100)
+const _KEY_UPDATE_INTERVAL = Int64(100_000)
+# Packets kept in hand below the confidentiality limit for CONNECTION_CLOSE,
+# when no key update is allowed before it is reached.
+const _AEAD_LIMIT_HEADROOM = Int64(1_000)
 
 const _INITIAL_SPACE = 1
 const _HANDSHAKE_SPACE = 2
@@ -170,15 +178,26 @@ Base.@kwdef mutable struct _Connection
     close_received::Int = 0
     # 1-RTT key updates (RFC 9001 Section 6). The application space's keys are
     # the current phase's; `prev_read_keys` open packets from the phase before,
-    # `next_read_keys` (derived on demand) those from the next. The first
-    # packet numbers sent and received in the current phase tell which phase
-    # an incoming packet belongs to, and when another update may start.
+    # until `prev_read_keys_expiry`, and `next_read_keys` (derived on demand)
+    # those from the next. The first packet numbers sent and received in the
+    # current phase tell which phase an incoming packet belongs to, and when
+    # another update may start; the packets sent and received in it, when one
+    # is due. The update intervals are fields so tests can lower them.
     key_phase::Bool = false
     prev_read_keys::Union{Nothing, _PacketKeys} = nothing
+    prev_read_keys_expiry::Int64 = typemax(Int64)
     next_read_keys::Union{Nothing, _PacketKeys} = nothing
     key_phase_first_sent::Int64 = Int64(-1)
     key_phase_first_received::Int64 = typemax(Int64)
+    key_phase_sent::Int64 = Int64(0)
+    key_phase_received::Int64 = Int64(0)
     key_updates::Int = 0
+    first_key_update_interval::Int64 = _FIRST_KEY_UPDATE_INTERVAL
+    key_update_interval::Int64 = _KEY_UPDATE_INTERVAL
+    # 1-RTT packets that failed authentication, and how many end the
+    # connection (RFC 9001 Section 6.6), set with the 1-RTT keys.
+    invalid_packets::Int64 = Int64(0)
+    invalid_packet_limit::Int64 = typemax(Int64)
     error::Union{Nothing, _TransportError} = nothing
     peer_error::Union{Nothing, _TransportError} = nothing
     # Streams. `local_opened_*` and `peer_opened_*` count the streams each side
@@ -336,6 +355,7 @@ function _process_tls_events!(conn::_Connection, now::Int64)::Nothing
             _crypto_queue!(conn.spaces[_space_index(e.level)].crypto_send, e.data)
         elseif kind == TLS.QUICEventKind.SetReadSecret
             conn.spaces[_space_index(e.level)].read_keys = _PacketKeys(e.suite, e.data)
+            e.level == TLS.QUICEncryptionLevel.Application && (conn.invalid_packet_limit = _aead_integrity_limit(e.suite))
         elseif kind == TLS.QUICEventKind.SetWriteSecret
             conn.spaces[_space_index(e.level)].write_keys = _PacketKeys(e.suite, e.data)
         elseif kind == TLS.QUICEventKind.TransportParameters
@@ -363,7 +383,7 @@ function _process_tls_events!(conn::_Connection, now::Int64)::Nothing
             # A server's handshake is confirmed once complete; it tells the
             # client with HANDSHAKE_DONE (RFC 9001 Section 4.1.2).
             if conn.is_server
-                _confirm_handshake!(conn)
+                _confirm_handshake!(conn, now)
                 conn.handshake_done_pending = true
             end
         elseif kind == TLS.QUICEventKind.Error
@@ -374,10 +394,10 @@ function _process_tls_events!(conn::_Connection, now::Int64)::Nothing
     end
 end
 
-function _confirm_handshake!(conn::_Connection)::Nothing
+function _confirm_handshake!(conn::_Connection, now::Int64)::Nothing
     conn.handshake_confirmed = true
     conn.state == _ConnState.Established && (conn.state = _ConnState.Confirmed)
-    _discard_space!(conn, _HANDSHAKE_SPACE)
+    _drop_encryption_level!(conn, _HANDSHAKE_SPACE, now)
     _pmtu_start!(conn)
     return nothing
 end
@@ -510,6 +530,17 @@ function _discard_space!(conn::_Connection, idx::Int)::Nothing
     return nothing
 end
 
+# An encryption level ends: its packet number space goes. CRYPTO data still
+# held there past what TLS was given can never be read, which is a
+# PROTOCOL_VIOLATION (RFC 9001 Section 4.1.3), as quic-go treats it.
+function _drop_encryption_level!(conn::_Connection, idx::Int, now::Int64)::Nothing
+    space = conn.spaces[idx]
+    leftover = !space.discarded && !isempty(space.crypto_recv.fragments)
+    _discard_space!(conn, idx)
+    leftover && _close!(conn, _TransportError(_PROTOCOL_VIOLATION, UInt64(0), "encryption level changed, but crypto stream has more data to read"), now)
+    return nothing
+end
+
 function _close!(conn::_Connection, err::_TransportError, now::Int64)::Nothing
     state = conn.state
     (state == _ConnState.Closing || state == _ConnState.Draining || state == _ConnState.Closed) && return nothing
@@ -582,7 +613,7 @@ function _receive_packet!(conn::_Connection, buf::Vector{UInt8}, header::_Packet
     keys = space.read_keys
     (space.discarded || keys === nothing) && return false
     opened = if idx == _APPLICATION_SPACE
-        _open_1rtt_packet!(conn, space, keys, buf, header)
+        _open_1rtt_packet!(conn, space, keys, buf, header, now)
     else
         _open_packet!(keys, buf, header.first, header.pn_offset, header.last, space.largest_received)
     end
@@ -619,7 +650,7 @@ function _receive_packet!(conn::_Connection, buf::Vector{UInt8}, header::_Packet
         # A Handshake packet proves the client owns its address, and lets the
         # server drop its Initial keys (RFC 9001 Section 4.9.1).
         conn.address_validated = true
-        _discard_space!(conn, _INITIAL_SPACE)
+        _drop_encryption_level!(conn, _INITIAL_SPACE, now)
     end
     _process_tls_events!(conn, now)
     return true
@@ -628,13 +659,16 @@ end
 # Opens a 1-RTT packet with the keys its Key Phase bit selects (RFC 9001
 # Section 6.3). A packet that opens with the next phase's keys means the peer
 # updated them, and this endpoint follows; one that does not is dropped, so a
-# forged Key Phase bit changes nothing.
+# forged Key Phase bit changes nothing. Packets that fail authentication count
+# toward the integrity limit, which closes the connection with
+# AEAD_LIMIT_REACHED (Section 6.6).
 function _open_1rtt_packet!(
         conn::_Connection,
         space::_PacketSpace,
         keys::_PacketKeys,
         buf::Vector{UInt8},
         header::_PacketHeader,
+        now::Int64,
     )::Union{Nothing, Tuple{Int64, Int, Int}}
     unmasked = _remove_header_protection!(keys.hp, buf, header.first, header.pn_offset, header.last)
     unmasked === nothing && return nothing
@@ -642,14 +676,28 @@ function _open_1rtt_packet!(
     pn = _decode_packet_number(space.largest_received, truncated, 8 * pn_len)
     phase = (buf[header.first] & 0x04) != 0
     prev = conn.prev_read_keys
+    if prev !== nothing && now > conn.prev_read_keys_expiry
+        # The previous phase's keys outlive the update by 3 PTO (Section 6.5).
+        _destroy_packet_keys!(prev)
+        conn.prev_read_keys = prev = nothing
+        conn.prev_read_keys_expiry = typemax(Int64)
+    end
+    first_received = conn.key_phase_first_received
     if phase == conn.key_phase
         payload_last = _decrypt_payload!(keys, buf, header.first, header.pn_offset, pn_len, pn, header.last)
-        payload_last === nothing && return nothing
-        conn.key_phase_first_received = min(conn.key_phase_first_received, pn)
-    elseif prev !== nothing && pn < conn.key_phase_first_received
-        # Sent before the current phase began, and delayed.
+        payload_last === nothing && return _authentication_failed!(conn, now)
+        # The peer's first packet in a phase this endpoint started shows it
+        # has the new keys, so the old ones may go.
+        first_received == typemax(Int64) && conn.key_updates > 0 && _start_key_drop_timer!(conn, now)
+        conn.key_phase_first_received = min(first_received, pn)
+        conn.key_phase_received += 1
+        _maybe_update_keys!(conn, now)
+    elseif pn < first_received && (first_received != typemax(Int64) || conn.key_updates > 0)
+        # Sent before the current phase began, and delayed; dropped once the
+        # previous phase's keys are gone.
+        prev === nothing && return nothing
         payload_last = _decrypt_payload!(prev, buf, header.first, header.pn_offset, pn_len, pn, header.last)
-        payload_last === nothing && return nothing
+        payload_last === nothing && return _authentication_failed!(conn, now)
     else
         next = conn.next_read_keys
         if next === nothing
@@ -657,15 +705,34 @@ function _open_1rtt_packet!(
             conn.next_read_keys = next
         end
         payload_last = _decrypt_payload!(next, buf, header.first, header.pn_offset, pn_len, pn, header.last)
-        payload_last === nothing && return nothing
+        payload_last === nothing && return _authentication_failed!(conn, now)
+        # The peer may update again only after this endpoint answered its last
+        # update with the new keys (Section 6.2).
+        if conn.key_updates > 0 && conn.key_phase_first_sent < 0
+            _close!(conn, _TransportError(_KEY_UPDATE_ERROR, UInt64(0), "keys updated too quickly"), now)
+            return nothing
+        end
         _rotate_keys!(conn, space)
         conn.key_phase_first_received = pn
+        _start_key_drop_timer!(conn, now)
     end
     return pn, header.pn_offset + pn_len, payload_last
 end
 
+function _authentication_failed!(conn::_Connection, now::Int64)::Nothing
+    conn.invalid_packets += 1
+    conn.invalid_packets >= conn.invalid_packet_limit &&
+        _close!(conn, _TransportError(_AEAD_LIMIT_REACHED, UInt64(0), "AEAD integrity limit reached"), now)
+    return nothing
+end
+
+function _start_key_drop_timer!(conn::_Connection, now::Int64)::Nothing
+    conn.prev_read_keys_expiry = now + 3 * _pto_duration(conn, _APPLICATION_SPACE)
+    return nothing
+end
+
 # Moves both directions to the next key phase; the current read keys become
-# the previous phase's.
+# the previous phase's, and those before them, if still kept, are dropped.
 function _rotate_keys!(conn::_Connection, space::_PacketSpace)::Nothing
     read = space.read_keys::_PacketKeys
     write = space.write_keys::_PacketKeys
@@ -676,28 +743,64 @@ function _rotate_keys!(conn::_Connection, space::_PacketSpace)::Nothing
     old = conn.prev_read_keys
     old === nothing || _destroy_packet_keys!(old)
     conn.prev_read_keys = read
+    conn.prev_read_keys_expiry = typemax(Int64)
     conn.next_read_keys = nothing
     conn.key_phase = !conn.key_phase
     conn.key_phase_first_sent = Int64(-1)
     conn.key_phase_first_received = typemax(Int64)
+    conn.key_phase_sent = Int64(0)
+    conn.key_phase_received = Int64(0)
     conn.key_updates += 1
     return nothing
+end
+
+# Whether this endpoint may start a key update (RFC 9001 Section 6.1): once the
+# handshake is confirmed, the first at once, and later ones after a packet sent
+# with the current keys is acknowledged.
+function _key_update_allowed(conn::_Connection)::Bool
+    conn.state == _ConnState.Confirmed || return false
+    conn.key_updates == 0 && return true
+    first_sent = conn.key_phase_first_sent
+    return first_sent >= 0 && conn.spaces[_APPLICATION_SPACE].largest_acked >= first_sent
 end
 
 """
     _initiate_key_update!(conn) -> Bool
 
 Switch to the next 1-RTT keys (RFC 9001 Section 6.1). Returns `false`, and
-changes nothing, before the handshake is confirmed or while no packet sent
-with the current keys has been acknowledged.
+changes nothing, before the handshake is confirmed or, after an earlier
+update, while no packet sent with the current keys has been acknowledged.
 """
 function _initiate_key_update!(conn::_Connection)::Bool
-    conn.state == _ConnState.Confirmed || return false
-    space = conn.spaces[_APPLICATION_SPACE]
-    first_sent = conn.key_phase_first_sent
-    (first_sent >= 0 && space.largest_acked >= first_sent) || return false
-    _rotate_keys!(conn, space)
+    _key_update_allowed(conn) || return false
+    _rotate_keys!(conn, conn.spaces[_APPLICATION_SPACE])
     return true
+end
+
+# Starts a key update once enough packets were sent or received with the
+# current keys, as soon as one is allowed. Updates come well before the
+# confidentiality limit (RFC 9001 Section 6.6); if none is allowed by the time
+# it nears, the connection closes with AEAD_LIMIT_REACHED instead.
+function _maybe_update_keys!(conn::_Connection, now::Int64)::Nothing
+    interval = conn.key_update_interval
+    conn.key_updates == 0 && (interval = min(interval, conn.first_key_update_interval))
+    sent = conn.key_phase_sent
+    (sent >= interval || conn.key_phase_received >= interval) || return nothing
+    _initiate_key_update!(conn) && return nothing
+    write = conn.spaces[_APPLICATION_SPACE].write_keys
+    write === nothing && return nothing
+    sent >= _aead_confidentiality_limit(write.suite) - _AEAD_LIMIT_HEADROOM &&
+        _close!(conn, _TransportError(_AEAD_LIMIT_REACHED, UInt64(0), "AEAD confidentiality limit reached"), now)
+    return nothing
+end
+
+# An acknowledgment of a packet sent with the current keys, before any packet
+# protected with them arrived, came in a packet protected with older keys
+# (RFC 9001 Section 6.2).
+function _check_ack_key_phase(conn::_Connection, largest::Int64)::Union{Nothing, _TransportError}
+    first_sent = conn.key_phase_first_sent
+    (first_sent >= 0 && largest >= first_sent && conn.key_phase_first_received == typemax(Int64)) || return nothing
+    return _TransportError(_KEY_UPDATE_ERROR, UInt64(0x02), "received ACK for key phase $(conn.key_updates), but peer didn't update keys")
 end
 
 # Initial and Handshake packets are acknowledged at once. 1-RTT packets wait
@@ -734,7 +837,14 @@ function _on_frame!(conn::_Connection, space::_PacketSpace, idx::Int, buf::Vecto
 end
 
 function _on_frame!(conn::_Connection, space::_PacketSpace, idx::Int, buf::Vector{UInt8}, frame::_AckFrame, now::Int64)::Union{Nothing, _TransportError}
-    return _on_ack!(conn, space, idx, buf, frame, now)
+    if idx == _APPLICATION_SPACE
+        err = _check_ack_key_phase(conn, Int64(frame.largest))
+        err === nothing || return err
+    end
+    err = _on_ack!(conn, space, idx, buf, frame, now)
+    # An acknowledgment may allow a key update that is due.
+    idx == _APPLICATION_SPACE && err === nothing && _maybe_update_keys!(conn, now)
+    return err
 end
 
 function _on_frame!(conn::_Connection, space::_PacketSpace, idx::Int, buf::Vector{UInt8}, frame::_ConnectionCloseFrame, now::Int64)::Nothing
@@ -744,7 +854,7 @@ end
 
 function _on_frame!(conn::_Connection, space::_PacketSpace, idx::Int, buf::Vector{UInt8}, ::_HandshakeDoneFrame, now::Int64)::Union{Nothing, _TransportError}
     conn.is_server && return _TransportError(_PROTOCOL_VIOLATION, UInt64(0x1e), "client sent HANDSHAKE_DONE")
-    conn.handshake_confirmed || _confirm_handshake!(conn)
+    conn.handshake_confirmed || _confirm_handshake!(conn, now)
     return nothing
 end
 
@@ -1032,9 +1142,15 @@ function _pad_last_packet!(buf::Vector{UInt8}, packets::Vector{_PendingPacket}, 
 end
 
 function _seal_datagram!(conn::_Connection, buf::Vector{UInt8}, packets::Vector{_PendingPacket}, now::Int64)::Vector{UInt8}
+    one_rtt = false
     for p in packets
         keys = conn.spaces[p.space].write_keys::_PacketKeys
         _seal_packet!(keys, buf, p.layout.first, p.layout.pn_offset, p.layout.pn_len, p.payload_last, p.pn)
+        p.space == _APPLICATION_SPACE && (one_rtt = true)
+    end
+    if one_rtt
+        conn.key_phase_sent += 1
+        _maybe_update_keys!(conn, now)
     end
     conn.bytes_sent += length(buf)
     conn.last_send_time = now
@@ -1151,7 +1267,7 @@ function _build_datagram!(conn::_Connection, now::Int64)::Union{Nothing, Vector{
     end
     # A client drops its Initial keys once it sends a Handshake packet (RFC 9001 Section 4.9.1).
     if !conn.is_server && any(p -> p.space == _HANDSHAKE_SPACE, packets)
-        _discard_space!(conn, _INITIAL_SPACE)
+        _drop_encryption_level!(conn, _INITIAL_SPACE, now)
     end
     return buf
 end

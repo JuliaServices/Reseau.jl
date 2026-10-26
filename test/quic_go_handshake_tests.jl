@@ -7,7 +7,9 @@ using Reseau
 # (~/go/pkg/mod/github.com/quic-go/quic-go@v0.48.2/internal/handshake/*_test.go).
 # Each @testset is named after the Go test it ports, with the same inputs and
 # expectations adapted to Reseau's API. Where Go's behavior differs from ours,
-# the Go expectation is kept as @test_broken with a `# BUG?:` note.
+# the Go expectation is kept as @test_broken with a `# BUG?:` note, or, where
+# the difference is deliberate, our behavior is tested under a
+# `# Differs from quic-go:` note.
 #
 # Adaptations:
 # - Go's Seal(msg, pn, ad) authenticates arbitrary associated data; our AEAD
@@ -21,10 +23,13 @@ using Reseau
 #   server.Open is `_open_1rtt_packet!` (or `_receive_datagram!` when timing or
 #   packet-number tracking matters), server.Seal sends a real PING packet,
 #   server.SetLargestAcked(pn) delivers a real ACK frame from the peer, and
-#   rollKeys is `_rotate_keys!`. Go initiates key updates automatically after
-#   FirstKeyUpdateInterval/KeyUpdateInterval packets; ours only on an explicit
-#   `_initiate_key_update!`, so where Go relies on the automatic update and
-#   that update is permitted for us too, the explicit call takes its place.
+#   rollKeys is `_rotate_keys!`. Go's setKeyUpdateIntervals sets the
+#   connection's `first_key_update_interval`/`key_update_interval`. Go's
+#   KeyPhase() starts a due key update when the next packet is packed; ours
+#   starts once the packet that makes it due is sent or opened, or the ACK that
+#   allows it arrives. Our ACKs arrive in real packets, which count as
+#   received; where that would make an update due early, the test keeps the
+#   default intervals and starts the update with `_initiate_key_update!`.
 # - crypto_setup tests drive two `TLS.QUICConn`s, the layer under our QUIC
 #   connection that corresponds to Go's CryptoSetup.
 #
@@ -140,9 +145,13 @@ function _qgh_endpoints(; suite::UInt16 = rand(_QGH_CIPHER_SUITES), rtt_ms::Unio
     server.key_phase = false
     server.prev_read_keys = nothing
     server.next_read_keys = nothing
+    server.prev_read_keys_expiry = typemax(Int64)
     server.key_phase_first_sent = Int64(-1)
     server.key_phase_first_received = typemax(Int64)
+    server.key_phase_sent = 0
+    server.key_phase_received = 0
     server.key_updates = 0
+    server.invalid_packets = 0
     space.largest_received = Int64(-1)
     space.received = QCN._RangeSet()
     if rtt_ms !== nothing
@@ -157,12 +166,19 @@ function _qgh_endpoints(; suite::UInt16 = rand(_QGH_CIPHER_SUITES), rtt_ms::Unio
     return h, server, client
 end
 
-# Go's server.Open for a 1-RTT packet: whether it opened.
-function _qgh_open!(conn::QCN._Connection, pkt::Vector{UInt8})::Bool
+# Go's server.Open for a 1-RTT packet, received at `now`: whether it opened.
+function _qgh_open!(conn::QCN._Connection, pkt::Vector{UInt8}; now::Int64 = conn.last_activity)::Bool
     buf = copy(pkt)
     header = first(QCN._datagram_packets(buf, 1, length(buf), QCN._LOCAL_CID_LEN))
     space = conn.spaces[_QGH_APP]
-    return QCN._open_1rtt_packet!(conn, space, space.read_keys, buf, header) !== nothing
+    return QCN._open_1rtt_packet!(conn, space, space.read_keys, buf, header, now) !== nothing
+end
+
+# Go's setKeyUpdateIntervals.
+function _qgh_set_key_update_intervals!(conn::QCN._Connection, first_interval::Integer, interval::Integer)
+    conn.first_key_update_interval = first_interval
+    conn.key_update_interval = interval
+    return conn
 end
 
 # Delivers `pkt` (packet number `pn`) as a datagram at `now`; whether it was accepted.
@@ -461,10 +477,11 @@ end
         # directions, which makes the first-byte difference below deterministic.
         sample = fill(0x04, 16)
         _qgh_xor_header!(client_sealer, header, 7, sample)
-        # BUG?: Go's Initial AEAD always masks 4 first-byte bits (long header);
-        # ours picks 4 or 5 bits from the first byte's form bit, and 0x5e is a
+        # Differs from quic-go: Go's Initial AEAD always masks 4 first-byte
+        # bits (header[1] & 0xf0 == 0x5e & 0xf0); ours picks 4 or 5 bits from
+        # the first byte's form bit (RFC 9001 Section 5.4.1), and 0x5e is a
         # short-header first byte, so bit 0x10 is masked too.
-        @test_broken header[1] & 0xf0 == 0x5e & 0xf0
+        @test header[1] & 0xf0 == (0x5e & 0xf0) ⊻ 0x10
         @test header[2:6] == UInt8[0, 1, 2, 3, 4]
         @test header[7:10] != UInt8[0xde, 0xad, 0xbe, 0xef]
         _qgh_xor_header!(server_opener, header, 7, sample)
@@ -473,7 +490,7 @@ end
         @test header[7:10] == UInt8[0xde, 0xad, 0xbe, 0xef]
 
         _qgh_xor_header!(server_sealer, header, 7, sample)
-        @test_broken header[1] & 0xf0 == 0x5e & 0xf0  # BUG?: as above
+        @test header[1] & 0xf0 == (0x5e & 0xf0) ⊻ 0x10  # differs from quic-go, as above
         @test header[2:6] == UInt8[0, 1, 2, 3, 4]
         @test header[7:10] != UInt8[0xde, 0xad, 0xbe, 0xef]
         _qgh_xor_header!(client_opener, header, 7, sample)
@@ -599,8 +616,8 @@ end
     end
 
     @testset "TestAEADLimitReached" begin
-        # Go lowers invalidPacketLimit to 10; ours has no limit to lower.
         h, server, client = _qgh_endpoints()
+        server.invalid_packet_limit = 10
         forger = QCN._PacketKeys(client.keys.suite, rand(UInt8, 16))
         all_dropped = true
         for i in 0:8
@@ -609,9 +626,7 @@ end
         @test all_dropped
         @test server.error === nothing
         @test !_qgh_receive!(server, _qgh_peer_seal(client, 10; keys = forger), 10, h.now)
-        # BUG?: Go closes with AEAD_LIMIT_REACHED once the invalid packet limit
-        # is reached; we never count packets that fail authentication.
-        @test_broken server.error !== nothing && server.error.code == QCN._AEAD_LIMIT_REACHED
+        @test server.error !== nothing && server.error.code == QCN._AEAD_LIMIT_REACHED
     end
 
     @testset "TestKeyUpdates" begin
@@ -662,10 +677,8 @@ end
         @test _qgh_receive!(server, encrypted1, 0x44, now)
         @test server.key_phase
         # packet arrived too late, the key was already dropped
-        # BUG?: Go drops the previous phase's read keys 3 PTO after the first
-        # packet in the new phase (ErrKeysDropped); we keep them until the next
-        # key update, so this packet still opens.
-        @test_broken !_qgh_receive!(server, encrypted02, 0x43, now + 3 * pto + 1)
+        @test !_qgh_receive!(server, encrypted02, 0x43, now + 3 * pto + 1)
+        @test server.prev_read_keys === nothing
     end
 
     @testset "TestAllowsFirstKeyUpdateImmediately" begin
@@ -687,16 +700,14 @@ end
         @test _qgh_open!(server, _qgh_peer_seal(client, 0x42))
         _qgh_roll!(client)
         QCN._receive_datagram!(server, _qgh_peer_seal(client, 0x42), h.now)
-        # BUG?: Go rejects a peer's second update while it has sent nothing in
-        # the current phase (KEY_UPDATE_ERROR "keys updated too quickly"); we
-        # follow the update (server.key_updates becomes 2).
-        @test_broken server.error !== nothing && server.error.code == QCN._KEY_UPDATE_ERROR
+        @test server.error !== nothing && server.error.code == QCN._KEY_UPDATE_ERROR
+        @test server.error.reason == "keys updated too quickly"
+        @test server.key_updates == 1
     end
 
     @testset "TestInitiateKeyUpdateAfterSendingMaxPackets" begin
-        # Go: FirstKeyUpdateInterval = 5, KeyUpdateInterval = 20.
         h, server, client = _qgh_endpoints()
-        space = server.spaces[_QGH_APP]
+        _qgh_set_key_update_intervals!(server, 5, 20)
         @test server.state == QCN._ConnState.Confirmed  # SetHandshakeConfirmed
         # first key update
         phase_ok = true
@@ -706,13 +717,8 @@ end
         end
         @test phase_ok
         # the first update is allowed without receiving an acknowledgement
-        # BUG?: Go updates keys on its own after FirstKeyUpdateInterval packets;
-        # we never initiate a key update by ourselves.
-        @test_broken server.key_phase
-        # BUG?: Go allows the first key update before any acknowledgment; ours
-        # requires one for a packet sent in the current phase.
-        @test_broken QCN._initiate_key_update!(server)
-        server.key_phase || QCN._rotate_keys!(server, space)  # Go's rollKeys
+        @test server.key_phase
+        @test server.key_updates == 1  # Go: UpdatedKey(1, false)
         # subsequent key update
         first_phase1_pn = Int64(-1)
         phase_ok = true
@@ -728,19 +734,17 @@ end
         # receive an ACK for a packet sent in key phase 1
         _qgh_roll!(client)
         @test _qgh_open!(server, _qgh_peer_seal(client, 1))
+        old_prev = server.prev_read_keys
         _qgh_ack!(server, client, first_phase1_pn, h.now)
         @test server.error === nothing
-        # BUG?: as above, Go now updates to key phase 2 by itself.
-        @test_broken !server.key_phase
-        old_prev = server.prev_read_keys
-        @test QCN._initiate_key_update!(server)
         @test !server.key_phase
-        @test server.prev_read_keys !== old_prev  # Go: DroppedKey(0)
+        @test server.prev_read_keys !== old_prev  # Go: DroppedKey(0) ...
+        @test server.key_updates == 2             # ... then UpdatedKey(2, false)
     end
 
     @testset "TestKeyUpdateEnforceACKKeyPhase" begin
         h, server, client = _qgh_endpoints()
-        space = server.spaces[_QGH_APP]
+        _qgh_set_key_update_intervals!(server, 5, QCN._KEY_UPDATE_INTERVAL)
         # First make sure that we update our keys.
         pns = Int64[]
         phase_ok = true
@@ -749,9 +753,7 @@ end
             push!(pns, _qgh_send!(server, h.now))
         end
         @test phase_ok
-        # BUG?: automatic key update, see TestInitiateKeyUpdateAfterSendingMaxPackets.
-        @test_broken server.key_phase
-        server.key_phase || QCN._rotate_keys!(server, space)
+        @test server.key_phase
         # Now that our keys are updated, send a packet using the new keys.
         next_pn = _qgh_send!(server, h.now)
         # We haven't decrypted any packet in the new key phase yet.
@@ -761,15 +763,13 @@ end
         end
         @test server.error === nothing
         _qgh_ack!(server, client, next_pn, h.now)
-        # BUG?: Go closes with KEY_UPDATE_ERROR ("received ACK for key phase 1,
-        # but peer didn't update keys") when a packet sent with new keys is
-        # acknowledged before any packet in the new phase arrived; we accept it.
-        @test_broken server.error !== nothing && server.error.code == QCN._KEY_UPDATE_ERROR
+        @test server.error !== nothing && server.error.code == QCN._KEY_UPDATE_ERROR
+        @test server.error.reason == "received ACK for key phase 1, but peer didn't update keys"
     end
 
     @testset "TestKeyUpdateAfterOpeningMaxPackets" begin
         h, server, client = _qgh_endpoints()
-        space = server.spaces[_QGH_APP]
+        _qgh_set_key_update_intervals!(server, 5, 20)
         # first key update
         pn = 0
         ok = true
@@ -780,9 +780,7 @@ end
         end
         @test ok
         # the first update is allowed without receiving an acknowledgement
-        # BUG?: Go updates on its own after opening FirstKeyUpdateInterval packets.
-        @test_broken server.key_phase
-        server.key_phase || QCN._rotate_keys!(server, space)
+        @test server.key_phase
         # subsequent key update
         _qgh_roll!(client)
         ok = true
@@ -796,14 +794,12 @@ end
         @test server.key_phase
         @test !QCN._initiate_key_update!(server)
         sent = _qgh_send!(server, h.now)
+        old_prev = server.prev_read_keys
         _qgh_ack!(server, client, sent, h.now)
         @test server.error === nothing
-        # BUG?: Go now updates to key phase 2 by itself.
-        @test_broken !server.key_phase
-        old_prev = server.prev_read_keys
-        @test QCN._initiate_key_update!(server)
         @test !server.key_phase
-        @test server.prev_read_keys !== old_prev  # Go: DroppedKey(0)
+        @test server.prev_read_keys !== old_prev  # Go: DroppedKey(0) ...
+        @test server.key_updates == 2             # ... then UpdatedKey(2, false)
     end
 
     @testset "TestKeyUpdateKeyPhaseSkipping" begin
@@ -818,16 +814,20 @@ end
         end
         @test ok
         @test server.error === nothing
-        # Go updates here on its own; the update is permitted, so we start it.
+        # Go updates here on its own (intervals 5 and 20). Our ACK packets
+        # count as received, which would make the update due a packet early,
+        # so the default intervals stay and we start the update.
         @test QCN._initiate_key_update!(server)
         @test server.key_phase
         # The server never received a packet at key phase 1.
         # Make sure the key phase 0 is still there at a much later point.
-        @test _qgh_receive!(server, _qgh_peer_seal(client, 1), 1, now + 10 * QCN._pto_duration(server, _QGH_APP))
+        # (Go reopens packet 1; ours would ignore it as a duplicate.)
+        @test _qgh_receive!(server, _qgh_peer_seal(client, 2), 2, now + 10 * QCN._pto_duration(server, _QGH_APP))
     end
 
     @testset "TestFastKeyUpdatesByPeer" begin
         h, server, client = _qgh_endpoints()
+        _qgh_set_key_update_intervals!(server, 5, 20)
         pns = Int64[]
         ok = true
         for _ in 1:5
@@ -837,9 +837,7 @@ end
         @test ok
         @test _qgh_open!(server, _qgh_peer_seal(client, 1))
         _qgh_ack!(server, client, pns[1], h.now)
-        # Go updates here on its own; the update is permitted, so we start it.
-        @test QCN._initiate_key_update!(server)
-        @test server.key_phase
+        @test server.key_phase  # Go: UpdatedKey(1, false)
         # Send and receive an acknowledgement for a packet in key phase 1.
         pn = _qgh_send!(server, h.now)
         _qgh_roll!(client)
@@ -858,6 +856,7 @@ end
 
     @testset "TestFastKeyUpdateByUs" begin
         h, server, client = _qgh_endpoints(; rtt_ms = 10)
+        _qgh_set_key_update_intervals!(server, 5, 20)
         # send so many packets that we initiate the first key update
         pns = Int64[]
         ok = true
@@ -868,8 +867,7 @@ end
         @test ok
         @test _qgh_open!(server, _qgh_peer_seal(client, 1))
         _qgh_ack!(server, client, pns[1], h.now)
-        @test QCN._initiate_key_update!(server)  # Go: automatic
-        @test server.key_phase
+        @test server.key_phase  # Go: UpdatedKey(1, false)
         # send so many packets that we initiate the next key update
         phase1 = Int64[]
         ok = true
@@ -880,11 +878,10 @@ end
         @test ok
         _qgh_roll!(client)
         now = h.now
-        @test _qgh_open!(server, _qgh_peer_seal(client, 2))
+        @test _qgh_open!(server, _qgh_peer_seal(client, 2); now)
+        old_prev = server.prev_read_keys
         _qgh_ack!(server, client, phase1[1], now)
         @test server.error === nothing
-        old_prev = server.prev_read_keys
-        @test QCN._initiate_key_update!(server)  # Go: automatic
         @test server.prev_read_keys !== old_prev  # Go: DroppedKey(0), UpdatedKey(2, false)
         @test !server.key_phase
         # We haven't received an ACK for a packet sent in key phase 2 yet.
@@ -905,10 +902,10 @@ end
         catch ex
             ex
         end
-        # BUG?: Go refuses an empty ALPN protocol name before sending the
+        # Go refuses an empty ALPN protocol name before sending the
         # ClientHello (CRYPTO_ERROR 0x150, "tls: invalid NextProtos value");
-        # we send it (RFC 7301 Section 3.1 forbids empty names).
-        @test_broken err !== nothing
+        # ours is refused by the config check (RFC 7301 Section 3.1).
+        @test err isa TLC.ConfigError
     end
 
     @testset "TestMessageReceivedAtWrongEncryptionLevel" begin

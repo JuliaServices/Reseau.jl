@@ -306,6 +306,34 @@ using Reseau
         @test server.key_updates == 1
     end
 
+    @testset "automatic key updates and the confidentiality limit (RFC 9001 Section 6.6)" begin
+        h = _QcnHarness()
+        @test _qcn_run!(h)
+        client, server = h.client, h.server
+        space = client.spaces[QCN._APPLICATION_SPACE]
+        send_ping!() = (space.probes += 1; QCN._next_datagram!(client, h.now))
+        # The first update follows FirstKeyUpdateInterval packets, unacknowledged.
+        client.key_phase_sent = QCN._FIRST_KEY_UPDATE_INTERVAL - 1
+        @test !client.key_phase
+        send_ping!()
+        @test client.key_phase && client.key_updates == 1
+        # A later one waits for an acknowledgment in the current phase; if the
+        # confidentiality limit nears first, the connection closes instead.
+        limit = QCN._aead_confidentiality_limit(space.write_keys.suite)
+        client.key_phase_sent = min(limit, typemax(Int64) ÷ 2) - QCN._AEAD_LIMIT_HEADROOM - 1
+        send_ping!()
+        @test client.key_updates == 1
+        if limit == typemax(Int64)  # ChaCha20-Poly1305 has no practical limit.
+            @test client.error === nothing
+        else
+            @test client.error !== nothing && client.error.code == QCN._AEAD_LIMIT_REACHED
+        end
+        # The peer follows the first update.
+        @test server.key_updates == 0
+        settle!(h)
+        @test server.key_updates == 1 && server.key_phase
+    end
+
     @testset "an application close reaches the peer (RFC 9000 Section 10.2)" begin
         h = _QcnHarness()
         @test _qcn_run!(h)

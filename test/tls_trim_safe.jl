@@ -616,13 +616,16 @@ function _quic_trim_streams!(client::Reseau.QUIC._Connection, server::Reseau.QUI
         r.reset_code == code || error("QUIC trim reset code mismatch")
     end
 
+    # The transfers above already made the automatic first key update.
+    updates = client.key_updates
     QP._initiate_key_update!(client) || error("QUIC trim key update was refused")
     last_id = QP._open_stream!(client)::UInt64
     QP._stream_write!(client, last_id, UInt8[0x2a]; fin = true)
     now = _quic_trim_settle!(client, server, now)
     QP._accept_stream!(server) == last_id || error("QUIC trim stream after the key update was not accepted")
     QP._stream_read!(server, last_id).data == UInt8[0x2a] || error("QUIC trim data after the key update mismatch")
-    server.key_updates == 1 || error("QUIC trim server did not follow the key update")
+    (client.key_updates == updates + 1 && server.key_updates == client.key_updates && server.key_phase == client.key_phase) ||
+        error("QUIC trim server did not follow the key update")
 
     QP._close_connection!(client, UInt64(0), "done", now)
     now = _quic_trim_settle!(client, server, now)
