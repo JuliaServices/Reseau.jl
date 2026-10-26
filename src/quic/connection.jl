@@ -394,6 +394,21 @@ function _check_peer_transport_parameters(conn::_Connection, params::_TransportP
     return nothing
 end
 
+# Packet keys for a SetReadSecret or SetWriteSecret event. The keys hold their
+# own copy of the traffic secret, so the event's is zeroed.
+function _event_packet_keys(e::TLS.QUICEvent)::_PacketKeys
+    try
+        return _PacketKeys(e.suite, e.data)
+    finally
+        _securezero!(e.data)
+    end
+end
+
+# A TLS failure as the CRYPTO_ERROR that closes the connection (RFC 9001
+# Section 4.8).
+@inline _crypto_error(err::TLS.TLSError)::_TransportError =
+    _TransportError(_CRYPTO_ERROR_BASE + TLS.alert_code(err), UInt64(0x06), err.message)
+
 function _process_tls_events!(conn::_Connection, now::Int64)::Nothing
     while true
         e = TLS.next_event!(conn.tls)
@@ -402,10 +417,10 @@ function _process_tls_events!(conn::_Connection, now::Int64)::Nothing
         if kind == TLS.QUICEventKind.WriteData
             _crypto_queue!(conn.spaces[_space_index(e.level)].crypto_send, e.data)
         elseif kind == TLS.QUICEventKind.SetReadSecret
-            conn.spaces[_space_index(e.level)].read_keys = _PacketKeys(e.suite, e.data)
+            conn.spaces[_space_index(e.level)].read_keys = _event_packet_keys(e)
             e.level == TLS.QUICEncryptionLevel.Application && (conn.invalid_packet_limit = _aead_integrity_limit(e.suite))
         elseif kind == TLS.QUICEventKind.SetWriteSecret
-            conn.spaces[_space_index(e.level)].write_keys = _PacketKeys(e.suite, e.data)
+            conn.spaces[_space_index(e.level)].write_keys = _event_packet_keys(e)
         elseif kind == TLS.QUICEventKind.TransportParameters
             params = _decode_transport_parameters(e.data; from_server = !conn.is_server)
             if params isa _TransportError
@@ -430,10 +445,19 @@ function _process_tls_events!(conn::_Connection, now::Int64)::Nothing
             if conn.is_server
                 _confirm_handshake!(conn, now)
                 conn.handshake_done_pending = true
+                # As in quic-go, the server issues its one session ticket now,
+                # unless the config disables tickets. It comes back as a
+                # WriteData event and goes out in 1-RTT CRYPTO frames.
+                try
+                    TLS.send_session_ticket!(conn.tls)
+                catch ex
+                    ex isa TLS.TLSError || rethrow()
+                    _close!(conn, _crypto_error(ex::TLS.TLSError), now)
+                    return nothing
+                end
             end
         elseif kind == TLS.QUICEventKind.Error
-            err = e.err::TLS.TLSError
-            _close!(conn, _TransportError(_CRYPTO_ERROR_BASE + TLS.alert_code(err), UInt64(0x06), err.message), now)
+            _close!(conn, _crypto_error(e.err::TLS.TLSError), now)
             return nothing
         end
     end
@@ -892,8 +916,7 @@ function _on_frame!(conn::_Connection, space::_PacketSpace, idx::Int, buf::Vecto
         TLS.handle_data!(conn.tls, _space_level(idx), bytes)
     catch ex
         ex isa TLS.TLSError || rethrow()
-        err = ex::TLS.TLSError
-        return _TransportError(_CRYPTO_ERROR_BASE + TLS.alert_code(err), UInt64(0x06), err.message)
+        return _crypto_error(ex::TLS.TLSError)
     end
     return nothing
 end

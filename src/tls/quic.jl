@@ -235,8 +235,7 @@ function next_event!(q::QUICConn)::QUICEvent
     if err !== nothing
         q.error_returned && return _quic_event(QUICEventKind.NoEvent)
         q.error_returned = true
-        empty!(q.events)
-        q.next_event = 1
+        _quic_drop_events!(q)
         return _quic_event(QUICEventKind.Error; err)
     end
     if q.next_event > length(q.events)
@@ -314,8 +313,8 @@ function send_session_ticket!(q::QUICConn)::Nothing
     catch ex
         throw(_quic_error("send_session_ticket", _as_exception(ex)))
     finally
-        _securezero!(native_state.resumption_secret)
-        empty!(native_state.resumption_secret)
+        # Only one ticket is ever sent, so nothing needs these any more.
+        _quic_drop_resumption_material!(native_state)
     end
     return nothing
 end
@@ -346,8 +345,8 @@ end
 """
     close(q::QUICConn)
 
-Stop any handshake in progress and drop retained secrets. A handshake stopped
-this way ends with a `close_notify` error.
+Stop any handshake in progress and drop retained secrets and unread events. A
+handshake stopped this way ends with a `close_notify` error.
 """
 function Base.close(q::QUICConn)::Nothing
     q.closed && return nothing
@@ -355,13 +354,8 @@ function Base.close(q::QUICConn)::Nothing
     while q.started && !q.handshake_exited
         _quic_resume_handshake!(q)
     end
-    native_state = q.native_state
-    _securezero!(native_state.resumption_secret)
-    empty!(native_state.resumption_secret)
-    for cert in native_state.session_certificates
-        _securezero!(cert)
-    end
-    empty!(native_state.session_certificates)
+    _quic_drop_resumption_material!(q.native_state)
+    _quic_drop_events!(q)
     _securezero!(q.hand)
     empty!(q.hand)
     q.hand_pos = 1
@@ -369,6 +363,31 @@ function Base.close(q::QUICConn)::Nothing
 end
 
 @inline _native_tls13_state(q::QUICConn)::_TLS13NativeClientState = q.native_state
+
+function _quic_drop_resumption_material!(native_state::_TLS13NativeClientState)::Nothing
+    _securezero!(native_state.resumption_secret)
+    empty!(native_state.resumption_secret)
+    for cert in native_state.session_certificates
+        _securezero!(cert)
+    end
+    empty!(native_state.session_certificates)
+    return nothing
+end
+
+# Discard the queued events, zeroing the traffic secrets of those not yet
+# returned; returned events belong to the caller.
+function _quic_drop_events!(q::QUICConn)::Nothing
+    events = q.events
+    for i in q.next_event:length(events)
+        kind = events[i].kind
+        if kind == QUICEventKind.SetReadSecret || kind == QUICEventKind.SetWriteSecret
+            _securezero!(events[i].data)
+        end
+    end
+    empty!(events)
+    q.next_event = 1
+    return nothing
+end
 
 # Go's QUIC client has no remote address to fall back on, so only a configured
 # server name keys the session cache.

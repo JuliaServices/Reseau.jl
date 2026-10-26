@@ -13,6 +13,12 @@
 // unidirectional stream, checks that the server returns them the way the
 // server above does, closes the connection with application error 0, and
 // prints "OK".
+//
+//	quic_go_interop resume -addr HOST:PORT
+//
+// connects twice with one client session cache: the first connection must
+// not resume and must store the server's session ticket, the second must
+// resume. Closes each with application error 0 and prints "OK".
 package main
 
 import (
@@ -50,6 +56,8 @@ func main() {
 		err = server(os.Args[2:])
 	case "client":
 		err = client(os.Args[2:])
+	case "resume":
+		err = resume(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown mode %q", os.Args[1])
 	}
@@ -221,6 +229,76 @@ func uniRoundTrip(ctx context.Context, conn quic.Connection, size int) error {
 	}
 	if !bytes.Equal(got, data) {
 		return errors.New("unidirectional reply differs from what was sent")
+	}
+	return nil
+}
+
+// notifyingCache reports each session it stores.
+type notifyingCache struct {
+	tls.ClientSessionCache
+	puts chan string
+}
+
+func (c *notifyingCache) Put(sessionKey string, cs *tls.ClientSessionState) {
+	c.ClientSessionCache.Put(sessionKey, cs)
+	if cs != nil {
+		c.puts <- sessionKey
+	}
+}
+
+func resume(args []string) error {
+	fs := flag.NewFlagSet("resume", flag.ExitOnError)
+	addr := fs.String("addr", "", "server address")
+	fs.Parse(args)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cache := &notifyingCache{tls.NewLRUClientSessionCache(10), make(chan string, 10)}
+	tlsConf := &tls.Config{InsecureSkipVerify: true, NextProtos: []string{alpn}, ServerName: "localhost", ClientSessionCache: cache}
+	for i, wantResume := range []bool{false, true} {
+		conn, err := quic.DialAddr(ctx, *addr, tlsConf, quicConfig())
+		if err != nil {
+			return fmt.Errorf("dial %d: %w", i+1, err)
+		}
+		if got := conn.ConnectionState().TLS.DidResume; got != wantResume {
+			conn.CloseWithError(1, "unexpected DidResume")
+			return fmt.Errorf("connection %d: DidResume = %v, want %v", i+1, got, wantResume)
+		}
+		if !wantResume {
+			select {
+			case <-cache.puts:
+			case <-ctx.Done():
+				conn.CloseWithError(1, "no session ticket")
+				return errors.New("the server sent no session ticket")
+			}
+		}
+		// One echo before closing, so the server has the connection and can
+		// check it too.
+		if err := echoOnce(ctx, conn); err != nil {
+			conn.CloseWithError(1, "echo failed")
+			return fmt.Errorf("connection %d: %w", i+1, err)
+		}
+		conn.CloseWithError(0, "done")
+	}
+	fmt.Println("OK")
+	return nil
+}
+
+// Sends "ping" on a new bidirectional stream and checks it comes back.
+func echoOnce(ctx context.Context, conn quic.Connection) error {
+	str, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := str.Write([]byte("ping")); err != nil {
+		return err
+	}
+	str.Close()
+	got, err := io.ReadAll(str)
+	if err != nil {
+		return err
+	}
+	if string(got) != "ping" {
+		return fmt.Errorf("echo returned %q", got)
 	}
 	return nil
 }

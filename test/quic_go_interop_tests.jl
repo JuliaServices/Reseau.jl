@@ -4,9 +4,10 @@ using Reseau
 # Interop with quic-go over loopback UDP, through the helper in
 # quic_go_interop/: a Reseau client against a quic-go server, and a quic-go
 # client against a Reseau server, moving data on bidirectional and
-# unidirectional streams through the public endpoint API. quic-go starts a key update after 100 packets, so
-# these transfers also cover key updates. Runs when a Go 1.22+ toolchain is on
-# PATH and the quic-go module is cached or can be downloaded.
+# unidirectional streams through the public endpoint API, and resuming TLS
+# sessions both ways. quic-go starts a key update after 100 packets, so these
+# transfers also cover key updates. Runs when a Go 1.22+ toolchain is on PATH
+# and the quic-go module is cached or can be downloaded.
 
 const QGI = Reseau.QUIC
 const TLGI = Reseau.TLS
@@ -155,8 +156,17 @@ end
                 @test !r.reply_bidi && r.got[r.uni_reply] == r.uni_sent
                 @test _qgi_state(c -> c.error === nothing && c.peer_error === nothing, client)
                 @test _qgi_state(c -> c.key_updates, client) >= 1
+                # quic-go sent its session ticket with HANDSHAKE_DONE.
+                @test _qgi_state(c -> !TLGI.connection_state(c.tls).did_resume, client)
+                @test _qgi_state(c -> TLGI.connection_state(c.tls).has_resumable_session, client)
                 close(client; code = 0, reason = "done")
                 # Wait out the closing period, so quic-go sees the close.
+                QGI._wait_endpoint_done(client.ep, Int64(time_ns()) + 5_000_000_000)
+
+                # A second connection with the same config resumes.
+                client = QGI.connect(UDGI.loopback_addr(port), config; deadline_ns = deadline)
+                @test _qgi_state(c -> TLGI.connection_state(c.tls).did_resume, client)
+                close(client; code = 0, reason = "done")
                 QGI._wait_endpoint_done(client.ep, Int64(time_ns()) + 5_000_000_000)
             finally
                 client === nothing || close(client)
@@ -190,6 +200,41 @@ end
                 @test strip(read(out_log, String)) == "OK"
             finally
                 server === nothing || close(server)
+                close(listener)
+            end
+            log = read(err_log, String)
+            isempty(log) || @info "quic-go client log" log
+        end
+
+        @testset "quic-go client resumes against a Reseau server" begin
+            config = TLGI.Config(verify_peer = false, cert_file = _QGI_CERT, key_file = _QGI_KEY, alpn_protocols = [_QGI_ALPN])
+            listener = QGI.listen(UDGI.loopback_addr(0), config)
+            out_log = joinpath(dir, "resume.out")
+            err_log = joinpath(dir, "resume.log")
+            try
+                port = QGI.local_addr(listener).port
+                proc = run(pipeline(_qgi_cmd(`$bin resume -addr 127.0.0.1:$port`); stdout = out_log, stderr = err_log); wait = false)
+                deadline = Int64(time_ns()) + 60_000_000_000
+                # The client echoes once on each connection, then closes it.
+                for resumed in (false, true)
+                    server = QGI.accept(listener; deadline_ns = deadline)
+                    @test _qgi_state(c -> TLGI.connection_state(c.tls).did_resume, server) == resumed
+                    s = QGI.accept_stream(server; deadline_ns = deadline)
+                    @test String(read(s)) == "ping"
+                    write(s, "ping")
+                    closewrite(s)
+                    err = try
+                        QGI.accept_stream(server; deadline_ns = deadline)
+                        nothing
+                    catch ex
+                        ex
+                    end
+                    @test err isa QGI.ConnectionError && err.remote && err.app && err.code == 0
+                end
+                wait(proc)
+                @test success(proc)
+                @test strip(read(out_log, String)) == "OK"
+            finally
                 close(listener)
             end
             log = read(err_log, String)

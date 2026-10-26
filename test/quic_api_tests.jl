@@ -55,6 +55,16 @@ function _qa_echo_server(conn::QA.Connection)
     end)
 end
 
+# The TLS state of a connection, read under its endpoint's lock.
+function _qa_tls_state(c::QA.Connection)
+    lock(c.ep.lock)
+    try
+        return TLA.connection_state(c.slot.conn.tls)
+    finally
+        unlock(c.ep.lock)
+    end
+end
+
 @testset "QUIC API" begin
     @testset "handshake and a request-response stream" begin
         listener, client, server = _qa_pair()
@@ -567,6 +577,41 @@ end
         listener = QA.listen(UDA.loopback_addr(0), _qa_server_config())
         try
             @test_throws UDA.DeadlineExceededError QA.accept(listener; deadline_ns = _qa_deadline(0.2))
+        finally
+            close(listener)
+        end
+    end
+
+    # quic-go v0.48.2 integrationtests/self/resumption_test.go, "uses session
+    # resumption": the second connection with the same client config resumes.
+    @testset "uses session resumption" begin
+        client_config = _qa_client_config()
+        listener = QA.listen(UDA.loopback_addr(0), _qa_server_config())
+        try
+            addr = UDA.loopback_addr(QA.local_addr(listener).port)
+            for resumed in (false, true)
+                accepted = Threads.@spawn QA.accept(listener; deadline_ns = _qa_deadline())
+                client = QA.connect(addr, client_config; deadline_ns = _qa_deadline())
+                server = fetch(accepted)
+                try
+                    @test _qa_tls_state(client).did_resume == resumed
+                    @test _qa_tls_state(server).did_resume == resumed
+                    # The server queued its ticket when the handshake
+                    # completed, ahead of any stream data, so on loopback it
+                    # has arrived once a reply has.
+                    s = QA.open_stream(client)
+                    write(s, "ping")
+                    closewrite(s)
+                    peer = QA.accept_stream(server)
+                    write(peer, read(peer))
+                    closewrite(peer)
+                    @test String(read(s)) == "ping"
+                    @test _qa_tls_state(client).has_resumable_session
+                finally
+                    close(client)
+                    close(server)
+                end
+            end
         finally
             close(listener)
         end

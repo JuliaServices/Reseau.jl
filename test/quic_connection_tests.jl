@@ -506,4 +506,77 @@ using Reseau
         err = h.server.peer_error
         @test err !== nothing && !err.app && err.code == QCN._APPLICATION_ERROR && isempty(err.reason)
     end
+
+    # quic-go v0.48.2 connection_test.go: once the handshake completes, the
+    # server writes its session ticket to the 1-RTT crypto stream. quic-go
+    # splits it into CRYPTO frames of at most MaxPostHandshakeCryptoFrameSize
+    # (1000) bytes, because it resends them as control frames; ours go out like
+    # any CRYPTO data, as large as the packet allows, so that bound is not
+    # checked.
+    @testset "sends a session ticket when the handshake completes" begin
+        h = _QcnHarness()
+        @test _qcn_run!(h; done = h -> h.server !== nothing && QCN._handshake_complete(h.server))
+        ticket = h.server.spaces[QCN._APPLICATION_SPACE].crypto_send.data
+        # One whole NewSessionTicket message (RFC 8446 Section 4.6.1).
+        @test length(ticket) > 4 && ticket[1] == 0x04 &&
+            length(ticket) == 4 + (Int(ticket[2]) << 16 | Int(ticket[3]) << 8 | Int(ticket[4]))
+        @test _qcn_run!(h)
+        @test TLC.connection_state(h.client.tls).has_resumable_session
+        @test h.client.error === nothing && h.server.error === nothing
+    end
+
+    # quic-go v0.48.2 integrationtests/self/resumption_test.go, "uses session
+    # resumption".
+    @testset "uses session resumption" begin
+        client_config = _qcn_client_config()
+        server_config = _qcn_server_config()
+        h1 = _QcnHarness(; client_config, server_config)
+        @test _qcn_run!(h1)
+        @test TLC.connection_state(h1.client.tls).has_resumable_session
+        @test !TLC.connection_state(h1.client.tls).did_resume
+        @test !TLC.connection_state(h1.server.tls).did_resume
+        h2 = _QcnHarness(; client_config, server_config)
+        @test _qcn_run!(h2)
+        @test TLC.connection_state(h2.client.tls).did_resume
+        @test TLC.connection_state(h2.server.tls).did_resume
+        @test h2.client.error === nothing && h2.server.error === nothing
+    end
+
+    # quic-go v0.48.2 integrationtests/self/resumption_test.go, "doesn't use
+    # session resumption, if the config disables it". (Its GetConfigForClient
+    # variant has no counterpart: our servers have one fixed config.)
+    @testset "doesn't use session resumption, if the config disables it" begin
+        client_config = _qcn_client_config()
+        server_config = _qcn_server_config(session_tickets_disabled = true)
+        h1 = _QcnHarness(; client_config, server_config)
+        @test _qcn_run!(h1)
+        @test isempty(h1.server.spaces[QCN._APPLICATION_SPACE].crypto_send.data)
+        @test !TLC.connection_state(h1.client.tls).has_resumable_session
+        @test !TLC.connection_state(h1.client.tls).did_resume
+        @test !TLC.connection_state(h1.server.tls).did_resume
+        h2 = _QcnHarness(; client_config, server_config)
+        @test _qcn_run!(h2)
+        @test !TLC.connection_state(h2.client.tls).did_resume
+        @test !TLC.connection_state(h2.server.tls).did_resume
+    end
+
+    @testset "traffic secrets from TLS events are zeroed once installed" begin
+        secret = rand(UInt8, 32)
+        e = TLC.QUICEvent(TLC.QUICEventKind.SetReadSecret, TLC.QUICEncryptionLevel.Handshake, copy(secret),
+            TLC._TLS13_AES_128_GCM_SHA256_ID, nothing)
+        keys = QCN._event_packet_keys(e)
+        @test keys.secret == secret
+        @test all(iszero, e.data)
+    end
+
+    @testset "the server keeps no resumption material once its ticket is sent" begin
+        for server_config in (_qcn_server_config(), _qcn_server_config(session_tickets_disabled = true))
+            client_config = _qcn_client_config(cert_file = _QCN_CERT, key_file = _QCN_KEY)
+            server_config = TLC.Config(server_config; client_auth = TLC.ClientAuthMode.RequireAnyClientCert)
+            h = _QcnHarness(; client_config, server_config)
+            @test _qcn_run!(h)
+            @test isempty(h.server.tls.native_state.resumption_secret)
+            @test isempty(h.server.tls.native_state.session_certificates)
+        end
+    end
 end
