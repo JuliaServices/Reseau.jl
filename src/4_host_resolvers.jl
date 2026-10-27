@@ -145,15 +145,45 @@ This is the default resolver used by the convenience APIs.
 """
 struct SystemResolver <: AbstractResolver end
 
+"""
+    _LookupContext
+
+A dial's interest in its host lookup. The dial sets `abandoned` once it stops
+waiting (deadline, interrupt, or result); `SingleflightResolver` sets `shared`
+when another caller joins the lookup. A queued `getaddrinfo` whose context is
+abandoned and not shared is dropped instead of run, as Go drops a cgo lookup
+whose context ends while it waits for a thread (`acquireThread`) and cancels
+only lookups nobody else shares (`ForgetUnshared`).
+"""
+mutable struct _LookupContext
+    @atomic abandoned::Bool
+    @atomic shared::Bool
+end
+
+_LookupContext() = _LookupContext(false, false)
+
+const _MaybeLookupContext = Union{Nothing, _LookupContext}
+
+@inline function _lookup_abandoned(ctx::_MaybeLookupContext)::Bool
+    ctx === nothing && return false
+    return (@atomic :acquire ctx.abandoned) && !(@atomic :acquire ctx.shared)
+end
+
+# Thrown to the waiter of a dropped lookup, whose caller already stopped
+# waiting. A singleflight leader that gets it makes its followers retry.
+struct _LookupAbandonedError <: Exception end
+
 mutable struct _LookupFlight
     lock::ReentrantLock
     cond::Threads.Condition
     result::Union{Nothing, Vector{TCP.SocketEndpoint}}
     err::Union{Nothing, Exception}
     @atomic done::Bool
-    function _LookupFlight()
+    # The leader's lookup context; a follower marks it shared.
+    ctx::Union{Nothing, _LookupContext}
+    function _LookupFlight(ctx::Union{Nothing, _LookupContext})
         lock = ReentrantLock()
-        return new(lock, Threads.Condition(lock), nothing, nothing, false)
+        return new(lock, Threads.Condition(lock), nothing, nothing, false, ctx)
     end
 end
 
@@ -428,7 +458,12 @@ const _WSATRY_AGAIN = Cint(11002)
 const _WSATYPE_NOT_FOUND = Cint(10109)
 const _DNS_ERROR_RCODE_NAME_ERROR = Cint(9003)
 const _DNS_INFO_NO_RECORDS = Cint(9501)
+# Workers started with the pool. More start while every worker is busy, up to
+# `_ADDRINFO_POOL_MAX`, so slow names cannot hold up names the system resolver
+# answers locally (Go starts a thread per cgo lookup, up to 500). Workers never
+# exit: Julia does not reuse the thread ids of adopted threads.
 const _ADDRINFO_POOL_SIZE = 4
+const _ADDRINFO_POOL_MAX = 64
 const _ADDRINFO_POOL_CAPACITY = 64
 const _ADDRINFO_THREAD_ENTRY_C = Ref{Ptr{Cvoid}}(C_NULL)
 const _ADDRINFO_POOL_LOCK = ReentrantLock()
@@ -444,27 +479,37 @@ mutable struct _AddrInfoFuture
     done::Bool
     err::Union{Nothing,Exception}
     addr_info_ptr::Ptr{_AddrInfo}
+    ctx::_MaybeLookupContext
 end
 
-function _AddrInfoFuture(hostname::String, flags::Cint)
-    return _AddrInfoFuture(Threads.Condition(), hostname, flags, Cint(0), false, nothing, C_NULL)
+function _AddrInfoFuture(hostname::String, flags::Cint, ctx::_MaybeLookupContext = nothing)
+    return _AddrInfoFuture(Threads.Condition(), hostname, flags, Cint(0), false, nothing, C_NULL, ctx)
 end
 
 mutable struct _AddrInfoWorkQueue
     futures::Channel{_AddrInfoFuture}
     ready::Threads.Condition
+    # Workers waiting for work that no `notify` has claimed yet; guarded by `ready`.
+    idle::Int
 end
 
-_AddrInfoWorkQueue() = _AddrInfoWorkQueue(Channel{_AddrInfoFuture}(_ADDRINFO_POOL_CAPACITY), Threads.Condition())
+_AddrInfoWorkQueue() = _AddrInfoWorkQueue(Channel{_AddrInfoFuture}(_ADDRINFO_POOL_CAPACITY), Threads.Condition(), 0)
 
 function _put_addrinfo_work!(work_queue::_AddrInfoWorkQueue, future::_AddrInfoFuture)::Nothing
     put!(work_queue.futures, future)
+    grow = false
     lock(work_queue.ready)
     try
-        notify(work_queue.ready; all = false)
+        if work_queue.idle > 0
+            work_queue.idle -= 1
+            notify(work_queue.ready; all = false)
+        else
+            grow = true
+        end
     finally
         unlock(work_queue.ready)
     end
+    grow && _grow_addrinfo_pool!(work_queue)
     return nothing
 end
 
@@ -475,6 +520,8 @@ function _take_addrinfo_work!(work_queue::_AddrInfoWorkQueue)::Union{Nothing,_Ad
             isopen(work_queue.futures) || return nothing
             # Channel close wakes its own blocked takers by throwing. Native
             # workers must finish normal shutdown without exception backtraces.
+            # The `_put_addrinfo_work!` that wakes this worker uncounts it.
+            work_queue.idle += 1
             wait(work_queue.ready)
         end
         return take!(work_queue.futures)
@@ -555,6 +602,19 @@ function _run_addrinfo_future!(future::_AddrInfoFuture)::Nothing
     return nothing
 end
 
+# Completes a queued lookup without running it: its caller stopped waiting.
+function _drop_addrinfo_future!(future::_AddrInfoFuture)::Nothing
+    lock(future.notify)
+    try
+        future.err = _LookupAbandonedError()
+        future.done = true
+        notify(future.notify)
+    finally
+        unlock(future.notify)
+    end
+    return nothing
+end
+
 function _addrinfo_worker_started!(work_queue::_AddrInfoWorkQueue)::Nothing
     lock(_ADDRINFO_EXIT_COND)
     try
@@ -598,7 +658,11 @@ function _addrinfo_worker_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
         while true
             future = _take_addrinfo_work!(work_queue)
             future === nothing && break
-            _run_addrinfo_future!(future)
+            if _lookup_abandoned(future.ctx)
+                _drop_addrinfo_future!(future)
+            else
+                _run_addrinfo_future!(future)
+            end
         end
     catch
     finally
@@ -616,20 +680,43 @@ function _ensure_addrinfo_pool!()::_AddrInfoWorkQueue
         end
         work_queue = _ADDRINFO_WORK_QUEUE[]
         while _ADDRINFO_STARTED_THREADS[] < _ADDRINFO_POOL_SIZE
-            next_idx = _ADDRINFO_STARTED_THREADS[] + 1
-            _addrinfo_worker_started!(work_queue)
-            try
-                IOPoll._spawn_detached_thread("reseau-getaddrinfo-$next_idx", _ADDRINFO_THREAD_ENTRY_C, work_queue)
-            catch
-                _addrinfo_worker_stopped!(work_queue)
-                rethrow()
-            end
-            _ADDRINFO_STARTED_THREADS[] = next_idx
+            _start_addrinfo_worker_locked!(work_queue)
         end
         return work_queue
     finally
         unlock(_ADDRINFO_POOL_LOCK)
     end
+end
+
+function _start_addrinfo_worker_locked!(work_queue::_AddrInfoWorkQueue)::Nothing
+    next_idx = _ADDRINFO_STARTED_THREADS[] + 1
+    _addrinfo_worker_started!(work_queue)
+    try
+        IOPoll._spawn_detached_thread("reseau-getaddrinfo-$next_idx", _ADDRINFO_THREAD_ENTRY_C, work_queue)
+    catch
+        _addrinfo_worker_stopped!(work_queue)
+        rethrow()
+    end
+    _ADDRINFO_STARTED_THREADS[] = next_idx
+    return nothing
+end
+
+# Runs after a lookup was queued while no worker was idle. Best effort: the
+# lookup is already queued, so a failed thread start leaves it to the running
+# workers instead of failing the caller.
+function _grow_addrinfo_pool!(work_queue::_AddrInfoWorkQueue)::Nothing
+    lock(_ADDRINFO_POOL_LOCK)
+    try
+        # After `shutdown!` replaced the queue, its workers drain it and exit.
+        _ADDRINFO_WORK_QUEUE[] === work_queue || return nothing
+        _ADDRINFO_STARTED_THREADS[] < _ADDRINFO_POOL_MAX || return nothing
+        _start_addrinfo_worker_locked!(work_queue)
+    catch ex
+        ex isa InterruptException && rethrow()
+    finally
+        unlock(_ADDRINFO_POOL_LOCK)
+    end
+    return nothing
 end
 
 function shutdown!(timeout::Real = 5.0)::Nothing
@@ -884,13 +971,17 @@ end
     end
 end
 
-function _native_getaddrinfo(hostname::AbstractString; flags::Cint = Cint(0))::Vector{TCP.SocketEndpoint}
+function _native_getaddrinfo(
+        hostname::AbstractString;
+        flags::Cint = Cint(0),
+        ctx::_MaybeLookupContext = nothing,
+    )::Vector{TCP.SocketEndpoint}
     SocketOps.ensure_winsock!()
     addresses = TCP.SocketEndpoint[]
     hostname_s = String(hostname)
-    future = _AddrInfoFuture(hostname_s, flags)
+    future = _AddrInfoFuture(hostname_s, flags, ctx)
     # `getaddrinfo` can block inside the system resolver stack. Run it on a
-    # small dedicated worker pool so hostname resolution does not occupy a Julia
+    # dedicated worker pool so hostname resolution does not occupy a Julia
     # scheduler thread while callers wait on timeout/deadline machinery.
     _put_addrinfo_work!(_ensure_addrinfo_pool!(), future)
     ret = _wait_addrinfo_future!(future)
@@ -1343,12 +1434,12 @@ function _apply_policy_and_network(
     return out
 end
 
-function _resolve_system_host(host::AbstractString)::Vector{TCP.SocketEndpoint}
+function _resolve_system_host(host::AbstractString, ctx::_MaybeLookupContext = nothing)::Vector{TCP.SocketEndpoint}
     h = String(host)
     literal = _literal_host_addr(h)
     literal === nothing || return TCP.SocketEndpoint[literal]
     flags = @static Sys.isopenbsd() ? Cint(0) : (_AI_ALL | _AI_V4MAPPED)
-    ips = _native_getaddrinfo(h; flags = flags)
+    ips = _native_getaddrinfo(h; flags = flags, ctx = ctx)
     out = TCP.SocketEndpoint[]
     seen4 = Set{NTuple{4, UInt8}}()
     seen6 = Set{Tuple{NTuple{16, UInt8}, UInt32}}()
@@ -1378,6 +1469,7 @@ function _resolve_static_host(
         resolver::StaticResolver,
         network::AbstractString,
         host::AbstractString,
+        ctx::_MaybeLookupContext = nothing,
     )::Vector{TCP.SocketEndpoint}
     h = String(host)
     literal = _literal_host_addr(h)
@@ -1386,7 +1478,7 @@ function _resolve_static_host(
     mapped === nothing || return copy(mapped::Vector{TCP.SocketEndpoint})
     fallback = resolver.fallback
     fallback === nothing && _lookup_error("no suitable address", h)
-    return _resolve_host_ips(fallback, network, h)
+    return _resolve_host_ips(fallback, network, h, ctx)
 end
 
 function _resolve_host_ips(resolver::AbstractResolver, host::AbstractString)::Vector{TCP.SocketEndpoint}
@@ -1403,14 +1495,16 @@ end
 end
 
 # Stored as a flight's error when the leader's failure is its own: an interrupt,
-# or a non-`Exception` value thrown by a custom resolver. Followers retry the
-# lookup instead of inheriting it.
+# a non-`Exception` value thrown by a custom resolver, or a lookup dropped
+# because the leader's caller left. Followers retry the lookup instead of
+# inheriting it.
 struct _LookupLeaderFailed <: Exception end
 
 function _resolve_singleflight_host(
         resolver::SingleflightResolver,
         network::AbstractString,
         host::AbstractString,
+        ctx::_MaybeLookupContext = nothing,
     )::Vector{TCP.SocketEndpoint}
     h = String(host)
     literal = _literal_host_addr(h)
@@ -1424,18 +1518,21 @@ function _resolve_singleflight_host(
             existing = get(() -> nothing, resolver.inflight, key)
             # A finished flight whose leader has not removed it yet is not joined.
             if existing === nothing || (@atomic :acquire (existing::_LookupFlight).done)
-                flight = _LookupFlight()
+                flight = _LookupFlight(ctx)
                 resolver.inflight[key] = flight::_LookupFlight
                 @atomic :acquire_release resolver.actual_lookups += 1
                 leader = true
             else
                 flight = existing::_LookupFlight
+                # The leader's caller may leave; this caller still needs the lookup.
+                leader_ctx = flight.ctx
+                leader_ctx === nothing || (@atomic :release leader_ctx.shared = true)
                 @atomic :acquire_release resolver.shared_hits += 1
             end
         finally
             unlock(resolver.lock)
         end
-        leader && return _lead_singleflight_lookup!(resolver, flight::_LookupFlight, key, network, h)
+        leader && return _lead_singleflight_lookup!(resolver, flight::_LookupFlight, key, network, h, ctx)
         lock((flight::_LookupFlight).lock)
         try
             while !(@atomic :acquire flight.done)
@@ -1457,19 +1554,20 @@ function _lead_singleflight_lookup!(
         key::Tuple{String, String},
         network::AbstractString,
         h::String,
+        ctx::_MaybeLookupContext,
     )::Vector{TCP.SocketEndpoint}
     result = nothing
     failed = false
     thrown = nothing
     try
-        result = _resolve_host_ips(resolver.parent, network, h)
+        result = _resolve_host_ips(resolver.parent, network, h, ctx)
     catch ex
         failed = true
         thrown = ex
     end
     err = if !failed
         nothing
-    elseif thrown isa Exception && !(thrown isa InterruptException)
+    elseif thrown isa Exception && !(thrown isa InterruptException) && !(thrown isa _LookupAbandonedError)
         thrown
     else
         _LookupLeaderFailed()
@@ -1574,6 +1672,7 @@ function _resolve_cached_host(
         resolver::CachingResolver,
         network::AbstractString,
         host::AbstractString,
+        ctx::_MaybeLookupContext = nothing,
     )::Vector{TCP.SocketEndpoint}
     h = String(host)
     literal = _literal_host_addr(h)
@@ -1620,7 +1719,7 @@ function _resolve_cached_host(
     failed = false
     thrown = nothing
     try
-        result = _resolve_host_ips(resolver.parent, network, h)
+        result = _resolve_host_ips(resolver.parent, network, h, ctx)
     catch ex
         failed = true
         thrown = ex
@@ -1644,18 +1743,19 @@ function _resolve_host_ips(
         resolver::AbstractResolver,
         network::AbstractString,
         host::AbstractString,
+        ctx::_MaybeLookupContext = nothing,
     )::Vector{TCP.SocketEndpoint}
     if resolver isa SingleflightResolver
-        return _resolve_singleflight_host(resolver::SingleflightResolver, network, host)
+        return _resolve_singleflight_host(resolver::SingleflightResolver, network, host, ctx)
     end
     if resolver isa CachingResolver
-        return _resolve_cached_host(resolver::CachingResolver, network, host)
+        return _resolve_cached_host(resolver::CachingResolver, network, host, ctx)
     end
     if resolver isa SystemResolver
-        return _resolve_system_host(host)
+        return _resolve_system_host(host, ctx)
     end
     if resolver isa StaticResolver
-        return _resolve_static_host(resolver::StaticResolver, network, host)
+        return _resolve_static_host(resolver::StaticResolver, network, host, ctx)
     end
     resolved = resolve_tcp_addrs(
         resolver,
@@ -1755,6 +1855,17 @@ function resolve_tcp_addrs(
         op::Symbol = :connect,
         policy::ResolverPolicy = ResolverPolicy(),
     )::ResolvedConnectAddrs
+    return _resolve_tcp_addrs(resolver, network, address, op, policy, nothing)
+end
+
+function _resolve_tcp_addrs(
+        resolver::AbstractResolver,
+        network::AbstractString,
+        address::AbstractString,
+        op::Symbol,
+        policy::ResolverPolicy,
+        ctx::_MaybeLookupContext,
+    )::ResolvedConnectAddrs
     kind = _network_kind(network)
     addr = String(address)
     op == :connect && isempty(addr) && _addr_error("missing address", addr)
@@ -1763,7 +1874,7 @@ function resolve_tcp_addrs(
     ips = if isempty(host)
         _wildcard_addrs(kind, op)
     else
-        _resolve_host_ips(resolver, network, host)
+        _resolve_host_ips(resolver, network, host, ctx)
     end
     _append_unspecified_fallback!(ips)
     filtered = _apply_policy_and_network(ips, kind, policy)
@@ -2011,6 +2122,7 @@ function _resolve_with_deadline(
     now_ns = Int64(time_ns())
     now_ns >= deadline_ns && throw(DialTimeoutError(String(address)))
     future = _ResolvedConnectAddrsFuture()
+    ctx = _LookupContext()
     timer, timer_task = _spawn_timer_task(deadline_ns) do
         timeout_ex = DialTimeoutError(String(address))
         lock(future.notify)
@@ -2028,7 +2140,7 @@ function _resolve_with_deadline(
     end
     _spawn_task_body(@noinline function ()
         try
-            _notify_resolved_connect_addrs_future!(future, resolve_tcp_addrs(d.resolver, network, address; op = :connect, policy = d.policy))
+            _notify_resolved_connect_addrs_future!(future, _resolve_dial_addrs(d, network, address, ctx))
         catch err
             ex = _as_exception(err)
             lock(future.notify)
@@ -2048,8 +2160,24 @@ function _resolve_with_deadline(
     try
         return _wait_resolved_connect_addrs_future!(future)
     finally
+        # This dial no longer waits, so workers drop its still-queued lookup.
+        @atomic :release ctx.abandoned = true
         _close_timer_task!(timer, timer_task)
     end
+end
+
+# `HostResolver` wraps every resolver in a `SingleflightResolver`, whose lookups
+# stay inside this module and can carry `ctx`. Other resolvers (a `HostResolver`
+# built with its field constructor) go through the public method they may extend.
+function _resolve_dial_addrs(
+        d::HostResolver,
+        network::AbstractString,
+        address::AbstractString,
+        ctx::_LookupContext,
+    )::ResolvedConnectAddrs
+    resolver = d.resolver
+    resolver isa SingleflightResolver || return resolve_tcp_addrs(resolver, network, address; op = :connect, policy = d.policy)
+    return _resolve_tcp_addrs(resolver, network, address, :connect, d.policy, ctx)
 end
 
 _coerce_connect_addrs_v4(resolved::Vector{TCP.SocketAddrV4}) = resolved
