@@ -3,7 +3,8 @@
 
 Root module for Reseau's networking transport stack.
 
-The primary public entrypoints are `TCP`, `UDP`, `TLS`, and `Reseau.Unix`.
+The primary public entrypoints are `TCP`, `UDP`, `TLS`, `Reseau.Unix`, and
+`Reseau.QUIC`.
 """
 module Reseau
 
@@ -19,6 +20,7 @@ include("3_udp.jl")
 include("4_host_resolvers.jl")
 include("5_socks.jl")
 include("5_tls.jl")
+include("6_quic.jl")
 include("6_precompile_workload.jl")
 
 end

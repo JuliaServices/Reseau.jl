@@ -461,3 +461,129 @@ end
     end
 end
 end
+
+@testset "UDP draining receives never wait" begin
+    receiver = UDP.listen(UDP.loopback_addr(0))
+    sender = UDP.connect(UDP.local_addr(receiver)::UDP.SocketAddrV4)
+    try
+        buf = Vector{UInt8}(undef, 64)
+        @test UDP._try_recvfrom!(receiver, buf) == (-1, nothing)
+        UDP.send(sender, UInt8[0x01])
+        UDP.send(sender, UInt8[0x02, 0x03])
+        # A blocking receive returns the first, and the rest drain without waiting.
+        n, from = UDP.recvfrom!(receiver, buf)
+        @test buf[1:n] == UInt8[0x01]
+        got = Int[]
+        @static if Sys.iswindows()
+            # Receives complete through IOCP, so nothing drains.
+            @test UDP._try_recvfrom!(receiver, buf) == (-1, nothing)
+        else
+            k, peer = UDP._try_recvfrom!(receiver, buf)
+            @test buf[1:k] == UInt8[0x02, 0x03]
+            @test peer == from
+            @test UDP._try_recvfrom!(receiver, buf) == (-1, nothing)
+        end
+        UDP.send(sender, zeros(UInt8, 100))
+        @static if !Sys.iswindows()
+            # Wait for it to queue, then a short buffer reports truncation.
+            UDP.set_read_deadline!(receiver, 0)
+            while true
+                try
+                    UDP._try_recvfrom!(receiver, buf)[1] < 0 || error("expected truncation")
+                    yield()
+                catch err
+                    @test err isa UDP.TruncatedDatagramError
+                    break
+                end
+            end
+        end
+    finally
+        close(sender)
+        close(receiver)
+    end
+    @test_throws Exception UDP._try_recvfrom!(receiver, Vector{UInt8}(undef, 8))
+end
+
+@static if Sys.islinux()
+@testset "UDP segmentation offload sends one buffer as many datagrams" begin
+    receiver = UDP.listen(UDP.loopback_addr(0))
+    connected = UDP.connect(UDP.local_addr(receiver)::UDP.SocketAddrV4)
+    unconnected = UDP.listen(UDP.loopback_addr(0))
+    try
+        # quic-go's isGSOEnabled: kernel 5 or later, and UDP_SEGMENT known.
+        @test UDP._gso_supported(connected) == (UDP._kernel_major() >= 5)
+        payload = UInt8[UInt8(i % 251) for i in 1:350]
+        buf = vcat(payload, zeros(UInt8, 50))  # bytes past `nbytes` are not sent
+        for (sock, addr) in ((connected, nothing), (unconnected, UDP.local_addr(receiver)))
+            UDP._send_segments!(sock, buf, 350, 100, addr)
+            got = Vector{UInt8}[]
+            for _ in 1:4
+                d, _ = UDP.recvfrom(receiver)
+                push!(got, d)
+            end
+            @test got == [payload[1:100], payload[101:200], payload[201:300], payload[301:350]]
+        end
+        @test_throws ArgumentError UDP._send_segments!(unconnected, buf, 350, 100, nothing)
+    finally
+        close(connected)
+        close(unconnected)
+        close(receiver)
+    end
+end
+end
+
+@static if Sys.islinux()
+@testset "UDP receive offload hands back runs of datagrams with their size" begin
+    receiver = UDP.listen(UDP.loopback_addr(0))
+    sender = UDP.connect(UDP.local_addr(receiver)::UDP.SocketAddrV4)
+    try
+        @test UDP._enable_gro!(receiver)
+        buf = Vector{UInt8}(undef, 65535)
+        @test UDP._recv_segments!(receiver, buf, false) == (-1, nothing, 0)
+        payload = UInt8[UInt8(i % 251) for i in 1:350]
+        UDP._send_segments!(sender, payload, 350, 100, nothing)
+        # Whether the kernel coalesces them or not, splitting each receive at
+        # its segment size gives back the datagrams sent.
+        got = Vector{UInt8}[]
+        while length(got) < 4
+            n, from, segment = UDP._recv_segments!(receiver, buf, true)
+            @test from == UDP.local_addr(sender)
+            segment == 0 && (segment = n)
+            for off in 0:segment:(n - 1)
+                push!(got, buf[(off + 1):min(off + segment, n)])
+            end
+        end
+        @test got == [payload[1:100], payload[101:200], payload[201:300], payload[301:350]]
+    finally
+        close(sender)
+        close(receiver)
+    end
+end
+end
+
+@testset "UDP don't-fragment and path MTU" begin
+    for addr in (UDP.loopback_addr(0), UDP.loopback_addr6(0))
+        receiver = try
+            UDP.listen(addr)
+        catch
+            continue  # no IPv6 loopback
+        end
+        sender = UDP.connect(UDP.local_addr(receiver))
+        try
+            supported = Sys.islinux() || Sys.isapple()
+            @test UDP._set_dont_fragment!(sender) == supported
+            @test UDP._set_dont_fragment!(receiver) == supported
+            if Sys.islinux()
+                # The connected socket knows its route's MTU; loopback's is large.
+                @test UDP._path_mtu(sender) >= 1500
+                # An unconnected socket has no route to ask about.
+                @test UDP._path_mtu(receiver) == 0
+            else
+                @test UDP._path_mtu(sender) == 0
+            end
+        finally
+            close(sender)
+            close(receiver)
+        end
+    end
+end

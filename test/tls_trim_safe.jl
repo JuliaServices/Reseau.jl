@@ -366,9 +366,348 @@ function run_tls_trim_sample()::Nothing
     return nothing
 end
 
+# Pumps events between two QUICConns until both handshakes finish, so the
+# handshake task, turn handoff, and post-handshake ticket path are compiled.
+function _run_quic_handshake_trim!(client::TL.QUICConn, server::TL.QUICConn)::Nothing
+    TL.set_transport_parameters!(client, UInt8[0x01])
+    TL.set_transport_parameters!(server, UInt8[0x02])
+    TL.start!(client)
+    TL.start!(server)
+    a, b = client, server
+    idle = 0
+    done = 0
+    while idle < 2
+        event = TL.next_event!(a)
+        if event.kind == TL.QUICEventKind.NoEvent
+            idle += 1
+            a, b = b, a
+            continue
+        end
+        idle = 0
+        if event.kind == TL.QUICEventKind.WriteData
+            TL.handle_data!(b, event.level, event.data)
+        elseif event.kind == TL.QUICEventKind.HandshakeDone
+            done += 1
+            a === server && TL.send_session_ticket!(server)
+        elseif event.kind == TL.QUICEventKind.Error
+            throw(event.err::TL.TLSError)
+        end
+    end
+    done == 2 || error("QUIC trim handshake did not complete")
+    return nothing
+end
+
+function _run_quic_trim!()::Nothing
+    client_config = TL.Config(verify_peer = false, server_name = "localhost", alpn_protocols = ["h3"])
+    server_config = TL.Config(verify_peer = false, cert_file = _TLS_CERT_PATH, key_file = _TLS_KEY_PATH, alpn_protocols = ["h3"])
+    for resumed in (false, true)
+        client = TL.quic_client(client_config)
+        server = TL.quic_server(server_config)
+        try
+            _run_quic_handshake_trim!(client, server)
+            state = TL.connection_state(client)
+            state.alpn_protocol == "h3" || error("unexpected QUIC trim ALPN")
+            state.did_resume == resumed || error("unexpected QUIC trim resumption state")
+        finally
+            close(client)
+            close(server)
+        end
+    end
+    return nothing
+end
+
+function _quic_trim_seal!(keys, buf::Vector{UInt8}, layout, payload::Vector{UInt8})::Nothing
+    append!(buf, payload)
+    payload_last = Reseau.QUIC._end_packet!(buf, layout)
+    Reseau.QUIC._seal_packet!(keys, buf, layout.first, layout.pn_offset, layout.pn_len, payload_last, Int64(2))
+    return nothing
+end
+
+# Builds a datagram of an Initial and a 1-RTT packet, seals both, then parses
+# the datagram back and opens each packet.
+function _quic_trim_datagram!(initial_keys, onertt_keys)::Nothing
+    QP = Reseau.QUIC
+    dcid = UInt8[0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08]
+    payload = fill(0x01, 24)
+    buf = UInt8[]
+    layout = QP._begin_long_packet!(buf, QP._PacketType.Initial, QP._QUIC_V1, dcid, UInt8[0x01], UInt8[0x02], Int64(2), 4)
+    _quic_trim_seal!(initial_keys, buf, layout, payload)
+    layout = QP._begin_short_packet!(buf, dcid, Int64(2), 2; key_phase = true)
+    _quic_trim_seal!(onertt_keys, buf, layout, payload)
+    count = 0
+    for (keys, header) in zip((initial_keys, onertt_keys), QP._datagram_packets(buf, 1, length(buf), length(dcid)))
+        opened = QP._open_packet!(keys, buf, header.first, header.pn_offset, header.last, Int64(1))
+        opened === nothing && error("QUIC trim packet failed to open")
+        buf[opened[2]:opened[3]] == payload || error("QUIC trim packet payload mismatch")
+        count += 1
+    end
+    count == 2 || error("QUIC trim datagram did not parse into two packets")
+    return nothing
+end
+
+# Encodes one of every frame type and decodes them back, so the decoder's
+# handler call is compiled for each frame struct.
+function _quic_trim_frames!()::Nothing
+    QP = Reseau.QUIC
+    buf = UInt8[]
+    data = UInt8[0x01, 0x02, 0x03]
+    QP._append_padding!(buf, 2)
+    QP._append_ping_frame!(buf)
+    QP._append_ack_frame!(buf, [UInt64(9):UInt64(10), UInt64(1):UInt64(5)], UInt64(3))
+    QP._append_ack_frame!(buf, [UInt64(4):UInt64(4)], UInt64(0); ecn = (UInt64(1), UInt64(0), UInt64(2)))
+    QP._append_reset_stream_frame!(buf, UInt64(0), UInt64(1), UInt64(2))
+    QP._append_stop_sending_frame!(buf, UInt64(0), UInt64(1))
+    QP._append_crypto_frame!(buf, UInt64(0), data)
+    QP._append_new_token_frame!(buf, data)
+    QP._append_stream_frame!(buf, UInt64(4), UInt64(7), data; fin = true)
+    QP._append_max_data_frame!(buf, UInt64(100))
+    QP._append_max_stream_data_frame!(buf, UInt64(4), UInt64(100))
+    QP._append_max_streams_frame!(buf, true, UInt64(10))
+    QP._append_data_blocked_frame!(buf, UInt64(100))
+    QP._append_stream_data_blocked_frame!(buf, UInt64(4), UInt64(100))
+    QP._append_streams_blocked_frame!(buf, false, UInt64(10))
+    QP._append_new_connection_id_frame!(buf, UInt64(1), UInt64(0), data, zeros(UInt8, 16))
+    QP._append_retire_connection_id_frame!(buf, UInt64(0))
+    QP._append_path_challenge_frame!(buf, UInt64(7))
+    QP._append_path_response_frame!(buf, UInt64(7))
+    QP._append_connection_close_frame!(buf, UInt64(0), UInt64(0), data)
+    QP._append_handshake_done_frame!(buf)
+    QP._append_stream_frame!(buf, UInt64(8), UInt64(0), data; explicit_length = false)
+    count = Ref(0)
+    acked = Ref(UInt64(0))
+    # The handler names `Reseau.QUIC` directly: a captured module variable would
+    # make every lookup inside the closure dynamic.
+    result = QP._decode_frames(buf, 1, length(buf), QP._PacketType.OneRTT) do frame
+        count[] += 1
+        if frame isa Reseau.QUIC._AckFrame
+            for r in Reseau.QUIC._ack_ranges(buf, frame)
+                acked[] += UInt64(length(r))
+            end
+        end
+        return nothing
+    end
+    result.error === nothing || error("QUIC trim frames failed to decode")
+    count[] == 22 || error("QUIC trim decoded the wrong number of frames")
+    acked[] == 8 || error("QUIC trim ACK ranges mismatch")
+    return nothing
+end
+
+# Moves datagrams both ways until neither side sends, then fires timers due
+# within 100 ms, until the next is further off. Returns the advanced clock.
+function _quic_trim_settle!(client::Reseau.QUIC._Connection, server::Reseau.QUIC._Connection, now::Int64)::Int64
+    QP = Reseau.QUIC
+    for _ in 1:10_000
+        moved = false
+        while (d = QP._next_datagram!(client, now)) !== nothing
+            QP._receive_datagram!(server, d, now)
+            moved = true
+        end
+        while (d = QP._next_datagram!(server, now)) !== nothing
+            QP._receive_datagram!(client, d, now)
+            moved = true
+        end
+        moved && continue
+        t = typemax(Int64)
+        for conn in (client, server)
+            nt = QP._next_timeout(conn)
+            nt === nothing || (t = min(t, nt))
+        end
+        t - now > 100_000_000 && return now
+        now = max(now, t)
+        for conn in (client, server)
+            nt = QP._next_timeout(conn)
+            nt !== nothing && nt <= now && QP._handle_timeout!(conn, now)
+        end
+    end
+    error("QUIC trim connections did not settle")
+end
+
+# Streams in both directions, STOP_SENDING and RESET_STREAM, a key update,
+# and an application close, between in-memory connections.
+function _quic_trim_streams!(client::Reseau.QUIC._Connection, server::Reseau.QUIC._Connection, now::Int64)::Nothing
+    QP = Reseau.QUIC
+    data = rand(UInt8, 50_000)
+    bidi = QP._open_stream!(client)::UInt64
+    uni = QP._open_stream!(client; bidi = false)::UInt64
+    QP._stream_write!(client, bidi, data; fin = true)
+    QP._stream_write!(client, uni, data; fin = true)
+    now = _quic_trim_settle!(client, server, now)
+    QP._accept_stream!(server) == bidi || error("QUIC trim server did not accept the bidirectional stream")
+    QP._accept_stream!(server) == uni || error("QUIC trim server did not accept the unidirectional stream")
+    for id in (bidi, uni)
+        r = QP._stream_read!(server, id)
+        (r.data == data && r.fin) || error("QUIC trim server read the wrong data")
+    end
+    QP._stream_write!(server, bidi, data; fin = true)
+    now = _quic_trim_settle!(client, server, now)
+    r = QP._stream_read!(client, bidi)
+    (r.data == data && r.fin) || error("QUIC trim client read the wrong echo")
+
+    stopped = QP._open_stream!(client)::UInt64
+    reset = QP._open_stream!(client)::UInt64
+    for id in (stopped, reset)
+        QP._stream_write!(client, id, data)
+    end
+    now = _quic_trim_settle!(client, server, now)
+    QP._stream_stop_sending!(server, stopped, UInt64(1))
+    QP._stream_reset!(client, reset, UInt64(2))
+    now = _quic_trim_settle!(client, server, now)
+    QP._stream_stop_code(client, stopped) == 1 || error("QUIC trim STOP_SENDING was not received")
+    for (id, code) in ((stopped, UInt64(1)), (reset, UInt64(2)))
+        QP._accept_stream!(server)
+        r = QP._stream_read!(server, id)
+        while !r.fin
+            r = QP._stream_read!(server, id)
+        end
+        r.reset_code == code || error("QUIC trim reset code mismatch")
+    end
+
+    # The transfers above already made the automatic first key update.
+    updates = client.key_updates
+    QP._initiate_key_update!(client) || error("QUIC trim key update was refused")
+    last_id = QP._open_stream!(client)::UInt64
+    QP._stream_write!(client, last_id, UInt8[0x2a]; fin = true)
+    now = _quic_trim_settle!(client, server, now)
+    QP._accept_stream!(server) == last_id || error("QUIC trim stream after the key update was not accepted")
+    QP._stream_read!(server, last_id).data == UInt8[0x2a] || error("QUIC trim data after the key update mismatch")
+    (client.key_updates == updates + 1 && server.key_updates == client.key_updates && server.key_phase == client.key_phase) ||
+        error("QUIC trim server did not follow the key update")
+
+    QP._close_connection!(client, UInt64(0), "done", now)
+    now = _quic_trim_settle!(client, server, now)
+    err = server.peer_error
+    (err !== nothing && err.app) || error("QUIC trim application close was not received")
+    return nothing
+end
+
+# A QUIC connection in memory, through streams and closing.
+function _quic_trim_connection!()::Nothing
+    QP = Reseau.QUIC
+    client_config = TL.Config(verify_peer = false, server_name = "localhost", alpn_protocols = ["h3"])
+    server_config = TL.Config(verify_peer = false, cert_file = _TLS_CERT_PATH, key_file = _TLS_KEY_PATH, alpn_protocols = ["h3"])
+    now = Int64(time_ns())
+    client = QP._client_connection(client_config, now)
+    first_dgram = QP._next_datagram!(client, now)::Vector{UInt8}
+    header = QP._parse_packet(first_dgram, 1, length(first_dgram), QP._LOCAL_CID_LEN)::QP._PacketHeader
+    server = QP._accept_connection(server_config, first_dgram, header, now)::QP._Connection
+    QP._receive_datagram!(server, first_dgram, now)
+    for _ in 1:50
+        moved = false
+        while (d = QP._next_datagram!(server, now)) !== nothing
+            QP._receive_datagram!(client, d, now)
+            moved = true
+        end
+        while (d = QP._next_datagram!(client, now)) !== nothing
+            QP._receive_datagram!(server, d, now)
+            moved = true
+        end
+        moved || break
+    end
+    (QP._handshake_confirmed(client) && QP._handshake_confirmed(server)) || error("QUIC trim in-memory handshake did not confirm")
+    _quic_trim_streams!(client, server, _quic_trim_settle!(client, server, now))
+    return nothing
+end
+
+# The public QUIC API over loopback UDP: a listener and a connection driven by
+# their receive tasks, with streams used as IO from another task.
+function _quic_trim_api_server(listener::Reseau.QUIC.Listener)::Int
+    QP = Reseau.QUIC
+    conn = QP.accept(listener; deadline_ns = Int64(time_ns()) + 20_000_000_000)
+    echoed = 0
+    try
+        s = QP.accept_stream(conn)
+        data = read(s)
+        write(s, data)
+        closewrite(s)
+        echoed += length(data)
+        u = QP.accept_stream(conn)
+        QP.isbidi(u) && error("QUIC trim API expected a unidirectional stream")
+        echoed += length(read(u))
+        r = QP.accept_stream(conn)
+        QP.reset_stream!(r, 0x10c)
+        QP.accept_stream(conn)
+    catch err
+        err isa QP.ConnectionError || rethrow()
+        # Only the client's application close ends the connection.
+        e = err::QP.ConnectionError
+        (e.remote && e.app && e.code == 0x100) || return -1
+    end
+    return echoed
+end
+
+function _quic_trim_public_api!()::Nothing
+    QP = Reseau.QUIC
+    server_config = TL.Config(verify_peer = false, cert_file = _TLS_CERT_PATH, key_file = _TLS_KEY_PATH, alpn_protocols = ["h3"])
+    listener = QP.listen(Reseau.UDP.loopback_addr(0), server_config; max_streams_bidi = 4)
+    try
+        server_task = Threads.@spawn _quic_trim_api_server(listener)
+        addr = QP.local_addr(listener)::Reseau.UDP.SocketAddrV4
+        client_config = TL.Config(verify_peer = false, server_name = "localhost", alpn_protocols = ["h3"])
+        conn = QP.connect(addr, client_config; deadline_ns = Int64(time_ns()) + 20_000_000_000)
+        QP.alpn_protocol(conn) == "h3" || error("QUIC trim API ALPN mismatch")
+        s = QP.open_stream(conn)
+        payload = rand(UInt8, 200_000)
+        write(s, payload)
+        closewrite(s)
+        QP.set_read_deadline!(s, Int64(time_ns()) + 20_000_000_000)
+        buf = Vector{UInt8}(undef, 1024)
+        got = UInt8[]
+        while (n = readbytes!(s, buf, length(buf); all = false)) > 0
+            append!(got, view(buf, 1:n))
+        end
+        got == payload || error("QUIC trim API echo mismatch")
+        eof(s) || error("QUIC trim API expected the end of the stream")
+        u = QP.open_stream(conn; bidi = false)
+        write(u, "one way")
+        closewrite(u)
+        r = QP.open_stream(conn)
+        write(r, UInt8[0x01])
+        reset_seen = try
+            read(r)
+            false
+        catch err
+            err isa QP.StreamResetError || rethrow()
+            (err::QP.StreamResetError).code == 0x10c
+        end
+        reset_seen || error("QUIC trim API expected a reset")
+        QP.stop_sending!(r, 0x10c)
+        close(conn; code = 0x100, reason = "done")
+        fetch(server_task)::Int == length(payload) + 7 || error("QUIC trim API server mismatch")
+    finally
+        close(listener)
+    end
+    return nothing
+end
+
+# Compiles every packet protection and wire format path: AES-128-GCM Initial
+# keys on a long header, ChaCha20-Poly1305 keys after a key update on a short
+# header, and building and parsing Retry and Version Negotiation packets.
+function _run_quic_packet_protection_trim!()::Nothing
+    QP = Reseau.QUIC
+    dcid = UInt8[0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08]
+    secret = fill(0x11, 32)
+    _quic_trim_datagram!(QP._initial_packet_keys(dcid)[1], QP._next_packet_keys(QP._PacketKeys(UInt16(0x1303), secret)))
+    retry = QP._retry_packet(QP._QUIC_V1, UInt8[0x01], UInt8[0x02], UInt8[0x03], dcid)
+    QP._valid_retry_integrity(dcid, retry) || error("QUIC trim Retry tag mismatch")
+    header = QP._parse_packet(retry, 1, length(retry), 0)
+    (header !== nothing && header.type == QP._PacketType.Retry) || error("QUIC trim Retry did not parse")
+    vn = QP._version_negotiation_packet(UInt8[0x01], UInt8[0x02], UInt32[QP._QUIC_V1])
+    header = QP._parse_packet(vn, 1, length(vn), 0)
+    header === nothing && error("QUIC trim Version Negotiation did not parse")
+    # Version 1 and a greased version.
+    listed = QP._version_negotiation_versions(vn, header)
+    (length(listed) == 2 && QP._QUIC_V1 in listed) || error("QUIC trim Version Negotiation versions mismatch")
+    return nothing
+end
+
 function @main(args::Vector{String})::Cint
     _ = args
     run_tls_trim_sample()
+    _run_quic_trim!()
+    _run_quic_packet_protection_trim!()
+    _quic_trim_frames!()
+    _quic_trim_connection!()
+    _quic_trim_public_api!()
     return 0
 end
 
