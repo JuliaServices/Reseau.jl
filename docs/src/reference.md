@@ -192,6 +192,24 @@ connection_state
 addr
 ```
 
+### QUIC
+
+```@docs
+QUICConn
+QUICEncryptionLevel
+QUICEventKind
+QUICEvent
+quic_client
+quic_server
+start!
+next_event!
+handle_data!
+set_transport_parameters!
+send_session_ticket!
+alert_code
+Base.close(::QUICConn)
+```
+
 ## Internal Support Layers
 
 These modules power the public transport surface and are documented here for

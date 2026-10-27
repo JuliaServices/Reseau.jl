@@ -736,14 +736,19 @@ function _read_server_parameters!(state::_TLS13ClientHandshakeState, io)::Nothin
     if !isempty(server_protocol)
         isempty(state.client_hello.alpn_protocols) && _tls_fail(_TLS_ALERT_NO_APPLICATION_PROTOCOL, "tls: server advertised unrequested ALPN extension")
         in(server_protocol, state.client_hello.alpn_protocols) || _tls_fail(_TLS_ALERT_NO_APPLICATION_PROTOCOL, "tls: server selected unadvertised ALPN protocol")
+    elseif _tls_is_quic(io) && !isempty(state.client_hello.alpn_protocols)
+        # RFC 9001 Section 8.1
+        _tls_fail(_TLS_ALERT_NO_APPLICATION_PROTOCOL, "tls: server did not select an ALPN protocol")
     end
 
     if state.client_hello.quic_transport_parameters === nothing
         msg.quic_transport_parameters === nothing ||
             _tls_fail(_TLS_ALERT_UNSUPPORTED_EXTENSION, "tls: server sent an unexpected quic_transport_parameters extension")
     else
+        # RFC 9001 Section 8.2.
         msg.quic_transport_parameters === nothing &&
             _tls_fail(_TLS_ALERT_MISSING_EXTENSION, "tls: server did not send a quic_transport_parameters extension")
+        _quic_set_peer_transport_parameters!(io, msg.quic_transport_parameters::Vector{UInt8})
     end
 
     if msg.early_data
