@@ -1207,3 +1207,46 @@ function recvfrom_ptr!(
         _fd_read_unlock!(fd)
     end
 end
+
+"""
+    try_recvfrom_ptr!(fd, p, nbytes, root) -> (nread, peer, truncated)
+
+Like [`recvfrom_ptr!`](@ref), but never waits: `nread` is `-1` when no
+datagram is queued. On Windows, where receives complete through IOCP, it
+always returns `-1`, so callers fall back to blocking receives. Errors and
+deadlines are left for the next blocking receive to report, except that a
+failing `recvmsg` other than EAGAIN throws `SystemError`.
+"""
+function try_recvfrom_ptr!(
+        fd::FD,
+        p::Ptr{UInt8},
+        nbytes::Int,
+        root,
+    )::Tuple{Int, SocketOps.AcceptPeer, Bool}
+    @static if Sys.iswindows()
+        return -1, nothing, false
+    else
+        _fd_read_lock!(fd)
+        try
+            namebuf = Ref{NTuple{128, UInt8}}()
+            iov = Ref(SocketOps.IOVec(Ptr{Cvoid}(p), Csize_t(nbytes)))
+            GC.@preserve namebuf iov root begin
+                name_ptr = Base.unsafe_convert(Ptr{Cvoid}, namebuf)
+                iov_ptr = Base.unsafe_convert(Ptr{SocketOps.IOVec}, iov)
+                msg = Ref(SocketOps.MsgHdr(name_ptr, SocketOps.SockLen(128), iov_ptr, 1, C_NULL, 0, Cint(0)))
+                n = SocketOps.recv_msg!(fd.sysfd, msg)
+                if n >= 0
+                    hdr = msg[]
+                    peer = SocketOps.decode_sockaddr(Ptr{UInt8}(name_ptr), Int(hdr.msg_namelen))
+                    truncated = (hdr.msg_flags & SocketOps.MSG_TRUNC) != Cint(0)
+                    return Int(n), peer, truncated
+                end
+                errno = SocketOps.last_error()
+                (errno == Int32(Base.Libc.EAGAIN) || errno == Int32(Base.Libc.EINTR)) && return -1, nothing, false
+                throw(SystemError("recvmsg", Int(errno)))
+            end
+        finally
+            _fd_read_unlock!(fd)
+        end
+    end
+end
