@@ -828,6 +828,15 @@ function _tls_openssl_ec_server_share_and_secret(
     end
 end
 
+# OpenSSL returns 0 for a wrong signature and -1 for one it cannot decode (a
+# malformed ECDSA DER value). Both mean the peer's signature did not verify, so
+# callers send decrypt_error, as Go does; drop the queued decode error.
+@inline function _openssl_verify_result(ret::Cint)::Bool
+    ret == 1 && return true
+    ccall((:ERR_clear_error, _LIBCRYPTO_PATH), Cvoid, ())
+    return false
+end
+
 function _openssl_verify_signature_with_spec(
     pubkey::Ptr{Cvoid},
     spec::_TLSSignatureVerifySpec,
@@ -864,9 +873,7 @@ function _openssl_verify_signature_with_spec(
                 pointer(signed_bytes),
                 Csize_t(length(signed_bytes)),
             )
-            ret == 1 && return true
-            ret == 0 && return false
-            throw(_make_tls_error("EVP_DigestVerify", Int32(ret)))
+            return _openssl_verify_result(ret)
         finally
             _free_evp_md_ctx!(mdctx)
         end
@@ -924,9 +931,7 @@ function _openssl_verify_signature_with_spec(
             pointer(signature_bytes),
             Csize_t(length(signature_bytes)),
         )
-        ret == 1 && return true
-        ret == 0 && return false
-        throw(_make_tls_error("EVP_DigestVerifyFinal", Int32(ret)))
+        return _openssl_verify_result(ret)
     finally
         _free_evp_md_ctx!(mdctx)
     end

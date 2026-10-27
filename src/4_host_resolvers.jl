@@ -1486,11 +1486,8 @@ function _resolve_host_ips(resolver::AbstractResolver, host::AbstractString)::Ve
 end
 
 @inline function _normalize_lookup_host(host::AbstractString)::String
-    normalized = lowercase(String(host))
-    while !isempty(normalized) && last(normalized) == '.'
-        normalized = normalized[1:prevind(normalized, lastindex(normalized))]
-    end
-    return normalized
+    # One pass: trimming a dot at a time copied the name once per trailing dot.
+    return String(rstrip(==('.'), lowercase(String(host))))
 end
 
 @inline function _lookup_key(network::AbstractString, host::AbstractString)::Tuple{String, String}

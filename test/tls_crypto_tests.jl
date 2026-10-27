@@ -252,6 +252,19 @@ const _TLS13_EMPTY_PSK_EARLY_SECRET_SHA256 =
         tampered = copy(signature)
         tampered[end] = xor(tampered[end], 0x01)
         @test !TLC._tls12_openssl_verify_signature(cert_info.public_key, TLC._TLS_SIGNATURE_RSA_PKCS1_SHA256, signed, tampered)
+
+        # A signature OpenSSL cannot decode fails verification (decrypt_error), not with a TLSError.
+        ecdsa_der = TLC._tls_decode_pem_certificates(read(joinpath(@__DIR__, "resources", "native_tls_server_ecdsa.crt")))[1]
+        ecdsa_key = TLC._tls_parse_der_certificate_info(ecdsa_der).public_key
+        for garbage in (UInt8[0x00], fill(0x5a, 72), UInt8[0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01])
+            @test !TLC._tls13_openssl_verify_signature(ecdsa_key, TLC._TLS_SIGNATURE_ECDSA_SECP256R1_SHA256, signed, garbage)
+            @test !TLC._tls12_openssl_verify_signature(ecdsa_key, TLC._TLS_SIGNATURE_ECDSA_SECP256R1_SHA256, signed, garbage)
+        end
+        # Ed25519 takes OpenSSL's one-shot verify path.
+        ed25519_key = TLC._TLSEd25519PublicKey(fill(0x11, 32))
+        for garbage in (UInt8[0x00], fill(0x5a, 64))
+            @test !TLC._tls13_openssl_verify_signature(ed25519_key, TLC._TLS_SIGNATURE_ED25519, signed, garbage)
+        end
     end
 
     @testset "record contexts keyed once match a fresh context for every nonce" begin

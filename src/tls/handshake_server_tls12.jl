@@ -573,17 +573,15 @@ function _tls12_read_client_certificate!(
         return nothing
     end
     verify_peer = config.client_auth == ClientAuthMode.VerifyClientCertIfGiven || config.client_auth == ClientAuthMode.RequireAndVerifyClientCert
-    state.client_leaf_public_key = if verify_peer
-        _tls13_verify_client_certificate_chain(
-            state.client_certificate.certificates;
-            verify_peer,
-            ca_file = _effective_ca_file(config; is_server = true),
-            ca_dir = config.client_ca_dir,
-            verification_time_s = config._verification_time_s,
-        )
-    else
-        _tls_parse_der_certificate_info(state.client_certificate.certificates[1]).public_key
-    end
+    # Without verification this still parses the leaf, failing a malformed one
+    # with a bad_certificate alert, as the TLS 1.3 server does.
+    state.client_leaf_public_key = _tls13_verify_client_certificate_chain(
+        state.client_certificate.certificates;
+        verify_peer,
+        ca_file = verify_peer ? _effective_ca_file(config; is_server = true) : nothing,
+        ca_dir = config.client_ca_dir,
+        verification_time_s = config._verification_time_s,
+    )
     return nothing
 end
 
