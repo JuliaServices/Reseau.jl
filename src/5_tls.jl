@@ -792,7 +792,11 @@ end
 
 @inline function _is_ip_literal_name(name::AbstractString)::Bool
     normalized = _normalize_peer_name(name)
-    return HostResolvers._literal_host_addr(normalized) !== nothing
+    # The zone is already stripped, so a `%` left in a name like "a%%" makes it
+    # malformed, not a literal. `_literal_host_addr` would split it again and
+    # throw `AddressError` for the empty or unknown zone.
+    return HostResolvers._parse_ipv4_literal(normalized) !== nothing ||
+           HostResolvers._parse_ipv6_literal(normalized) !== nothing
 end
 
 @inline function _hostname_in_sni(name::AbstractString)::String

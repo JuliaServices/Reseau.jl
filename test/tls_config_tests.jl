@@ -385,5 +385,12 @@ end
         @test TL._hostname_in_sni("example.com.") == "example.com"
         @test TL._hostname_in_sni("127.0.0.1") == ""
         @test TL._hostname_in_sni("[::1]") == ""
+        @test TL._hostname_in_sni("[fe80::1%en0]") == ""
+        # Leftover `%` after the zone is stripped: not a literal, never a throw.
+        @test !TL._is_ip_literal_name("a%%")
+        @test !TL._is_ip_literal_name("fe80::1%%en0")
+        @test !TL._is_ip_literal_name("127.0.0.1%a%b")
+        @test TL._hostname_in_sni("a%%") == "a%"
+        @test TL._tls_parse_uri_host_domain("https://a%%/") === nothing
     end
 end
