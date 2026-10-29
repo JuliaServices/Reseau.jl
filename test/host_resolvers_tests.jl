@@ -488,6 +488,14 @@ end
             end
             invalid_v4_scope = zone === nothing ? "127.0.0.1%7" : "127.0.0.1%$zone"
             @test_throws ND.AddressError ND._literal_host_addr(invalid_v4_scope)
+            # A NUL cannot appear in an address, zone, or host name; it must
+            # not reach the C calls, whose `Cstring` conversion throws.
+            @test ND._parse_ipv4_literal("127.0.0.1\0") === nothing
+            @test ND._parse_ipv6_literal("::1\0") === nothing
+            @test ND._literal_host_addr("127.0.0.1\0") === nothing
+            @test_throws ND.AddressError ND._literal_host_addr("fe80::1%lo\0")
+            @test_throws ND.LookupError ND.resolve_tcp_addrs("tcp", "127.0.0.1\0:80")
+            @test_throws ND.LookupError ND.resolve_tcp_addrs("tcp", "local\0host:80")
         end
         @testset "port parser and service lookup" begin
             @test ND.parse_port("80") == (80, false)
