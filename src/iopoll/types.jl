@@ -190,6 +190,29 @@ function pollwait!(waiter::PollWaiter)::PollWakeReason.T
 end
 
 """
+    _bound_to_thread(f)
+
+Call `f()` with the current task sticky to its thread, then give the task back
+its own stickiness, even if `f` throws.
+
+A dial runs helper tasks that Julia binds to the caller's thread (resolution,
+deadline timers, dual-stack racers), and the caller waits on them. Bound for
+the dial, each of the caller's wakes goes to that thread alone; a migratable
+task's wake also wakes threads that cannot run it (every sleeping thread on
+Julia 1.12, one more on 1.13), and each spins before sleeping again.
+"""
+@inline function _bound_to_thread(f::F) where {F}
+    task = current_task()
+    sticky = task.sticky
+    task.sticky = true
+    try
+        return f()
+    finally
+        task.sticky = sticky
+    end
+end
+
+"""
     pollnotify!(waiter, reason=PollWakeReason.READY)
 
 Mark waiter as notified and wake the waiter task if it has already parked.

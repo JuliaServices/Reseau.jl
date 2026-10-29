@@ -1468,3 +1468,31 @@ end
     end
 end
 end
+
+@testset "a dial does not leave the dialing task sticky" begin
+    # A deadline makes the dial run helper tasks; scheduling them made the
+    # caller sticky for the rest of its life.
+    listener = NC.listen(NC.loopback_addr(0))
+    port = Int((NC.addr(listener)::NC.SocketAddrV4).port)
+    accepted = Channel{Any}(Inf)
+    accept_task = errormonitor(Threads.@spawn begin
+        for _ in 1:2
+            put!(accepted, NC.accept(listener))
+        end
+    end)
+    try
+        for address in ("127.0.0.1:$port", "localhost:$port")
+            sticky = fetch(Threads.@spawn begin
+                close(NC.connect("tcp", address; timeout_ns = 10_000_000_000))
+                current_task().sticky
+            end)
+            @test sticky === false
+        end
+        wait(accept_task)
+    finally
+        close(listener)
+        while isready(accepted)
+            close(take!(accepted))
+        end
+    end
+end

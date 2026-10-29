@@ -2028,8 +2028,14 @@ const _TRIM_TASK_CALL_EDGE = Ref(false)
 
 function _spawn_task_body(body::F)::Task where {F}
     _TRIM_TASK_CALL_EDGE[] && body()
+    caller = current_task()
+    sticky = caller.sticky
     task = Task(body)
+    # Scheduling an unbound sticky task binds it to this thread and also makes
+    # the caller sticky for good (Julia co-schedules the two). Give the caller
+    # its own stickiness back: a dial must not pin the task that asked for it.
     schedule(task)
+    caller.sticky = sticky
     return task
 end
 
@@ -2667,6 +2673,14 @@ Throws `OpError` on failure. The wrapped `err` may be an `AddressError`,
 lower-level poll error depending on which phase failed.
 """
 function connect(
+        d::HostResolver,
+        network::AbstractString,
+        address::AbstractString,
+    )::TCP.Conn
+    return IOPoll._bound_to_thread(() -> _connect(d, network, address))
+end
+
+function _connect(
         d::HostResolver,
         network::AbstractString,
         address::AbstractString,
