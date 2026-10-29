@@ -373,7 +373,13 @@ function _tls13_process_inner_plaintext!(state::_TLS13NativeClientState, inner::
         append!(state.handshake_buffer, @view(inner[1:payload_len]))
         length(state.handshake_buffer) <= _TLS13_MAX_HANDSHAKE_BUFFER ||
             _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received too much buffered TLS 1.3 handshake data")
-        return true
+        # Only a handshake record that advances the live handshake resets the
+        # non-advancing-record counter. After the handshake completes, handshake
+        # records carry KeyUpdate/NewSessionTicket, which `_tls13_handle_post_handshake_messages!`
+        # counts toward the `_TLS_MAX_USELESS_RECORDS` bound; resetting here would let a peer
+        # flood them one per record without limit. Mirrors Go's retryCount, which is reset only
+        # by application data (or pre-completion handshake data) in readRecordOrCCS.
+        return !state.handshake_complete
     end
     if content_type == _TLS_RECORD_TYPE_APPLICATION_DATA
         # RFC 8446: application data is illegal before the handshake completes.

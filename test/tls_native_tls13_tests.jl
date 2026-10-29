@@ -1007,6 +1007,82 @@ end
         end
     end
 
+    @testset "post-handshake messages are bounded one record at a time" begin
+        # A peer that streams KeyUpdate records one per record must still hit the
+        # non-advancing-record bound: a handshake record only resets the counter
+        # while the handshake is incomplete (Go parity, retryCount in readRecordOrCCS).
+        # Application data in between resets the bound, so legitimate interleaving is fine.
+        key_update = UInt8[UInt8(24), 0x00, 0x00, 0x01, 0x00]
+
+        # Drive the client like `_native_tls13_fill_plaintext!`: process buffered
+        # post-handshake messages, then read another record until plaintext or error.
+        function drain(client_tcp, client_state, server_tcp, server_state; keyupdates::Int, app::Bool)
+            writer = errormonitor(Threads.@spawn begin
+                for _ in 1:keyupdates
+                    TLN._tls13_write_record!(server_tcp, server_state, TLN._TLS_RECORD_TYPE_HANDSHAKE, copy(key_update))
+                    TLN._tls13_advance_write_cipher!(server_state)
+                end
+                app && TLN._tls13_write_record!(server_tcp, server_state, TLN._TLS_RECORD_TYPE_APPLICATION_DATA, UInt8[0x42])
+            end)
+            result = try
+                records = 0
+                while true
+                    TLN._tls13_handle_post_handshake_messages!(client_tcp, client_state)
+                    TLN._tls_buffer_available(client_state.plaintext_buffer, client_state.plaintext_buffer_pos) > 0 && break
+                    records += 1
+                    records > keyupdates + 4 && break
+                    TLN._tls13_read_record!(client_tcp, client_state)
+                end
+                :plaintext
+            catch ex
+                ex
+            end
+            _tls_native_wait_task(writer)
+            return result
+        end
+
+        # 17 KeyUpdate records (one over the limit) must fail with unexpected_message.
+        let
+            IPN.shutdown!()
+            listener = client_tcp = server_tcp = client_state = server_state = nothing
+            try
+                listener, client_tcp, server_tcp = _open_tcp_pair()
+                client_state, server_state, _, _ = _tls13_record_state_pair()
+                result = drain(client_tcp, client_state, server_tcp, server_state;
+                    keyupdates = TLN._TLS_MAX_USELESS_RECORDS + 1, app = true)
+                @test result isa TLN._TLSAlertError
+                result isa TLN._TLSAlertError && @test result.alert == TLN._TLS_ALERT_UNEXPECTED_MESSAGE
+            finally
+                client_state isa TLN._TLS13NativeClientState && TLN._securezero_tls13_native_client_state!(client_state)
+                server_state isa TLN._TLS13NativeClientState && TLN._securezero_tls13_native_client_state!(server_state)
+                _tls_native_close_quiet!(server_tcp)
+                _tls_native_close_quiet!(client_tcp)
+                _tls_native_close_quiet!(listener)
+                IPN.shutdown!()
+            end
+        end
+
+        # At the limit (16) followed by application data: delivered, no error.
+        let
+            IPN.shutdown!()
+            listener = client_tcp = server_tcp = client_state = server_state = nothing
+            try
+                listener, client_tcp, server_tcp = _open_tcp_pair()
+                client_state, server_state, _, _ = _tls13_record_state_pair()
+                result = drain(client_tcp, client_state, server_tcp, server_state;
+                    keyupdates = TLN._TLS_MAX_USELESS_RECORDS, app = true)
+                @test result === :plaintext
+            finally
+                client_state isa TLN._TLS13NativeClientState && TLN._securezero_tls13_native_client_state!(client_state)
+                server_state isa TLN._TLS13NativeClientState && TLN._securezero_tls13_native_client_state!(server_state)
+                _tls_native_close_quiet!(server_tcp)
+                _tls_native_close_quiet!(client_tcp)
+                _tls_native_close_quiet!(listener)
+                IPN.shutdown!()
+            end
+        end
+    end
+
     @testset "post-handshake key update rotates read and write traffic secrets" begin
         IPN.shutdown!()
         listener = nothing
