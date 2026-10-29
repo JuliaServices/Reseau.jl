@@ -603,6 +603,36 @@ function _tls_verify_chain_name_constraints!(chain::Vector{_TLSCertificateInfo})
     return nothing
 end
 
+# A complete chain must also satisfy nested EKUs and every issuer's name
+# constraints. Throws `_TLSAlertError` for the first violation.
+function _tls_verify_chain_policy!(chain::Vector{_TLSCertificateInfo}, purpose::AbstractString)::Nothing
+    _tls_chain_extended_key_usage_permitted(chain, purpose) ||
+        _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, purpose == "ssl_server" ?
+            "tls: certificate chain is not authorized for server authentication" :
+            "tls: certificate chain is not authorized for client authentication")
+    _tls_verify_chain_name_constraints!(chain)
+    return nothing
+end
+
+function _tls_chain_policy_ok!(
+    chain::Vector{_TLSCertificateInfo},
+    purpose::AbstractString,
+    policy_error::Base.RefValue{Union{Nothing, _TLSAlertError}},
+)::Bool
+    try
+        _tls_verify_chain_policy!(chain, purpose)
+        return true
+    catch err
+        err isa _TLSAlertError || rethrow()
+        policy_error[] === nothing && (policy_error[] = err::_TLSAlertError)
+        return false
+    end
+end
+
+# Depth-first search from `child` to a trust anchor. A path that reaches an
+# anchor but fails the chain policy does not end the search: another path, for
+# example through a cross-signed intermediate, may satisfy it (Go keeps every
+# candidate chain that passes). `policy_error` keeps the first policy failure.
 function _tls_build_chain_to_trust_anchor!(
     child::_TLSCertificateInfo,
     intermediates::Vector{_TLSCertificateInfo},
@@ -610,8 +640,13 @@ function _tls_build_chain_to_trust_anchor!(
     chain::Vector{_TLSCertificateInfo},
     now_s::Int64,
     remaining_candidates::Base.RefValue{Int},
+    purpose::AbstractString,
+    policy_error::Base.RefValue{Union{Nothing, _TLSAlertError}},
 )::Union{Nothing, Vector{_TLSCertificateInfo}}
     length(chain) > _TLS_MAX_CHAIN_DEPTH && return nothing
+    # A pathLenConstraint limits the intermediates below the issuer; the leaf is
+    # never one of them, even when it is a CA certificate (RFC 5280 4.2.1.9).
+    intermediates_below = length(chain) - 1
     for root in store.roots
         _tls_cert_subject_matches_issuer(child, root) || continue
         _tls_certificate_distrusted(root) && continue
@@ -619,17 +654,11 @@ function _tls_build_chain_to_trust_anchor!(
         remaining_candidates[] >= 0 || return nothing
         _tls_issuer_can_sign(root) || continue
         _tls_certificate_valid_now(root, now_s) || continue
-        if root.max_path_len >= 0
-            ca_count = 0
-            for cert in chain
-                cert.is_ca && (ca_count += 1)
-            end
-            ca_count <= root.max_path_len || continue
-        end
+        (root.max_path_len < 0 || intermediates_below <= root.max_path_len) || continue
         _tls_verify_certificate_signature(child, root) || continue
         verified_chain = copy(chain)
         push!(verified_chain, root)
-        return verified_chain
+        _tls_chain_policy_ok!(verified_chain, purpose, policy_error) && return verified_chain
     end
     for (i, parent) in pairs(intermediates)
         _tls_cert_subject_matches_issuer(child, parent) || continue
@@ -638,19 +667,15 @@ function _tls_build_chain_to_trust_anchor!(
         remaining_candidates[] >= 0 || return nothing
         _tls_issuer_can_sign(parent) || continue
         _tls_certificate_valid_now(parent, now_s) || continue
-        if parent.max_path_len >= 0
-            ca_count = 0
-            for cert in chain
-                cert.is_ca && (ca_count += 1)
-            end
-            ca_count <= parent.max_path_len || continue
-        end
+        (parent.max_path_len < 0 || intermediates_below <= parent.max_path_len) || continue
         _tls_verify_certificate_signature(child, parent) || continue
         next_chain = copy(chain)
         push!(next_chain, parent)
         remaining = copy(intermediates)
         deleteat!(remaining, i)
-        verified_chain = _tls_build_chain_to_trust_anchor!(parent, remaining, store, next_chain, now_s, remaining_candidates)
+        verified_chain = _tls_build_chain_to_trust_anchor!(
+            parent, remaining, store, next_chain, now_s, remaining_candidates, purpose, policy_error,
+        )
         verified_chain === nothing || return verified_chain
     end
     return nothing
@@ -695,21 +720,21 @@ function _tls_verify_peer_certificate_chain!(
         _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, purpose == "ssl_server" ?
             "tls: certificate is not authorized for server authentication" :
             "tls: certificate is not authorized for client authentication")
-    verified_chain = if _tls_trust_anchor_matches(leaf, store)
-        _TLSCertificateInfo[leaf]
-    else
-        intermediates = length(parsed) > 1 ? parsed[2:end] : _TLSCertificateInfo[]
-        remaining_candidates = Ref(_TLS_MAX_CHAIN_CANDIDATES)
-        chain = _tls_build_chain_to_trust_anchor!(leaf, intermediates, store, _TLSCertificateInfo[leaf], now_s, remaining_candidates)
-        chain === nothing &&
-            _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: certificate signed by unknown authority")
-        chain
+    if _tls_trust_anchor_matches(leaf, store)
+        _tls_verify_chain_policy!(_TLSCertificateInfo[leaf], purpose)
+        return leaf
     end
-    _tls_chain_extended_key_usage_permitted(verified_chain::Vector{_TLSCertificateInfo}, purpose) ||
-        _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, purpose == "ssl_server" ?
-            "tls: certificate chain is not authorized for server authentication" :
-            "tls: certificate chain is not authorized for client authentication")
-    _tls_verify_chain_name_constraints!(verified_chain)
+    intermediates = length(parsed) > 1 ? parsed[2:end] : _TLSCertificateInfo[]
+    remaining_candidates = Ref(_TLS_MAX_CHAIN_CANDIDATES)
+    policy_error = Ref{Union{Nothing, _TLSAlertError}}(nothing)
+    chain = _tls_build_chain_to_trust_anchor!(
+        leaf, intermediates, store, _TLSCertificateInfo[leaf], now_s, remaining_candidates, purpose, policy_error,
+    )
+    if chain === nothing
+        failure = policy_error[]
+        failure === nothing || throw(failure::_TLSAlertError)
+        _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: certificate signed by unknown authority")
+    end
     return leaf
 end
 
