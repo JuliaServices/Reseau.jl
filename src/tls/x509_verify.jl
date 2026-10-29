@@ -307,6 +307,11 @@ end
     return nothing
 end
 
+# SAN values are certificate bytes, not necessarily ASCII or valid UTF-8. The
+# delimiters searched for are ASCII, so slicing by byte offset is always valid
+# where character indexing could land inside a multi-byte character.
+@inline _tls_byte_slice(text::String, first::Int, last::Int)::String = String(codeunits(text)[first:last])
+
 @inline function _tls_parse_rfc2821_mailbox(value::AbstractString)::Union{Nothing, _TLSParsedMailbox}
     text = String(value)
     at = _tls_findfirst_ascii_byte(text, UInt8('@'))
@@ -316,42 +321,42 @@ end
     local_end >= 1 || return nothing
     domain_start <= ncodeunits(text) || return nothing
     _tls_findfirst_ascii_byte(text, UInt8('@'), domain_start) === nothing || return nothing
-    local_part = text[1:local_end]
-    domain = text[domain_start:end]
-    isempty(local_part) && return nothing
+    local_part = _tls_byte_slice(text, 1, local_end)
+    domain = _tls_byte_slice(text, domain_start, ncodeunits(text))
     _tls_valid_hostname_value(domain, false) || return nothing
     return _TLSParsedMailbox(local_part, _tls_ascii_lowercase(domain))
 end
 
 function _tls_parse_uri_host_domain(uri::AbstractString)::Union{Nothing, String}
     text = String(uri)
+    n = ncodeunits(text)
     scheme_end = _tls_findfirst_ascii_byte(text, UInt8(':'))
     scheme_end === nothing && return nothing
     authority_start = scheme_end + 1
-    authority_start + 1 <= ncodeunits(text) || return nothing
-    text[authority_start:(authority_start + 1)] == "//" || return nothing
+    authority_start + 1 <= n || return nothing
+    (codeunit(text, authority_start) == UInt8('/') && codeunit(text, authority_start + 1) == UInt8('/')) || return nothing
     authority_start += 2
-    authority_end = ncodeunits(text)
-    for idx in authority_start:ncodeunits(text)
-        c = text[idx]
-        if c == '/' || c == '?' || c == '#'
+    authority_end = n
+    for idx in authority_start:n
+        b = codeunit(text, idx)
+        if b == UInt8('/') || b == UInt8('?') || b == UInt8('#')
             authority_end = idx - 1
             break
         end
     end
     authority_end >= authority_start || return nothing
-    authority = text[authority_start:authority_end]
+    authority = _tls_byte_slice(text, authority_start, authority_end)
     userinfo_end = _tls_findlast_ascii_byte(authority, UInt8('@'))
-    hostport = userinfo_end === nothing ? authority : authority[(userinfo_end + 1):end]
+    hostport = userinfo_end === nothing ? authority : _tls_byte_slice(authority, userinfo_end + 1, ncodeunits(authority))
     isempty(hostport) && return nothing
-    host = if startswith(hostport, "[")
+    host = if codeunit(hostport, 1) == UInt8('[')
         bracket_end = _tls_findfirst_ascii_byte(hostport, UInt8(']'))
         bracket_end === nothing && return nothing
-        bracket_end == lastindex(hostport) || startswith(hostport[(bracket_end + 1):end], ":") || return nothing
-        hostport[2:(bracket_end - 1)]
+        (bracket_end == ncodeunits(hostport) || codeunit(hostport, bracket_end + 1) == UInt8(':')) || return nothing
+        _tls_byte_slice(hostport, 2, bracket_end - 1)
     else
         colon = _tls_findlast_ascii_byte(hostport, UInt8(':'))
-        colon === nothing ? hostport : hostport[1:(colon - 1)]
+        colon === nothing ? hostport : _tls_byte_slice(hostport, 1, colon - 1)
     end
     isempty(host) && return nothing
     _is_ip_literal_name(host) && return nothing

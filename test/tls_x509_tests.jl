@@ -749,6 +749,45 @@ end
             @test occursin("excluded URI name constraint", uri_err.message)
         end
 
+        # SAN bytes need not be ASCII: a multi-byte character next to a
+        # delimiter must fail or pass the constraint, not throw StringIndexError.
+        @test TLX._tls_parse_uri_host_domain("https://é.service.local/x") === nothing
+        @test TLX._tls_parse_uri_host_domain("a:é") === nothing
+        @test TLX._tls_parse_uri_host_domain("spiffe://ué@x.service.local:é/p") == "x.service.local"
+        utf8_mailbox = TLX._tls_parse_rfc2821_mailbox("aé@localhost")
+        @test utf8_mailbox !== nothing && utf8_mailbox.local_part == "aé" && utf8_mailbox.domain == "localhost"
+        @test TLX._tls_parse_rfc2821_mailbox("a@é") === nothing
+        utf8_uri_err = try
+            TLX._tls_verify_chain_name_constraints!(
+                TLX._TLSCertificateInfo[
+                    _tls_copy_cert(server_leaf; uri_names = ["https://é.service.local/x"]),
+                    _tls_copy_cert(root; permitted_uri_domains = ["service.local"]),
+                ],
+            )
+            nothing
+        catch ex
+            ex
+        end
+        @test utf8_uri_err isa TLX._TLSAlertError
+        if utf8_uri_err isa TLX._TLSAlertError
+            @test occursin("cannot apply URI name constraints", utf8_uri_err.message)
+        end
+        utf8_email_err = try
+            TLX._tls_verify_chain_name_constraints!(
+                TLX._TLSCertificateInfo[
+                    _tls_copy_cert(server_leaf; email_addresses = ["aé@localhost"]),
+                    _tls_copy_cert(root; excluded_email_addresses = ["localhost"]),
+                ],
+            )
+            nothing
+        catch ex
+            ex
+        end
+        @test utf8_email_err isa TLX._TLSAlertError
+        if utf8_email_err isa TLX._TLSAlertError
+            @test occursin("excluded email name constraint", utf8_email_err.message)
+        end
+
         unsupported_name_err = try
             TLX._tls_verify_chain_name_constraints!(
                 TLX._TLSCertificateInfo[
