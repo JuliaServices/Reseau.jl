@@ -259,15 +259,79 @@ end
            !isempty(cert.permitted_email_addresses)
 end
 
-@inline function _tls_dns_constraint_matches(constraint::AbstractString, dns_name::AbstractString)::Bool
-    isempty(constraint) && return true
-    normalized_constraint = _tls_ascii_lowercase(constraint)
-    normalized_name = _tls_ascii_lowercase(dns_name)
-    endswith(normalized_name, normalized_constraint) || return false
-    startswith(normalized_constraint, ".") && return true
-    length(normalized_name) == length(normalized_constraint) && return true
-    boundary = ncodeunits(normalized_name) - ncodeunits(normalized_constraint)
-    return boundary > 0 && codeunit(normalized_name, boundary) == UInt8('.')
+# Name-constraint matching follows Go 1.27's crypto/x509 (verify.go, constraints.go).
+
+@inline _tls_ascii_lower(b::UInt8)::UInt8 = UInt8('A') <= b <= UInt8('Z') ? b + 0x20 : b
+
+# Go's `domainNameValid`: labels of printable ASCII, none empty, and no trailing
+# period. A constraint may use the leading-period form ".example.com". The empty
+# string is valid; as a constraint it matches every name.
+function _tls_name_constraint_domain_valid(name::AbstractString, constraint::Bool)::Bool
+    bytes = codeunits(name)
+    n = length(bytes)
+    n == 0 && return true
+    @inbounds bytes[n] == UInt8('.') && return false
+    i = constraint && @inbounds(bytes[1]) == UInt8('.') ? 2 : 1
+    label_len = 0
+    @inbounds while i <= n
+        b = bytes[i]
+        (b < 0x21 || b > 0x7e) && return false
+        if b == UInt8('.')
+            label_len == 0 && return false
+            label_len = 0
+        else
+            label_len += 1
+        end
+        i += 1
+    end
+    return label_len > 0
+end
+
+# Go's `dnsHasSuffix`: `constraint` matches `name` when it is a case-insensitive
+# label suffix of it. A leading-period constraint matches proper subdomains only.
+function _tls_dns_constraint_matches(constraint::AbstractString, name::AbstractString)::Bool
+    c = codeunits(constraint)
+    n = codeunits(name)
+    isempty(c) && return true
+    length(c) > length(n) && return false
+    offset = length(n) - length(c)
+    @inbounds for i in eachindex(c)
+        _tls_ascii_lower(c[i]) == _tls_ascii_lower(n[offset + i]) || return false
+    end
+    @inbounds return c[1] == UInt8('.') || offset == 0 || n[offset] == UInt8('.')
+end
+
+# A name starting with '*' is also excluded by a subtree whose parent equals the
+# name's remaining labels: "*.example.com" could stand for "bar.example.com", so
+# excluding "bar.example.com" excludes it (Go's `parentConstraints`, CVE-2025-61727).
+function _tls_dns_wildcard_excluded(constraint::AbstractString, name::AbstractString)::Bool
+    n = codeunits(name)
+    c = codeunits(constraint)
+    (isempty(n) || @inbounds(n[1]) != UInt8('*')) && return false
+    name_dot = findfirst(==(UInt8('.')), n)
+    constraint_dot = findfirst(==(UInt8('.')), c)
+    (name_dot === nothing || constraint_dot === nothing) && return false
+    length(n) - name_dot == length(c) - constraint_dot || return false
+    @inbounds for i in 0:(length(n) - name_dot)
+        _tls_ascii_lower(n[name_dot + i]) == _tls_ascii_lower(c[constraint_dot + i]) || return false
+    end
+    return true
+end
+
+function _tls_domain_permitted(constraints::Vector{String}, name::AbstractString)::Bool
+    isempty(constraints) && return true
+    for constraint in constraints
+        _tls_dns_constraint_matches(constraint, name) && return true
+    end
+    return false
+end
+
+function _tls_domain_excluded(constraints::Vector{String}, name::AbstractString)::Bool
+    for constraint in constraints
+        _tls_dns_constraint_matches(constraint, name) && return true
+        _tls_dns_wildcard_excluded(constraint, name) && return true
+    end
+    return false
 end
 
 @inline function _tls_ip_range_matches(range::_TLSIPRangeConstraint, ip::AbstractVector{UInt8})::Bool
@@ -312,21 +376,81 @@ end
 # where character indexing could land inside a multi-byte character.
 @inline _tls_byte_slice(text::String, first::Int, last::Int)::String = String(codeunits(text)[first:last])
 
-@inline function _tls_parse_rfc2821_mailbox(value::AbstractString)::Union{Nothing, _TLSParsedMailbox}
-    text = String(value)
-    at = _tls_findfirst_ascii_byte(text, UInt8('@'))
-    at === nothing && return nothing
-    local_end = at - 1
-    domain_start = at + 1
-    local_end >= 1 || return nothing
-    domain_start <= ncodeunits(text) || return nothing
-    _tls_findfirst_ascii_byte(text, UInt8('@'), domain_start) === nothing || return nothing
-    local_part = _tls_byte_slice(text, 1, local_end)
-    domain = _tls_byte_slice(text, domain_start, ncodeunits(text))
-    _tls_valid_hostname_value(domain, false) || return nothing
-    return _TLSParsedMailbox(local_part, _tls_ascii_lowercase(domain))
+# RFC 2822 atext, plus '.' (dot-atom separators are checked afterwards).
+@inline function _tls_mailbox_atext(c::UInt8)::Bool
+    return (UInt8('0') <= c <= UInt8('9')) || (UInt8('a') <= c <= UInt8('z')) || (UInt8('A') <= c <= UInt8('Z')) ||
+           c in codeunits("!#\$%&'*+-/=?^_`{|}~.")
 end
 
+# Go's `parseRFC2821Mailbox` (an rfc822Name is an RFC 2821 Mailbox, RFC 5280
+# 4.2.1.6). The local part is unquoted and unescaped, so `"admin"@x` and `ad\min@x`
+# both name the mailbox `admin@x`; the domain is ASCII-lowercased. Returns
+# `nothing` for any value Go rejects, including non-IA5 bytes.
+function _tls_parse_rfc2821_mailbox(value::AbstractString)::Union{Nothing, _TLSParsedMailbox}
+    bytes = codeunits(String(value))
+    n = length(bytes)
+    n == 0 && return nothing
+    for b in bytes
+        b < 0x80 || return nothing
+    end
+    local_part = UInt8[]
+    i = 1
+    @inbounds if bytes[1] == UInt8('"')
+        i = 2
+        while true
+            i > n && return nothing
+            c = bytes[i]
+            i += 1
+            if c == UInt8('"')
+                break
+            elseif c == UInt8('\\')
+                # quoted-pair
+                i > n && return nothing
+                q = bytes[i]
+                (q == 0x0b || q == 0x0c || 0x01 <= q <= 0x09 || 0x0e <= q <= 0x7f) || return nothing
+                push!(local_part, q)
+                i += 1
+            elseif c == 0x0b || c == 0x0c || c == 0x20 || c == 0x21 || c == 0x7f ||
+                   0x01 <= c <= 0x08 || 0x0e <= c <= 0x1f || 0x23 <= c <= 0x5b || 0x5d <= c <= 0x7e
+                # qtext; Go also accepts a space here (RFC 3696 examples use one)
+                push!(local_part, c)
+            else
+                return nothing
+            end
+        end
+    else
+        while i <= n
+            c = bytes[i]
+            if c == UInt8('\\')
+                # Go accepts an escaped character outside quotes (RFC 3696 examples).
+                i += 1
+                i > n && return nothing
+                push!(local_part, bytes[i])
+                i += 1
+            elseif _tls_mailbox_atext(c)
+                push!(local_part, c)
+                i += 1
+            else
+                break
+            end
+        end
+        isempty(local_part) && return nothing
+        # RFC 3696 section 3: no leading, trailing, or consecutive periods.
+        (local_part[1] == UInt8('.') || local_part[end] == UInt8('.')) && return nothing
+        for j in 2:length(local_part)
+            local_part[j] == UInt8('.') && local_part[j - 1] == UInt8('.') && return nothing
+        end
+    end
+    @inbounds (i > n || bytes[i] != UInt8('@')) && return nothing
+    domain = String(bytes[(i + 1):n])
+    _tls_name_constraint_domain_valid(domain, false) || return nothing
+    _tls_findfirst_ascii_byte(domain, UInt8('@')) === nothing || return nothing
+    return _TLSParsedMailbox(String(local_part), _tls_ascii_lowercase(domain))
+end
+
+# The lowercased host of a URI SAN for constraint matching, or `nothing` when Go
+# refuses to match it: no "//" authority, an empty host, an IP literal, any
+# bracketed host, or a percent-escaped host ("Exa%6Dple.com" is example.com).
 function _tls_parse_uri_host_domain(uri::AbstractString)::Union{Nothing, String}
     text = String(uri)
     n = ncodeunits(text)
@@ -349,29 +473,26 @@ function _tls_parse_uri_host_domain(uri::AbstractString)::Union{Nothing, String}
     userinfo_end = _tls_findlast_ascii_byte(authority, UInt8('@'))
     hostport = userinfo_end === nothing ? authority : _tls_byte_slice(authority, userinfo_end + 1, ncodeunits(authority))
     isempty(hostport) && return nothing
-    host = if codeunit(hostport, 1) == UInt8('[')
-        bracket_end = _tls_findfirst_ascii_byte(hostport, UInt8(']'))
-        bracket_end === nothing && return nothing
-        (bracket_end == ncodeunits(hostport) || codeunit(hostport, bracket_end + 1) == UInt8(':')) || return nothing
-        _tls_byte_slice(hostport, 2, bracket_end - 1)
-    else
-        colon = _tls_findlast_ascii_byte(hostport, UInt8(':'))
-        colon === nothing ? hostport : _tls_byte_slice(hostport, 1, colon - 1)
-    end
+    codeunit(hostport, 1) == UInt8('[') && return nothing
+    colon = _tls_findlast_ascii_byte(hostport, UInt8(':'))
+    host = colon === nothing ? hostport : _tls_byte_slice(hostport, 1, colon - 1)
     isempty(host) && return nothing
+    _tls_findfirst_ascii_byte(host, UInt8('%')) === nothing || return nothing
+    _tls_findfirst_ascii_byte(host, UInt8(':')) === nothing || return nothing
     _is_ip_literal_name(host) && return nothing
-    normalized_host = _tls_ascii_lowercase(host)
-    _tls_valid_hostname_value(normalized_host, false) || return nothing
-    return normalized_host
+    _tls_name_constraint_domain_valid(host, false) || return nothing
+    return _tls_ascii_lowercase(host)
 end
 
-@inline function _tls_email_constraint_matches(constraint::AbstractString, mailbox::_TLSParsedMailbox)::Bool
-    if occursin('@', constraint)
+# A constraint containing '@' names one mailbox (exact local part, case-insensitive
+# domain); any other constraint is a domain subtree for the mailbox's domain.
+function _tls_email_constraint_matches(constraint::AbstractString, mailbox::_TLSParsedMailbox, excluded::Bool)::Bool
+    if _tls_findfirst_ascii_byte(String(constraint), UInt8('@')) !== nothing
         parsed = _tls_parse_rfc2821_mailbox(constraint)
-        parsed === nothing && return false
-        return parsed.local_part == mailbox.local_part && parsed.domain == mailbox.domain
+        return parsed !== nothing && parsed.local_part == mailbox.local_part && parsed.domain == mailbox.domain
     end
-    return _tls_dns_constraint_matches(constraint, mailbox.domain)
+    _tls_dns_constraint_matches(constraint, mailbox.domain) && return true
+    return excluded && _tls_dns_wildcard_excluded(constraint, mailbox.domain)
 end
 
 @inline function _tls_chain_extended_key_usage_permitted(chain::Vector{_TLSCertificateInfo}, purpose::AbstractString)::Bool
@@ -394,32 +515,8 @@ function _tls_verify_certificate_name_constraints!(
             "tls: certificate chain contains unsupported subjectAltName forms under a constrained issuer",
         )
     end
-    if !isempty(issuer.permitted_dns_domains)
-        for dns_name in cert.dns_names
-            permitted = false
-            for constraint in issuer.permitted_dns_domains
-                if _tls_dns_constraint_matches(constraint, dns_name)
-                    permitted = true
-                    break
-                end
-            end
-            permitted || _tls_fail(
-                _TLS_ALERT_BAD_CERTIFICATE,
-                "tls: certificate chain violates DNS name constraints for $(repr(dns_name))",
-            )
-        end
-    end
-    for dns_name in cert.dns_names
-        for constraint in issuer.excluded_dns_domains
-            _tls_dns_constraint_matches(constraint, dns_name) || continue
-            _tls_fail(
-                _TLS_ALERT_BAD_CERTIFICATE,
-                "tls: certificate chain violates excluded DNS name constraint for $(repr(dns_name))",
-            )
-        end
-    end
-    if !isempty(issuer.permitted_ip_ranges)
-        for ip in cert.ip_addresses
+    for ip in cert.ip_addresses
+        if !isempty(issuer.permitted_ip_ranges)
             permitted = false
             for constraint in issuer.permitted_ip_ranges
                 if _tls_ip_range_matches(constraint, ip)
@@ -432,8 +529,6 @@ function _tls_verify_certificate_name_constraints!(
                 "tls: certificate chain violates IP name constraints for $(_tls_constraint_ip_string(ip))",
             )
         end
-    end
-    for ip in cert.ip_addresses
         for constraint in issuer.excluded_ip_ranges
             _tls_ip_range_matches(constraint, ip) || continue
             _tls_fail(
@@ -442,44 +537,39 @@ function _tls_verify_certificate_name_constraints!(
             )
         end
     end
-    if !isempty(issuer.permitted_uri_domains)
-        for uri_name in cert.uri_names
-            uri_domain = _tls_parse_uri_host_domain(uri_name)
-            uri_domain === nothing &&
-                _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: cannot apply URI name constraints to $(repr(uri_name))")
-            permitted = false
-            for constraint in issuer.permitted_uri_domains
-                if _tls_dns_constraint_matches(constraint, uri_domain::String)
-                    permitted = true
-                    break
-                end
-            end
-            permitted || _tls_fail(
-                _TLS_ALERT_BAD_CERTIFICATE,
-                "tls: certificate chain violates URI name constraints for $(repr(uri_name))",
-            )
-        end
+    for dns_name in cert.dns_names
+        _tls_name_constraint_domain_valid(dns_name, false) ||
+            _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: cannot apply DNS name constraints to $(repr(dns_name))")
+        _tls_domain_permitted(issuer.permitted_dns_domains, dns_name) || _tls_fail(
+            _TLS_ALERT_BAD_CERTIFICATE,
+            "tls: certificate chain violates DNS name constraints for $(repr(dns_name))",
+        )
+        _tls_domain_excluded(issuer.excluded_dns_domains, dns_name) && _tls_fail(
+            _TLS_ALERT_BAD_CERTIFICATE,
+            "tls: certificate chain violates excluded DNS name constraint for $(repr(dns_name))",
+        )
     end
     for uri_name in cert.uri_names
         uri_domain = _tls_parse_uri_host_domain(uri_name)
         uri_domain === nothing &&
             _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: cannot apply URI name constraints to $(repr(uri_name))")
-        for constraint in issuer.excluded_uri_domains
-            _tls_dns_constraint_matches(constraint, uri_domain::String) || continue
-            _tls_fail(
-                _TLS_ALERT_BAD_CERTIFICATE,
-                "tls: certificate chain violates excluded URI name constraint for $(repr(uri_name))",
-            )
-        end
+        _tls_domain_permitted(issuer.permitted_uri_domains, uri_domain::String) || _tls_fail(
+            _TLS_ALERT_BAD_CERTIFICATE,
+            "tls: certificate chain violates URI name constraints for $(repr(uri_name))",
+        )
+        _tls_domain_excluded(issuer.excluded_uri_domains, uri_domain::String) && _tls_fail(
+            _TLS_ALERT_BAD_CERTIFICATE,
+            "tls: certificate chain violates excluded URI name constraint for $(repr(uri_name))",
+        )
     end
-    if !isempty(issuer.permitted_email_addresses)
-        for email in cert.email_addresses
-            mailbox = _tls_parse_rfc2821_mailbox(email)
-            mailbox === nothing &&
-                _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: cannot apply email name constraints to $(repr(email))")
+    for email in cert.email_addresses
+        mailbox = _tls_parse_rfc2821_mailbox(email)
+        mailbox === nothing &&
+            _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: cannot apply email name constraints to $(repr(email))")
+        if !isempty(issuer.permitted_email_addresses)
             permitted = false
             for constraint in issuer.permitted_email_addresses
-                if _tls_email_constraint_matches(constraint, mailbox::_TLSParsedMailbox)
+                if _tls_email_constraint_matches(constraint, mailbox::_TLSParsedMailbox, false)
                     permitted = true
                     break
                 end
@@ -489,13 +579,8 @@ function _tls_verify_certificate_name_constraints!(
                 "tls: certificate chain violates email name constraints for $(repr(email))",
             )
         end
-    end
-    for email in cert.email_addresses
-        mailbox = _tls_parse_rfc2821_mailbox(email)
-        mailbox === nothing &&
-            _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: cannot apply email name constraints to $(repr(email))")
         for constraint in issuer.excluded_email_addresses
-            _tls_email_constraint_matches(constraint, mailbox::_TLSParsedMailbox) || continue
+            _tls_email_constraint_matches(constraint, mailbox::_TLSParsedMailbox, true) || continue
             _tls_fail(
                 _TLS_ALERT_BAD_CERTIFICATE,
                 "tls: certificate chain violates excluded email name constraint for $(repr(email))",

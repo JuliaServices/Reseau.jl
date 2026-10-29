@@ -754,8 +754,8 @@ end
         @test TLX._tls_parse_uri_host_domain("https://é.service.local/x") === nothing
         @test TLX._tls_parse_uri_host_domain("a:é") === nothing
         @test TLX._tls_parse_uri_host_domain("spiffe://ué@x.service.local:é/p") == "x.service.local"
-        utf8_mailbox = TLX._tls_parse_rfc2821_mailbox("aé@localhost")
-        @test utf8_mailbox !== nothing && utf8_mailbox.local_part == "aé" && utf8_mailbox.domain == "localhost"
+        # An rfc822Name is IA5 text, so a non-ASCII mailbox never parses.
+        @test TLX._tls_parse_rfc2821_mailbox("aé@localhost") === nothing
         @test TLX._tls_parse_rfc2821_mailbox("a@é") === nothing
         utf8_uri_err = try
             TLX._tls_verify_chain_name_constraints!(
@@ -785,7 +785,7 @@ end
         end
         @test utf8_email_err isa TLX._TLSAlertError
         if utf8_email_err isa TLX._TLSAlertError
-            @test occursin("excluded email name constraint", utf8_email_err.message)
+            @test occursin("cannot apply email name constraints", utf8_email_err.message)
         end
 
         unsupported_name_err = try

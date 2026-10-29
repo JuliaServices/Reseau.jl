@@ -789,7 +789,13 @@ function _tls_parse_general_names(
         elseif tag == _ASN1_GENERAL_NAME_URI
             push!(uri_names, _asn1_ascii_string(bytes, name_start, name_end))
         elseif tag == _ASN1_GENERAL_NAME_IP
-            push!(ip_addresses, copy(@view bytes[name_start:name_end]))
+            ip = copy(@view bytes[name_start:name_end])
+            # As Go does: an IPv4-mapped IPv6 SAN would match the IPv4 peer address
+            # while escaping IPv4 name constraints.
+            (length(ip) == 4 || length(ip) == 16) ||
+                throw(ArgumentError("tls: cannot parse IP address SAN of length $(length(ip))"))
+            _tls_is_ipv4_mapped(ip) && throw(ArgumentError("tls: IP address SAN contains an IPv4-mapped IPv6 address"))
+            push!(ip_addresses, ip)
         else
             has_unhandled_name_types = true
         end
@@ -797,24 +803,9 @@ function _tls_parse_general_names(
     return _TLSParsedGeneralNames(dns_names, ip_addresses, email_addresses, uri_names, has_unhandled_name_types)
 end
 
-@inline function _tls_valid_name_constraint_domain(domain::AbstractString)::Bool
-    isempty(domain) && return true
-    if startswith(domain, ".")
-        length(domain) > 1 || return false
-        return _tls_valid_hostname_value(SubString(domain, 2:lastindex(domain)), false)
-    end
-    return _tls_valid_hostname_value(domain, false)
-end
-
-@inline function _tls_valid_email_constraint(value::AbstractString)::Bool
-    at = findfirst(==('@'), value)
-    at === nothing && return _tls_valid_name_constraint_domain(value)
-    local_end = prevind(value, at)
-    domain_start = nextind(value, at)
-    local_end >= firstindex(value) || return false
-    domain_start <= lastindex(value) || return false
-    findnext(==('@'), value, domain_start) === nothing || return false
-    return _tls_valid_hostname_value(SubString(value, domain_start:lastindex(value)), false)
+@inline function _tls_valid_email_constraint(value::String)::Bool
+    occursin('@', value) && return _tls_parse_rfc2821_mailbox(value) !== nothing
+    return _tls_name_constraint_domain_valid(value, true)
 end
 
 @inline function _tls_valid_ip_mask(mask::AbstractVector{UInt8})::Bool
@@ -844,9 +835,13 @@ function _tls_parse_ip_range_constraint(bytes::AbstractVector{UInt8}, value_star
         throw(ArgumentError("tls: IP name constraint contained value of length $(len)"))
     end
     _tls_valid_ip_mask(mask) || throw(ArgumentError("tls: IP name constraint contained an invalid mask"))
+    _tls_is_ipv4_mapped(network) && throw(ArgumentError("tls: IP name constraint contained an IPv4-mapped IPv6 address"))
     return _TLSIPRangeConstraint(network, mask)
 end
 
+# `[0]` and `[1]` implicitly tag `GeneralSubtrees ::= SEQUENCE OF GeneralSubtree`
+# (RFC 5280 uses IMPLICIT TAGS), so the context tag replaces the SEQUENCE tag and
+# `value_start:value_end` holds the GeneralSubtree SEQUENCEs themselves.
 function _tls_parse_name_constraints_subtrees!(
     bytes::AbstractVector{UInt8},
     value_start::Int,
@@ -856,17 +851,15 @@ function _tls_parse_name_constraints_subtrees!(
     uri_out::Vector{String},
     email_out::Vector{String},
 )::Nothing
-    seq_start, seq_end, seq_next = _asn1_expect_tlv(bytes, value_start, _ASN1_SEQUENCE, value_end)
-    seq_next == value_end + 1 || throw(ArgumentError("tls: malformed NameConstraints extension"))
-    pos = seq_start
-    while pos <= seq_end
-        subtree_start, subtree_end, pos = _asn1_expect_tlv(bytes, pos, _ASN1_SEQUENCE, seq_end)
+    pos = value_start
+    while pos <= value_end
+        subtree_start, subtree_end, pos = _asn1_expect_tlv(bytes, pos, _ASN1_SEQUENCE, value_end)
         tag, base_start, base_end, subtree_pos = _asn1_read_tlv(bytes, subtree_start, subtree_end)
         if tag == _ASN1_GENERAL_NAME_DNS
             domain = _asn1_ascii_string(bytes, base_start, base_end)
-            _tls_valid_name_constraint_domain(domain) ||
+            _tls_name_constraint_domain_valid(domain, true) ||
                 throw(ArgumentError("tls: failed to parse dNSName constraint $(repr(domain))"))
-            push!(dns_out, String(domain))
+            push!(dns_out, domain)
         elseif tag == _ASN1_GENERAL_NAME_RFC822
             mailbox = _asn1_ascii_string(bytes, base_start, base_end)
             _tls_valid_email_constraint(mailbox) ||
@@ -874,9 +867,9 @@ function _tls_parse_name_constraints_subtrees!(
             push!(email_out, mailbox)
         elseif tag == _ASN1_GENERAL_NAME_URI
             domain = _asn1_ascii_string(bytes, base_start, base_end)
-            _tls_valid_name_constraint_domain(domain) ||
+            (!_is_ip_literal_name(domain) && _tls_name_constraint_domain_valid(domain, true)) ||
                 throw(ArgumentError("tls: failed to parse URI name constraint $(repr(domain))"))
-            push!(uri_out, String(domain))
+            push!(uri_out, domain)
         elseif tag == _ASN1_GENERAL_NAME_IP
             push!(ip_out, _tls_parse_ip_range_constraint(bytes, base_start, base_end))
         else
@@ -912,18 +905,18 @@ function _tls_parse_name_constraints(
     excluded_email = String[]
     saw_subtrees = false
     pos = seq_start
-    while pos <= seq_end
-        tag, field_start, field_end, pos = _asn1_read_tlv(bytes, pos, seq_end)
-        if tag == 0xa0
-            _tls_parse_name_constraints_subtrees!(bytes, field_start, field_end, permitted_dns, permitted_ip, permitted_uri, permitted_email)
-            saw_subtrees = true
-        elseif tag == 0xa1
-            _tls_parse_name_constraints_subtrees!(bytes, field_start, field_end, excluded_dns, excluded_ip, excluded_uri, excluded_email)
-            saw_subtrees = true
-        else
-            throw(ArgumentError("tls: malformed NameConstraints extension"))
-        end
+    # Both fields are optional but ordered: permittedSubtrees [0], then excludedSubtrees [1].
+    if pos <= seq_end && bytes[pos] == 0xa0
+        _, field_start, field_end, pos = _asn1_read_tlv(bytes, pos, seq_end)
+        _tls_parse_name_constraints_subtrees!(bytes, field_start, field_end, permitted_dns, permitted_ip, permitted_uri, permitted_email)
+        saw_subtrees |= field_start <= field_end
     end
+    if pos <= seq_end && bytes[pos] == 0xa1
+        _, field_start, field_end, pos = _asn1_read_tlv(bytes, pos, seq_end)
+        _tls_parse_name_constraints_subtrees!(bytes, field_start, field_end, excluded_dns, excluded_ip, excluded_uri, excluded_email)
+        saw_subtrees |= field_start <= field_end
+    end
+    pos == seq_end + 1 || throw(ArgumentError("tls: malformed NameConstraints extension"))
     saw_subtrees || throw(ArgumentError("tls: empty name constraints extension"))
     return _TLSParsedNameConstraints(
         permitted_dns,
