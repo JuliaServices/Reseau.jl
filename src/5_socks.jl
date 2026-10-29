@@ -147,6 +147,8 @@ function _parse_target(address::AbstractString)::Tuple{String, UInt16}
     # literals get a specific error up front; '%' never appears in a valid IP
     # literal (_parse_ipv6_literal rejects zones) or FQDN.
     occursin('%', host) && throw(TargetAddressError("SOCKS target host must not contain a zone", text))
+    # A proxy written in C may end the name at a NUL ("evil.test\0.good.test").
+    occursin('\0', host) && throw(TargetAddressError("SOCKS target host must not contain a NUL", text))
     if HostResolvers._parse_ipv4_literal(host) === nothing && HostResolvers._parse_ipv6_literal(host) === nothing
         length(codeunits(host)) <= 255 || throw(TargetAddressError("SOCKS target FQDN is too long", text))
         # Bracketed-but-invalid IPv6 literals must not leak to the proxy as a

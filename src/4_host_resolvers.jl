@@ -979,6 +979,8 @@ function _native_getaddrinfo(
     SocketOps.ensure_winsock!()
     addresses = TCP.SocketEndpoint[]
     hostname_s = String(hostname)
+    # No host name contains a NUL, and the `Cstring` argument would throw on one.
+    occursin('\0', hostname_s) && _lookup_error("no such host", hostname_s)
     future = _AddrInfoFuture(hostname_s, flags, ctx)
     # `getaddrinfo` can block inside the system resolver stack. Run it on a
     # dedicated worker pool so hostname resolution does not occupy a Julia
@@ -1082,6 +1084,8 @@ end
 
 function _parse_ipv4_literal(host::AbstractString)::Union{Nothing, NTuple{4, UInt8}}
     h = String(host)
+    # No address contains a NUL, and the `Cstring` argument would throw on one.
+    occursin('\0', h) && return nothing
     bytes = Vector{UInt8}(undef, 4)
     rc = GC.@preserve bytes begin
         @static if Sys.iswindows()
@@ -1109,7 +1113,8 @@ function _parse_ipv6_literal(host::AbstractString)::Union{Nothing, NTuple{16, UI
     # platform-independent: macOS inet_pton accepts them and embeds the zone
     # index into the address bytes, while Linux and Windows reject them.
     # Callers that support zones split them off first via _split_host_zone.
-    occursin('%', h) && return nothing
+    # No address contains a NUL, and the `Cstring` argument would throw on one.
+    (occursin('%', h) || occursin('\0', h)) && return nothing
     bytes = Vector{UInt8}(undef, 16)
     rc = GC.@preserve bytes begin
         @static if Sys.iswindows()
@@ -1162,6 +1167,7 @@ function _scope_id_from_zone(zone::AbstractString)::UInt32
         (numeric < 0 || numeric > typemax(UInt32)) && _addr_error("invalid scope id", z)
         return UInt32(numeric)
     end
+    occursin('\0', z) && _addr_error("unknown interface zone", z)
     idx = @static if Sys.iswindows()
         _windows_zone_index(z)
     else
