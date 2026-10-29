@@ -390,7 +390,14 @@ end
         @test !TL._is_ip_literal_name("a%%")
         @test !TL._is_ip_literal_name("fe80::1%%en0")
         @test !TL._is_ip_literal_name("127.0.0.1%a%b")
-        @test TL._hostname_in_sni("a%%") == "a%"
+        @test TL._hostname_in_sni("a%%") == "a%%"
+        # Outside an IPv6 literal, `%` is part of the name that is dialed, sent as
+        # SNI, and verified.
+        @test TL._normalize_peer_name("attacker.com%.victim.com") == "attacker.com%.victim.com"
+        @test TL._normalize_peer_name("127.0.0.1%en0") == "127.0.0.1%en0"
+        @test TL._hostname_in_sni("www.example.com%evil") == "www.example.com%evil"
+        @test TL._prepare_connect_config(TL.Config(verify_peer = false), "attacker.com%.victim.com:443").server_name ==
+              "attacker.com%.victim.com"
         @test TL._tls_parse_uri_host_domain("https://a%%/") === nothing
     end
 end

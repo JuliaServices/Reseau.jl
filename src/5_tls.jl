@@ -781,8 +781,12 @@ end
             i = prevind(h, i)
         end
     end
+    # A `%` starts a zone only after an IPv6 literal ("fe80::1%en0"). In any other
+    # name it is part of the name; dropping it would verify a different host
+    # ("attacker.com" for "attacker.com%.victim.com") than the one dialed.
     if percent_index !== nothing && percent_index > firstindex(h)
-        h = h[firstindex(h):prevind(h, percent_index)]
+        address = h[firstindex(h):prevind(h, percent_index)]
+        HostResolvers._parse_ipv6_literal(address) === nothing || (h = address)
     end
     while !isempty(h) && h[lastindex(h)] == '.'
         h = h[firstindex(h):prevind(h, lastindex(h))]
@@ -792,8 +796,8 @@ end
 
 @inline function _is_ip_literal_name(name::AbstractString)::Bool
     normalized = _normalize_peer_name(name)
-    # The zone is already stripped, so a `%` left in a name like "a%%" makes it
-    # malformed, not a literal. `_literal_host_addr` would split it again and
+    # Any IPv6 zone is already stripped, so a `%` left in a name like "a%%" makes
+    # it malformed, not a literal. `_literal_host_addr` would split it again and
     # throw `AddressError` for the empty or unknown zone.
     return HostResolvers._parse_ipv4_literal(normalized) !== nothing ||
            HostResolvers._parse_ipv6_literal(normalized) !== nothing
