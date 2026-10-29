@@ -41,6 +41,7 @@ test_files = [
     "tls_x509_tests.jl",
     "tls_distrust_tests.jl",
     "tls_name_constraints_tests.jl",
+    "tls_chain_building_tests.jl",
     "tls_handshake_messages_tests.jl",
     "tls_handshake_client_tls12_tests.jl",
     "tls_handshake_client_tls13_tests.jl",
