@@ -461,3 +461,117 @@ end
     end
 end
 end
+
+@testset "UDP draining receives never wait" begin
+    receiver = UDP.listen(UDP.loopback_addr(0))
+    sender = UDP.connect(UDP.local_addr(receiver)::UDP.SocketAddrV4)
+    try
+        buf = Vector{UInt8}(undef, 64)
+        @test UDP._try_recvfrom!(receiver, buf) == (-1, nothing)
+        UDP.send(sender, UInt8[0x01])
+        UDP.send(sender, UInt8[0x02, 0x03])
+        # A blocking receive returns the first, and the rest drain without waiting.
+        n, from = UDP.recvfrom!(receiver, buf)
+        @test buf[1:n] == UInt8[0x01]
+        got = Int[]
+        @static if Sys.iswindows()
+            # Receives complete through IOCP, so nothing drains.
+            @test UDP._try_recvfrom!(receiver, buf) == (-1, nothing)
+        else
+            k, peer = UDP._try_recvfrom!(receiver, buf)
+            @test buf[1:k] == UInt8[0x02, 0x03]
+            @test peer == from
+            @test UDP._try_recvfrom!(receiver, buf) == (-1, nothing)
+        end
+        UDP.send(sender, zeros(UInt8, 100))
+        @static if !Sys.iswindows()
+            # Wait for it to queue, then a short buffer reports truncation.
+            UDP.set_read_deadline!(receiver, 0)
+            while true
+                try
+                    UDP._try_recvfrom!(receiver, buf)[1] < 0 || error("expected truncation")
+                    yield()
+                catch err
+                    @test err isa UDP.TruncatedDatagramError
+                    break
+                end
+            end
+        end
+    finally
+        close(sender)
+        close(receiver)
+    end
+    @test_throws Exception UDP._try_recvfrom!(receiver, Vector{UInt8}(undef, 8))
+end
+
+@testset "UDP don't-fragment and path MTU" begin
+    supported = Sys.islinux() || Sys.isapple()
+    # Whether Don't Fragment can be set for IPv4 datagrams on `sock` itself.
+    function v4_dont_fragment(sock)
+        supported || return false
+        try
+            @static if Sys.islinux()
+                Reseau.SocketOps.set_sockopt_int(sock.fd.pfd.sysfd, Reseau.SocketOps.IPPROTO_IP, UDP._IP_MTU_DISCOVER, UDP._PMTUDISC_PROBE)
+            else
+                Reseau.SocketOps.set_sockopt_int(sock.fd.pfd.sysfd, Reseau.SocketOps.IPPROTO_IP, UDP._IP_DONTFRAG, 1)
+            end
+            return true
+        catch
+            return false
+        end
+    end
+    # Bound to a wildcard, an IPv6 listener is dual-stack; bound to ::1 it is
+    # IPv6-only.
+    for addr in (UDP.loopback_addr(0), UDP.any_addr6(0))
+        receiver = try
+            UDP.listen(addr)
+        catch
+            continue  # no IPv6
+        end
+        sender = UDP.connect(UDP.local_addr(receiver))
+        v6only = UDP.listen(UDP.loopback_addr6(0); v6only = true)
+        try
+            v4 = addr isa UDP.SocketAddrV4
+            # The listener is IPv4 or dual-stack; the IPv6 sockets connected
+            # to an IPv6 peer, or IPv6-only, send no IPv4.
+            @test UDP._carries_ipv4(receiver)
+            @test UDP._carries_ipv4(sender) == v4
+            @test !UDP._carries_ipv4(v6only)
+            @test UDP._set_dont_fragment!(sender) == supported
+            @test UDP._set_dont_fragment!(v6only) == supported
+            # A dual-stack socket counts only where IPv4 datagrams get it too,
+            # which macOS refuses.
+            @test UDP._set_dont_fragment!(receiver) == (v4 ? supported : v4_dont_fragment(receiver))
+            Sys.islinux() && @test UDP._set_dont_fragment!(receiver)
+            if Sys.islinux()
+                # The connected socket knows its route's MTU; loopback's is large.
+                @test UDP._path_mtu(sender) >= 1500
+                # An unconnected socket has no route to ask about.
+                @test UDP._path_mtu(receiver) == 0
+            else
+                @test UDP._path_mtu(sender) == 0
+            end
+        finally
+            close(sender)
+            close(receiver)
+            close(v6only)
+        end
+    end
+    # An IPv6 socket connected to an IPv4 peer sends IPv4 datagrams.
+    receiver = UDP.listen(UDP.loopback_addr(0))
+    mapped = try
+        UDP.connect(UDP.local_addr(receiver); local_addr = UDP.any_addr6(0))
+    catch
+        nothing  # no IPv6
+    end
+    try
+        if mapped !== nothing
+            @test mapped.fd.family == Reseau.SocketOps.AF_INET6
+            @test UDP._carries_ipv4(mapped)
+            @test UDP._set_dont_fragment!(mapped) == v4_dont_fragment(mapped)
+        end
+    finally
+        mapped === nothing || close(mapped)
+        close(receiver)
+    end
+end

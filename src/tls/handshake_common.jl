@@ -3,9 +3,13 @@
 # The version-specific files own the handshake flights and transcript logic;
 # this file only holds policy decisions that are identical across those flows.
 
-function _tls_select_server_alpn(config, client_hello::_ClientHelloMsg)::String
+function _tls_select_server_alpn(config, client_hello::_ClientHelloMsg; quic::Bool = false)::String
     isempty(config.alpn_protocols) && return ""
-    isempty(client_hello.alpn_protocols) && return ""
+    if isempty(client_hello.alpn_protocols)
+        # RFC 9001 Section 8.1
+        quic && _tls_fail(_TLS_ALERT_NO_APPLICATION_PROTOCOL, "tls: client did not request an application protocol")
+        return ""
+    end
     http11_fallback = false
     for proto in config.alpn_protocols
         for client_proto in client_hello.alpn_protocols
