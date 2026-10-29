@@ -130,7 +130,9 @@ end
     pollwait!(waiter)
 
 Park the current Julia task until the waiter is notified.
-Concurrent waits on the same `PollWaiter` are forbidden.
+Concurrent waits on the same `PollWaiter` are forbidden. The task is sticky to
+its thread while it waits (see `_bound_to_thread`) and gets its own stickiness
+back before this returns or throws.
 
 Returns the `PollWakeReason` that woke the waiter.
 
@@ -139,12 +141,12 @@ simultaneously, or if the waiter state machine is observed in an invalid state.
 """
 function pollwait!(waiter::PollWaiter)::PollWakeReason.T
     task = current_task()
-    # Intentionally preserve the caller's task stickiness. The poller wakes this
-    # task via `schedule(task)`; for a migratable task that drops it into the
-    # global run-queue, waking a cold parked worker whose cost scales with
-    # nthreads. Stickiness is the caller's choice (`@async` to pin a hot reader,
-    # `Threads.@spawn` to stay migratable) — don't override it here.
-    #
+    # Bound before the task is published below, so a notifier that sees the
+    # task also sees it sticky.
+    return _bound_to_thread(() -> _pollwait!(waiter, task))
+end
+
+function _pollwait!(waiter::PollWaiter, task::Task)::PollWakeReason.T
     # Consume an already-latched wake without parking, or claim the empty slot
     # by publishing this task in the word. Publishing the task IS the park
     # commitment: from here on any notifier that swaps it for a token owns
@@ -195,11 +197,14 @@ end
 Call `f()` with the current task sticky to its thread, then give the task back
 its own stickiness, even if `f` throws.
 
-A dial runs helper tasks that Julia binds to the caller's thread (resolution,
-deadline timers, dual-stack racers), and the caller waits on them. Bound for
-the dial, each of the caller's wakes goes to that thread alone; a migratable
-task's wake also wakes threads that cannot run it (every sleeping thread on
-Julia 1.12, one more on 1.13), and each spins before sleeping again.
+Every wait on a descriptor or timer (`pollwait!`) and every dial runs bound.
+While a thread has nothing else to run, its scheduler loop runs in the parked
+task, so only that thread can resume the task. Waking a migratable task still
+goes through the multiqueue, which also wakes threads that cannot run it
+(every sleeping thread on Julia 1.12, one more on 1.13), and each spins before
+sleeping again; a sticky task's wake goes to its own thread alone. The cost: if
+that thread starts other work while the task waits, the woken task runs only
+when that work yields, not on an idle thread.
 """
 @inline function _bound_to_thread(f::F) where {F}
     task = current_task()

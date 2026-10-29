@@ -254,6 +254,36 @@ end
             end
         end
         _el_log_test_progress("DONE: pollwait wake reason precedence")
+        _el_log_test_progress("START: pollwait binds a parked task to its thread")
+        @testset "pollwait binds a parked task to its thread" begin
+            # The poller's wake of a sticky task goes to that task's thread
+            # alone; the task gets its own stickiness back once it resumes.
+            function parked(f)
+                waiter = NP.PollWaiter()
+                task = f(waiter)
+                while !((@atomic :acquire waiter.state) isa Task) && !istaskdone(task)
+                    yield()
+                end
+                return waiter, task
+            end
+            waiter, task = parked(w -> Threads.@spawn (NP.pollwait!(w), current_task().sticky))
+            @test task.sticky
+            @test NP.pollnotify!(waiter, NP.PollWakeReason.READY)
+            @test fetch(task) == (NP.PollWakeReason.READY, false)
+
+            waiter, task = parked(w -> @async (NP.pollwait!(w), current_task().sticky))
+            @test NP.pollnotify!(waiter, NP.PollWakeReason.CANCELED)
+            @test fetch(task) == (NP.PollWakeReason.CANCELED, true)
+
+            waiter, task = parked(w -> Threads.@spawn try
+                NP.pollwait!(w)
+            catch
+                current_task().sticky
+            end)
+            schedule(task, InterruptException(); error = true)
+            @test fetch(task) === false
+        end
+        _el_log_test_progress("DONE: pollwait binds a parked task to its thread")
         _el_log_test_progress("START: backend delay semantics")
         @testset "backend delay semantics" begin
             state = NP.Poller()
