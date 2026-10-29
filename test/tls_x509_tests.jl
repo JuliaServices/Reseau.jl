@@ -260,6 +260,13 @@ end
         @test TLX._tls_match_hostnames("*.example.com", "api.example.com")
         @test !TLX._tls_match_hostnames("*.example.com", "example.com")
         @test TLX._tls_match_exactly("LOCALHOST", "localhost")
+        # The localhost certificate must not verify for a name that merely starts
+        # with "localhost%"; only an IPv6 literal carries a zone.
+        localhost_cert = _tls_cert_info(_TLS_CERT_PATH)
+        @test TLX._tls_verify_certificate_peer_name!(localhost_cert, "localhost") === nothing
+        @test TLX._tls_verify_certificate_peer_name!(localhost_cert, "::1%lo0") === nothing
+        @test_throws TLX._TLSAlertError TLX._tls_verify_certificate_peer_name!(localhost_cert, "localhost%evil")
+        @test_throws TLX._TLSAlertError TLX._tls_verify_certificate_peer_name!(localhost_cert, "127.0.0.1%en0")
     end
 
     @testset "purpose usage checks enforce TLS key usage and Go-style issuer links" begin
