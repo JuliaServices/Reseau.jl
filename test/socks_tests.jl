@@ -302,6 +302,8 @@ end
     _socks_expect_no_proxy_bytes("$long_host:80")
     # bracketed-but-invalid IPv6 literals must not be sent as FQDN targets
     _socks_expect_no_proxy_bytes("[fe80::1%en0]:80")
+    _socks_expect_no_proxy_bytes("evil.test\0.good.test:80")
+    _socks_expect_no_proxy_bytes("127.0.0.1\0:80")
     _socks_expect_no_proxy_bytes("[1:2:3]:80")
     _socks_expect_no_proxy_bytes(":80")
     _socks_expect_no_proxy_bytes("example.com:")
