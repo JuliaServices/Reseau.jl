@@ -45,6 +45,8 @@ test_files = [
     "tls_handshake_client_tls13_tests.jl",
     "tls_native_tls12_tests.jl",
     "tls_native_tls13_tests.jl",
+    "tls_quic_tests.jl",
+    "tls_quic_go_interop_tests.jl",
     "tls_config_tests.jl",
     "tls_ca_sources_tests.jl",
     "tls_precompile_time_tests.jl",

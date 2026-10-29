@@ -366,9 +366,60 @@ function run_tls_trim_sample()::Nothing
     return nothing
 end
 
+# Pumps events between two QUICConns until both handshakes finish, so the
+# handshake task, turn handoff, and post-handshake ticket path are compiled.
+function _run_quic_handshake_trim!(client::TL.QUICConn, server::TL.QUICConn)::Nothing
+    TL.set_transport_parameters!(client, UInt8[0x01])
+    TL.set_transport_parameters!(server, UInt8[0x02])
+    TL.start!(client)
+    TL.start!(server)
+    a, b = client, server
+    idle = 0
+    done = 0
+    while idle < 2
+        event = TL.next_event!(a)
+        if event.kind == TL.QUICEventKind.NoEvent
+            idle += 1
+            a, b = b, a
+            continue
+        end
+        idle = 0
+        if event.kind == TL.QUICEventKind.WriteData
+            TL.handle_data!(b, event.level, event.data)
+        elseif event.kind == TL.QUICEventKind.HandshakeDone
+            done += 1
+            a === server && TL.send_session_ticket!(server)
+        elseif event.kind == TL.QUICEventKind.Error
+            throw(event.err::TL.TLSError)
+        end
+    end
+    done == 2 || error("QUIC trim handshake did not complete")
+    return nothing
+end
+
+function _run_quic_trim!()::Nothing
+    client_config = TL.Config(verify_peer = false, server_name = "localhost", alpn_protocols = ["h3"])
+    server_config = TL.Config(verify_peer = false, cert_file = _TLS_CERT_PATH, key_file = _TLS_KEY_PATH, alpn_protocols = ["h3"])
+    for resumed in (false, true)
+        client = TL.quic_client(client_config)
+        server = TL.quic_server(server_config)
+        try
+            _run_quic_handshake_trim!(client, server)
+            state = TL.connection_state(client)
+            state.alpn_protocol == "h3" || error("unexpected QUIC trim ALPN")
+            state.did_resume == resumed || error("unexpected QUIC trim resumption state")
+        finally
+            close(client)
+            close(server)
+        end
+    end
+    return nothing
+end
+
 function @main(args::Vector{String})::Cint
     _ = args
     run_tls_trim_sample()
+    _run_quic_trim!()
     return 0
 end
 
