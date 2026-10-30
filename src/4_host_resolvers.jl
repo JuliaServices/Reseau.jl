@@ -2035,6 +2035,9 @@ const _TRIM_TASK_CALL_EDGE = Ref(false)
 function _spawn_task_body(body::F)::Task where {F}
     _TRIM_TASK_CALL_EDGE[] && body()
     task = Task(body)
+    # Helpers synchronize through locks, conditions, and channels. Keeping them
+    # migratable also prevents scheduling one from permanently pinning its caller.
+    task.sticky = false
     schedule(task)
     return task
 end

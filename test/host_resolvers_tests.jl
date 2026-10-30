@@ -422,6 +422,75 @@ end
 end
 end
 
+@testset "resolver helpers preserve caller scheduling" begin
+    spawn_default(f) = Threads.@spawn f()
+    spawn_interactive(f) = Threads.@spawn :interactive f()
+    for spawn in (spawn_default, spawn_interactive)
+        for sticky in (false, true)
+            result = fetch(spawn(() -> begin
+                current_task().sticky = sticky
+                helper = ND._spawn_task_body(() -> (current_task().sticky, Threads.threadpool()))
+                (current_task().sticky, Threads.threadpool(), fetch(helper))
+            end))
+            @test result[1] === sticky
+            @test result[3] == (false, result[2])
+        end
+
+        listener = NC.listen(NC.loopback_addr(0))
+        port = Int((NC.addr(listener)::NC.SocketAddrV4).port)
+        accept_task = Threads.@spawn begin
+            for _ in 1:2
+                close(NC.accept(listener))
+            end
+        end
+        try
+            for host in ("127.0.0.1", "localhost")
+                @test fetch(spawn(() -> begin
+                    close(NC.connect("tcp", "$host:$port"; timeout_ns = 10_000_000_000))
+                    current_task().sticky
+                end)) === false
+            end
+            wait(accept_task)
+        finally
+            close(listener)
+        end
+
+        for cause in (ND.LookupError("lookup failed", "failure.test"), InterruptException())
+            err, sticky = fetch(spawn(() -> begin
+                err = try
+                    NC.connect("tcp", "failure.test:80";
+                        timeout_ns = 10_000_000_000, resolver = _ErrorResolver(cause))
+                catch ex
+                    ex
+                end
+                (err, current_task().sticky)
+            end))
+            @test cause isa InterruptException ? err === cause : err isa ND.OpError && err.err === cause
+            @test sticky === false
+        end
+
+        started = Channel{Nothing}(1)
+        release = Channel{Nothing}(1)
+        resolver = _BlockingResolver(started, release, NC.SocketEndpoint[NC.loopback_addr(1)])
+        dialer = spawn(() -> begin
+            err = try
+                NC.connect("tcp", "blocked.test:80"; resolver, timeout_ns = 50_000_000)
+            catch ex
+                ex
+            end
+            (err, current_task().sticky)
+        end)
+        try
+            take!(started)
+            err, sticky = fetch(dialer)
+            @test err isa ND.OpError && err.err isa ND.DialTimeoutError
+            @test sticky === false
+        finally
+            put!(release, nothing)
+        end
+    end
+end
+
 @testset "HostResolvers phase 5" begin
         @testset "host-port parser and joiner" begin
             host, port = ND.split_host_port("127.0.0.1:8080")
@@ -1441,7 +1510,8 @@ end
 @static if !Sys.iswindows()
 @testset "an interrupt stops a dial instead of moving to the next address" begin
     SO = Reseau.SocketOps
-    # A listener whose accept queue is full leaves later connects pending.
+    # Linux leaves connects pending when the accept queue is full; macOS
+    # rejects them, so use its unconfigured loopback address instead.
     blocked = NC.listen(NC.loopback_addr(0); backlog = 1)
     port = Int((NC.addr(blocked)::NC.SocketAddrV4).port)
     fillers = [SO.open_socket(SO.AF_INET, SO.SOCK_STREAM) for _ in 1:8]
@@ -1452,20 +1522,28 @@ end
         end
         # Two candidates, both pending: an interrupt during the first dial
         # must end the dial rather than start the second.
-        resolver = ND.StaticResolver(hosts = Dict("pending.test" => NC.SocketEndpoint[NC.loopback_addr(0), NC.loopback_addr(0)]))
+        pending = Sys.isapple() ? NC.SocketAddrV4((127, 0, 0, 2), 0) : NC.loopback_addr(0)
+        resolver = ND.StaticResolver(hosts = Dict("pending.test" => NC.SocketEndpoint[pending, pending]))
         d = ND.HostResolver(resolver = resolver, timeout_ns = 20_000_000_000, fallback_delay_ns = -1)
-        registrations() = length(IP.POLLER[].registrations)
-        before = registrations()
         dialer = @async try
             NC.connect(d, "tcp", "pending.test:$(port)")
         catch err
             err
         end
-        # The dialer runs on this thread, so once its socket is registered it
-        # has parked waiting for the connect to complete.
-        while registrations() == before && !istaskdone(dialer)
-            yield()
+        function parked()
+            state = IP.POLLER[]
+            lock(state.lock)
+            try
+                return any(values(state.registrations)) do registration
+                    (@atomic :acquire registration.write_waiter.state) === dialer
+                end
+            finally
+                unlock(state.lock)
+            end
         end
+        # Interrupt only after the pending connect has published its waiter;
+        # registration alone can precede other lock/condition waits.
+        @test timedwait(() -> parked() || istaskdone(dialer), 10.0) === :ok
         istaskdone(dialer) || schedule(dialer, InterruptException(); error = true)
         result = fetch(dialer)
         result isa NC.Conn && close(result)
