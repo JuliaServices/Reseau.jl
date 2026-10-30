@@ -1507,50 +1507,26 @@ end
         end
     end
 
-@static if !Sys.iswindows()
-@testset "an interrupt stops a dial instead of moving to the next address" begin
-    SO = Reseau.SocketOps
-    # Linux leaves connects pending when the accept queue is full; macOS
-    # rejects them, so use its unconfigured loopback address instead.
-    blocked = NC.listen(NC.loopback_addr(0); backlog = 1)
-    port = Int((NC.addr(blocked)::NC.SocketAddrV4).port)
-    fillers = [SO.open_socket(SO.AF_INET, SO.SOCK_STREAM) for _ in 1:8]
-    try
-        for fd in fillers
-            SO.set_nonblocking!(fd, true)
-            SO.connect_socket(fd, SO.sockaddr_in_loopback(port))
+@testset "serial dialing retries address failures but stops on interruption" begin
+    addrs = NC.SocketAddrV4[NC.loopback_addr(10001), NC.loopback_addr(10002)]
+    dialer = ND.HostResolver(fallback_delay_ns = -1)
+    for cause in (SystemError("connect", Int(Base.Libc.ECONNREFUSED)), InterruptException())
+        attempts = NC.SocketAddrV4[]
+        dial_once = function (remote_addr, local_addr, deadline_ns, state, network)
+            push!(attempts, remote_addr)
+            throw(cause)
         end
-        # Two candidates, both pending: an interrupt during the first dial
-        # must end the dial rather than start the second.
-        pending = Sys.isapple() ? NC.SocketAddrV4((127, 0, 0, 2), 0) : NC.loopback_addr(0)
-        resolver = ND.StaticResolver(hosts = Dict("pending.test" => NC.SocketEndpoint[pending, pending]))
-        d = ND.HostResolver(resolver = resolver, timeout_ns = 20_000_000_000, fallback_delay_ns = -1)
-        dialer = @async try
-            NC.connect(d, "tcp", "pending.test:$(port)")
+        result = try
+            ND._resolve_serial(dialer, "tcp", "test:10001", :tcp, addrs, Int64(0), ND.DNSRaceState(), dial_once)
         catch err
             err
         end
-        function parked()
-            state = IP.POLLER[]
-            lock(state.lock)
-            try
-                return any(values(state.registrations)) do registration
-                    (@atomic :acquire registration.write_waiter.state) === dialer
-                end
-            finally
-                unlock(state.lock)
-            end
+        if cause isa InterruptException
+            @test result === cause
+            @test attempts == addrs[1:1]
+        else
+            @test result === (nothing, cause)
+            @test attempts == addrs
         end
-        # Interrupt only after the pending connect has published its waiter;
-        # registration alone can precede other lock/condition waits.
-        @test timedwait(() -> parked() || istaskdone(dialer), 10.0) === :ok
-        istaskdone(dialer) || schedule(dialer, InterruptException(); error = true)
-        result = fetch(dialer)
-        result isa NC.Conn && close(result)
-        @test result isa InterruptException
-    finally
-        foreach(SO.close_socket_nothrow, fillers)
-        close(blocked)
     end
-end
 end
