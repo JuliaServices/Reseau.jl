@@ -134,6 +134,53 @@ deadline expires. Higher-level TLS operations may instead raise
 [`TLSError`](@ref) with the timeout in `cause`, or a handshake-specific
 [`TLSHandshakeTimeoutError`](@ref).
 
+## QUIC Handshakes
+
+A QUIC implementation runs its TLS 1.3 handshake through a [`QUICConn`](@ref)
+(RFC 9001), following Go's `crypto/tls.QUICConn`. It carries no application
+data. Handshake bytes travel in QUIC CRYPTO frames, and traffic secrets go to
+the QUIC layer:
+
+```@docs; canonical=false
+QUICConn
+quic_client
+quic_server
+start!
+next_event!
+handle_data!
+set_transport_parameters!
+send_session_ticket!
+alert_code
+```
+
+The QUIC layer drives it with a loop like this:
+
+```julia
+q = TLS.quic_client(TLS.Config(server_name = "example.com", alpn_protocols = ["h3"]))
+TLS.set_transport_parameters!(q, my_transport_parameters)
+TLS.start!(q)
+while true
+    event = TLS.next_event!(q)
+    event.kind == TLS.QUICEventKind.NoEvent && break
+    if event.kind == TLS.QUICEventKind.WriteData
+        queue_crypto_frames!(event.level, event.data)
+    elseif event.kind == TLS.QUICEventKind.SetWriteSecret
+        install_write_keys!(event.level, event.suite, event.data)
+    end
+    # ... SetReadSecret, TransportParameters, HandshakeDone, Error
+end
+# Later, for each CRYPTO frame received in order:
+TLS.handle_data!(q, level, frame_bytes)
+```
+
+- QUIC always negotiates TLS 1.3. `min_version` is ignored, and a `Config`
+  whose `max_version` is TLS 1.2 is rejected.
+- Both peers must agree on ALPN (RFC 9001 Section 8.1).
+- Servers issue session tickets only when [`send_session_ticket!`](@ref) is
+  called after `HandshakeDone`. Clients cache them under `server_name`.
+- On failure, report CRYPTO_ERROR `0x0100 + alert_code(err)` to the peer.
+- 0-RTT is not supported yet.
+
 ## Practical Usage Notes
 
 - If `server_name` is omitted, [`connect`](@ref) derives it from the dial target when possible so SNI and certificate verification use that host name automatically.
