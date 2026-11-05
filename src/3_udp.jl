@@ -113,6 +113,15 @@ const _V4_MAPPED_PREFIX = (
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff,
 )
 
+# Compares element by element: slicing the tuple would lose its length and
+# leave a dynamic `==` that `juliac --trim` cannot compile.
+@inline function _is_v4_mapped(ip::NTuple{16, UInt8})::Bool
+    for i in 1:12
+        ip[i] == _V4_MAPPED_PREFIX[i] || return false
+    end
+    return true
+end
+
 """
     _coerce_family(addr, family) -> SocketEndpoint
 
@@ -131,7 +140,7 @@ mismatched family throws `ArgumentError`.
     end
     if family == SocketOps.AF_INET && addr isa SocketAddrV6
         ip = addr.ip
-        if ip[1:12] == _V4_MAPPED_PREFIX && addr.scope_id == 0
+        if _is_v4_mapped(ip) && addr.scope_id == 0
             return SocketAddrV4((ip[13], ip[14], ip[15], ip[16]), addr.port)
         end
     end
@@ -349,6 +358,90 @@ function _recv_datagram!(conn::Conn, buf::MutableByteBuffer, allow_truncate::Boo
         throw(TruncatedDatagramError(n))
     end
     return n, _peer_endpoint(peer)
+end
+
+# Receives one datagram into `buf` only if one is already queued: `(-1,
+# nothing)` otherwise, and always on Windows. Used to drain a socket after a
+# blocking receive returned, without waiting again.
+function _try_recvfrom!(conn::Conn, buf::Vector{UInt8})::Tuple{Int, Union{Nothing, SocketEndpoint}}
+    n, peer, truncated = GC.@preserve buf IOPoll.try_recvfrom_ptr!(conn.fd.pfd, pointer(buf), length(buf), buf)
+    n < 0 && return -1, nothing
+    truncated && throw(TruncatedDatagramError(n))
+    return n, _peer_endpoint(peer)
+end
+
+# Path MTU options: linux/in.h and linux/in6.h; Darwin's netinet/in.h and
+# netinet6/in6.h.
+@static if Sys.islinux()
+    const _IP_MTU_DISCOVER = Cint(10)
+    const _IP_MTU = Cint(14)
+    const _IPV6_MTU_DISCOVER = Cint(23)
+    const _IPV6_MTU = Cint(24)
+    # Set Don't Fragment and ignore the kernel's cached path MTU, so that a
+    # datagram too large for the path is lost (or refused locally) instead of
+    # fragmented: what path MTU probing needs.
+    const _PMTUDISC_PROBE = 3
+elseif Sys.isapple()
+    const _IP_DONTFRAG = Cint(28)
+    const _IPV6_DONTFRAG = Cint(62)
+end
+
+@static if Sys.islinux()
+    _set_dont_fragment_v4!(sysfd) = SocketOps.set_sockopt_int(sysfd, SocketOps.IPPROTO_IP, _IP_MTU_DISCOVER, _PMTUDISC_PROBE)
+    _set_dont_fragment_v6!(sysfd) = SocketOps.set_sockopt_int(sysfd, SocketOps.IPPROTO_IPV6, _IPV6_MTU_DISCOVER, _PMTUDISC_PROBE)
+elseif Sys.isapple()
+    _set_dont_fragment_v4!(sysfd) = SocketOps.set_sockopt_int(sysfd, SocketOps.IPPROTO_IP, _IP_DONTFRAG, 1)
+    _set_dont_fragment_v6!(sysfd) = SocketOps.set_sockopt_int(sysfd, SocketOps.IPPROTO_IPV6, _IPV6_DONTFRAG, 1)
+end
+
+# Whether the socket may carry IPv4 datagrams: an IPv4 socket, or a
+# dual-stack IPv6 one that is unconnected or connected to an IPv4-mapped peer.
+function _carries_ipv4(conn::Conn)::Bool
+    conn.fd.family == SocketOps.AF_INET6 || return true
+    raddr = conn.fd.raddr
+    raddr isa SocketAddrV4 && return true
+    raddr isa SocketAddrV6 && return _is_v4_mapped(raddr.ip)
+    try
+        return SocketOps.get_sockopt_int(conn.fd.pfd.sysfd, SocketOps.IPPROTO_IPV6, SocketOps.IPV6_V6ONLY) == 0
+    catch
+        return true
+    end
+end
+
+# Sets Don't Fragment on outgoing datagrams (Linux and macOS); returns whether
+# it took effect for every datagram the socket may send. A dual-stack IPv6
+# socket needs the IPv4 option too, which macOS refuses: as in quic-go, that
+# socket then counts as unable to set it, or path MTU probes sent to IPv4
+# peers could be fragmented and seem to succeed.
+function _set_dont_fragment!(conn::Conn)::Bool
+    @static if Sys.islinux() || Sys.isapple()
+        sysfd = conn.fd.pfd.sysfd
+        try
+            conn.fd.family == SocketOps.AF_INET6 && _set_dont_fragment_v6!(sysfd)
+            _carries_ipv4(conn) && _set_dont_fragment_v4!(sysfd)
+            return true
+        catch
+            return false
+        end
+    else
+        return false
+    end
+end
+
+# The MTU of a connected socket's route, from the kernel (Linux), or 0 when
+# unknown, as for an unconnected socket.
+function _path_mtu(conn::Conn)::Int
+    @static if Sys.islinux()
+        _is_connected(conn) || return 0
+        v6 = conn.fd.family == SocketOps.AF_INET6
+        try
+            return Int(SocketOps.get_sockopt_int(conn.fd.pfd.sysfd, v6 ? SocketOps.IPPROTO_IPV6 : SocketOps.IPPROTO_IP, v6 ? _IPV6_MTU : _IP_MTU))
+        catch
+            return 0
+        end
+    else
+        return 0
+    end
 end
 
 const _RECV_SCRATCH_BYTES = 65535
