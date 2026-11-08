@@ -190,18 +190,28 @@ function shutdown!()
             for registration in registrations
                 @atomic :release registration.pollstate.registration = nothing
             end
-            _discard_stale_time_entries_locked!(state)
-            for entry in state.time_heap
-                _time_set_index!(entry, 0)
-                entry.kind == TimeEntryKind.TIMER || continue
-                push!(timers, entry.timer::TimerState)
-            end
             empty!(state.registrations)
             empty!(state.registrations_by_token)
-            empty!(state.time_heap)
-            if @atomic :acquire state.running
-                @atomic :release state.running = false
-                stop_requested = true
+            # Deadline and timer setters wake the backend under `time_lock`
+            # after checking the registration or `running`, so clearing both
+            # before releasing it keeps every such wake ahead of
+            # `_backend_close!`.
+            lock(state.time_lock)
+            try
+                _discard_stale_time_entries_locked!(state)
+                for entry in state.time_heap
+                    _time_set_index!(entry, 0)
+                    entry.kind == TimeEntryKind.TIMER || continue
+                    push!(timers, entry.timer::TimerState)
+                end
+                empty!(state.time_heap)
+                _publish_time_min_locked!(state)
+                if @atomic :acquire state.running
+                    @atomic :release state.running = false
+                    stop_requested = true
+                end
+            finally
+                unlock(state.time_lock)
             end
         finally
             unlock(state.lock)
@@ -308,7 +318,7 @@ function deregister!(fd::SysFD)
         if registration !== nothing
             delete!(state.registrations_by_token, registration.token)
             @atomic :release registration.pollstate.registration = nothing
-            _remove_deadlines_locked!(state, registration.pollstate)
+            _remove_deadlines!(state, registration.pollstate)
         end
         errno = _backend_close_fd!(state, sysfd)
     finally
@@ -351,7 +361,7 @@ function deregister!(pd::PollState)
         delete!(state.registrations, pd.sysfd)
         delete!(state.registrations_by_token, current.token)
         @atomic :release pd.registration = nothing
-        _remove_deadlines_locked!(state, pd)
+        _remove_deadlines!(state, pd)
         errno = _backend_close_fd!(state, pd.sysfd)
     finally
         unlock(state.lock)
@@ -444,10 +454,15 @@ function _notify_all_waiters!(state::Poller)
     lock(state.lock)
     try
         append!(registrations, values(state.registrations))
-        _discard_stale_time_entries_locked!(state)
-        for entry in state.time_heap
-            entry.kind == TimeEntryKind.TIMER || continue
-            push!(timers, entry.timer::TimerState)
+        lock(state.time_lock)
+        try
+            _discard_stale_time_entries_locked!(state)
+            for entry in state.time_heap
+                entry.kind == TimeEntryKind.TIMER || continue
+                push!(timers, entry.timer::TimerState)
+            end
+        finally
+            unlock(state.time_lock)
         end
     finally
         unlock(state.lock)

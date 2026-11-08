@@ -279,8 +279,8 @@ It holds registration identity (`sysfd`, `token`), coarse descriptor state
 (`pollable`, `closing`, `event_err`), and the read/write deadline words plus
 their sequence numbers. Sequence counters reject callbacks already removed from
 the heap before a deadline changed. The two heap indices are protected by the
-poller's lock; zero means absent, and equal nonzero indices identify one combined
-read/write entry. `registration` is the live `Registration` that owns this
+poller's `time_lock`; zero means absent, and equal nonzero indices identify one
+combined read/write entry. `registration` is the live `Registration` that owns this
 state, or `nothing`; the poller sets and clears it under its lock, so readers
 can load it without taking that lock.
 """
@@ -357,7 +357,7 @@ end
 One scheduled time event in the poller min-heap.
 
 `TimeEntryKind.DEADLINE` entries are updated only while owned by the heap under
-the poller's lock. Once removed for firing, their captured read/write generations
+the poller's `time_lock`. Once removed for firing, their captured read/write generations
 are unchanged, so a later deadline update can invalidate the callback. `pollstate`
 identifies the descriptor whose deadline will be consumed.
 
@@ -385,7 +385,12 @@ Notable fields:
 - `registrations`/`registrations_by_token` let us validate that an event or
   time entry still belongs to the current occupant of an fd slot
 - `time_heap` is the min-heap that drives finite backend poll timeouts;
-  `compact_at` is the heap length at which stale entries are next dropped
+  `compact_at` is the heap length at which stale entries are next dropped.
+  Both are protected by `time_lock`, not `lock`, so deadline and timer updates
+  never wait behind readiness dispatch or registration; code that holds both
+  takes `lock` first
+- `time_min_ns` is the deadline of the heap's top entry, or `0` when the heap is
+  empty, so the poller can skip `time_lock` while nothing is due
 - `poll_until_ns` records the deadline currently being slept toward so that a
   newly earlier deadline can call `_backend_wake!` and shorten a blocking poll
 """
@@ -395,6 +400,7 @@ const _TIME_HEAP_MIN_COMPACT = 64
 
 mutable struct Poller
     lock::ReentrantLock
+    time_lock::ReentrantLock
     registrations::Dict{SysFD, Registration}
     registrations_by_token::Dict{UInt64, Registration}
     time_heap::Vector{TimeEntry}
@@ -402,12 +408,14 @@ mutable struct Poller
     shutdown_event::Base.Threads.Event
     backend_state::Union{Nothing, BackendState}
     @atomic next_token::UInt64
+    @atomic time_min_ns::Int64
     @atomic poll_until_ns::Int64
     @atomic running::Bool
 end
 
 function Poller()
     return Poller(
+        ReentrantLock(),
         ReentrantLock(),
         Dict{SysFD, Registration}(),
         Dict{UInt64, Registration}(),
@@ -416,6 +424,7 @@ function Poller()
         Base.Threads.Event(),
         nothing,
         UInt64(0),
+        Int64(0),
         Int64(0),
         false,
     )
