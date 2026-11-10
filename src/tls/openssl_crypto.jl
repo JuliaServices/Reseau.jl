@@ -449,7 +449,13 @@ function _tls13_rsa_pss_params(md_name::String)::_TLS13RSAPSSParams
     return _TLS13RSAPSSParams(pad_mode, mgf1_digest, saltlen, params)
 end
 
-function _tls13_load_private_key_pem(key_pem::AbstractVector{UInt8})::Ptr{Cvoid}
+no_passphrase(buf::Ptr{Cchar}, size::Cint, rwflag::Cint, u::Ptr{Cvoid})::Cint = Cint(-1)
+no_passphrase_callback() = @cfunction(no_passphrase, Cint, (Ptr{Cchar}, Cint, Cint, Ptr{Cvoid}))
+
+_pem_passphrase(::Nothing) = (no_passphrase_callback(), Cstring(C_NULL))
+_pem_passphrase(passphrase::AbstractString) = (C_NULL, String(passphrase))
+
+function _tls13_load_private_key_pem(key_pem::AbstractVector{UInt8}, passphrase::Union{Nothing,AbstractString}=nothing)::Ptr{Cvoid}
     key_bytes = Vector{UInt8}(key_pem)
     bio = Ptr{Cvoid}(C_NULL)
     try
@@ -462,14 +468,16 @@ function _tls13_load_private_key_pem(key_pem::AbstractVector{UInt8})::Ptr{Cvoid}
                 Cint(length(key_bytes)),
             )
             _openssl_require_nonnull(bio, "BIO_new_mem_buf")
+
+            callback, arg = _pem_passphrase(passphrase)
             pkey = ccall(
                 (:PEM_read_bio_PrivateKey, _LIBCRYPTO_PATH),
                 Ptr{Cvoid},
-                (Ptr{Cvoid}, Ptr{Ptr{Cvoid}}, Ptr{Cvoid}, Ptr{Cvoid}),
+                (Ptr{Cvoid}, Ptr{Ptr{Cvoid}}, Ptr{Cvoid}, Cstring),
                 bio,
                 C_NULL,
-                C_NULL,
-                C_NULL,
+                callback,
+                arg,
             )
             return _openssl_require_nonnull(pkey, "PEM_read_bio_PrivateKey")
         end
@@ -1116,8 +1124,8 @@ function _tls13_openssl_sign_from_pem(signature_algorithm::UInt16, signed::Abstr
     end
 end
 
-function _tls12_openssl_sign_from_pem(signature_algorithm::UInt16, signed::AbstractVector{UInt8}, key_pem::AbstractVector{UInt8})::Vector{UInt8}
-    pkey = _tls13_load_private_key_pem(key_pem)
+function _tls12_openssl_sign_from_pem(signature_algorithm::UInt16, signed::AbstractVector{UInt8}, key_pem::AbstractVector{UInt8}, key_passphrase::Union{Nothing,AbstractString}=nothing)::Vector{UInt8}
+    pkey = _tls13_load_private_key_pem(key_pem, key_passphrase)
     try
         return _tls12_openssl_sign_signature(pkey, signature_algorithm, signed)
     finally

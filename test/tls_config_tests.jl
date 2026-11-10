@@ -147,7 +147,7 @@ end
         @test legacy._client_session_cache === fixture._client_session_cache
         @test legacy._client_identity === fixture._client_identity
         # Adding a field means revisiting the 21-argument compatibility method above.
-        @test fieldcount(TL.Config) == 24
+        @test fieldcount(TL.Config) == 25
         @test legacy.ca_dir === legacy.client_ca_dir === nothing
         raw = _tls_raw_config_for_test(fixture)
         @test raw._verification_time_s == fixture._verification_time_s
