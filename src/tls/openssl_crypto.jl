@@ -35,6 +35,8 @@ _no_passphrase_callback() = @cfunction(_no_passphrase, Cint, (Ptr{Cchar}, Cint, 
 _pem_passphrase(::Nothing) = (_no_passphrase_callback(), Cstring(C_NULL))
 _pem_passphrase(passphrase::AbstractString) = (C_NULL, String(passphrase))
 
+_pem_is_encrypted(pem::AbstractVector{UInt8})::Bool =
+    findfirst(b"BEGIN ENCRYPTED PRIVATE KEY", pem) !== nothing || findfirst(b"Proc-Type: 4,ENCRYPTED", pem) !== nothing
 
 function _init_x25519_pkey_id!()::Cint
     nid = _X25519_PKEY_ID[]
@@ -482,6 +484,10 @@ function _tls13_load_private_key_pem(key_pem::AbstractVector{UInt8}, passphrase:
                 callback,
                 arg,
             )
+            if pkey == C_NULL && passphrase === nothing && _pem_is_encrypted(key_bytes)
+                ccall((:ERR_clear_error, _LIBCRYPTO_PATH), Cvoid, ())
+                throw(TLSError("PEM_read_bio_PrivateKey", Int32(0), "the private key is encrypted and `key_passphrase` is not set", nothing))
+            end
             return _openssl_require_nonnull(pkey, "PEM_read_bio_PrivateKey")
         end
     finally

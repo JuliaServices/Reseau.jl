@@ -405,7 +405,9 @@ end
                 @test server_handshake(server_config(uncached_copy(key_file), passphrase)) == (server = :ok, client = :ok)
                 @test server_handshake(server_config(uncached_copy(key_file), "wrong passphrase")).server isa TL.TLSError
                 # With no passphrase the load fails; OpenSSL must not prompt on the terminal.
-                @test server_handshake(server_config(uncached_copy(key_file), nothing)).server isa TL.TLSError
+                missing_passphrase = server_handshake(server_config(uncached_copy(key_file), nothing)).server
+                @test missing_passphrase isa TL.TLSError
+                @test occursin("key_passphrase", missing_passphrase.message)
             end
             @test server_handshake(server_config(uncached_copy(_TLS_NATIVE_SERVER_KEY_PATH), passphrase)) == (server = :ok, client = :ok)
 
@@ -449,6 +451,9 @@ end
         reported = try TL._tls13_load_private_key_pem(encrypted_pem, "wrong passphrase") catch err; err end
         @test reported isa TL.TLSError
         @test occursin("bad decrypt", reported.message)
+
+        @test_throws TL.TLSError TL._tls13_load_private_key_pem(encrypted_pem)
+        @test queued_error() == 0
     end
 
     @testset "version helpers and connect config inference" begin
