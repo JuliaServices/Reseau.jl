@@ -102,8 +102,23 @@ again only with new evidence that addresses the failure recorded here.
   separate cores and 12% oversubscribed. Rearming every operation lost 26% and
   39% and raised CPU per operation by 33% and 63%. The poller still takes the
   heap lock to choose its sleep horizon and to drain expired timers.
+- **Publish the heap minimum atomically (#238, PingoLee).** Merged in November
+  2026. Deadline setters update the heap under a separate `time_lock` instead of
+  the poller's `state.lock`, and publish the earliest deadline in an atomic
+  `time_min_ns`. The poller reads that and takes `time_lock` only when an entry
+  is due, so unlike the rejected split it doesn't take the heap lock on every
+  loop. The handshake is described in `src/iopoll/timers.jl`. With 8 client
+  threads on 8 dedicated cores, rearming every operation ran 11% faster than
+  before (5 of 6 rounds), and with no rearming it was unchanged (16 rounds).
+  With 8 threads on 4 CPUs, rearming every 20 operations ran about 50% faster.
 
-Two designs for #227 remain untested: a single-owner update queue that the
+#238 avoids lost wakeups with a handshake whose four accesses must stay
+`:sequentially_consistent`. A setter stores `time_min_ns`, then loads
+`poll_until_ns`; the poller stores `poll_until_ns`, then reloads `time_min_ns`.
+Weakening any of the four orderings can let the poller sleep past a deadline
+that a setter just moved earlier.
+
+Two other designs for #227 are untested: a single-owner update queue that the
 poller drains, and lazily coalesced extensions of later deadlines, where an
 early heap firing rechecks the descriptor's current deadline. Any deadline
 change must keep these guarantees:
