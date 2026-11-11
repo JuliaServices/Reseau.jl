@@ -361,6 +361,60 @@ end
         end
     end
 
+    @testset "encrypted key_file and key_passphrase" begin
+        passphrase = "reseau-test-passphrase"
+        encrypted = [joinpath(@__DIR__, "resources", "encrypted_server_key", name) for name in ("pkcs8.key", "legacy.key")]
+        uncached_copy(path) = (copied = joinpath(mktempdir(), basename(path)); cp(path, copied); copied)
+        server_config(key_file, key_passphrase) = TL.Config(
+            verify_peer = false,
+            cert_file = _TLS_NATIVE_SERVER_CERT_PATH,
+            key_file = key_file,
+            key_passphrase = key_passphrase,
+        )
+        function server_handshake(config::TL.Config)
+            listener = TL.listen("tcp", "127.0.0.1:0", config; backlog = 1)
+            client = nothing
+            try
+                port = Int((TL.addr(listener)::NC.SocketAddrV4).port)
+                server = errormonitor(Threads.@spawn begin
+                    conn = TL.accept(listener)
+                    try
+                        TL.handshake!(conn)
+                        :ok
+                    catch err
+                        err
+                    finally
+                        close(conn)
+                    end
+                end)
+                client = try
+                    _tls_connect("tcp", "127.0.0.1:$port", TL.Config(verify_peer = false, server_name = "localhost"))
+                catch err
+                    err
+                end
+                return (server = fetch(server), client = client isa TL.Conn ? :ok : client)
+            finally
+                _tls_close_quiet!(client)
+                _tls_close_quiet!(listener)
+            end
+        end
+
+        IP.shutdown!()
+        try
+            for key_file in encrypted
+                @test server_handshake(server_config(uncached_copy(key_file), passphrase)) == (server = :ok, client = :ok)
+                @test server_handshake(server_config(uncached_copy(key_file), "wrong passphrase")).server isa TL.TLSError
+                # With no passphrase the load fails; OpenSSL must not prompt on the terminal.
+                @test server_handshake(server_config(uncached_copy(key_file), nothing)).server isa TL.TLSError
+            end
+            @test server_handshake(server_config(uncached_copy(_TLS_NATIVE_SERVER_KEY_PATH), passphrase)) == (server = :ok, client = :ok)
+
+        finally
+            IP.shutdown!()
+        end
+        @test_throws TL.ConfigError TL.Config(TL.Config(); key_passphrase = "ab\0c")
+    end
+
     @testset "version helpers and connect config inference" begin
         payload = UInt8[0x61, 0x62, 0x63]
         copied = TL._write_buffer(@view(payload[1:2:3]), 2)
