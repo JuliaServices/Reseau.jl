@@ -29,6 +29,13 @@ struct _TLSKeyShareSecret
     secret::Vector{UInt8}
 end
 
+_no_passphrase(buf::Ptr{Cchar}, size::Cint, rwflag::Cint, u::Ptr{Cvoid})::Cint = Cint(-1)
+_no_passphrase_callback() = @cfunction(_no_passphrase, Cint, (Ptr{Cchar}, Cint, Cint, Ptr{Cvoid}))
+
+_pem_passphrase(::Nothing) = (_no_passphrase_callback(), Cstring(C_NULL))
+_pem_passphrase(passphrase::AbstractString) = (C_NULL, String(passphrase))
+
+
 function _init_x25519_pkey_id!()::Cint
     nid = _X25519_PKEY_ID[]
     nid > 0 && return nid
@@ -449,11 +456,6 @@ function _tls13_rsa_pss_params(md_name::String)::_TLS13RSAPSSParams
     return _TLS13RSAPSSParams(pad_mode, mgf1_digest, saltlen, params)
 end
 
-no_passphrase(buf::Ptr{Cchar}, size::Cint, rwflag::Cint, u::Ptr{Cvoid})::Cint = Cint(-1)
-no_passphrase_callback() = @cfunction(no_passphrase, Cint, (Ptr{Cchar}, Cint, Cint, Ptr{Cvoid}))
-
-_pem_passphrase(::Nothing) = (no_passphrase_callback(), Cstring(C_NULL))
-_pem_passphrase(passphrase::AbstractString) = (C_NULL, String(passphrase))
 
 function _tls13_load_private_key_pem(key_pem::AbstractVector{UInt8}, passphrase::Union{Nothing,AbstractString}=nothing)::Ptr{Cvoid}
     key_bytes = Vector{UInt8}(key_pem)
@@ -1124,8 +1126,8 @@ function _tls13_openssl_sign_from_pem(signature_algorithm::UInt16, signed::Abstr
     end
 end
 
-function _tls12_openssl_sign_from_pem(signature_algorithm::UInt16, signed::AbstractVector{UInt8}, key_pem::AbstractVector{UInt8}, key_passphrase::Union{Nothing,AbstractString}=nothing)::Vector{UInt8}
-    pkey = _tls13_load_private_key_pem(key_pem, key_passphrase)
+function _tls12_openssl_sign_from_pem(signature_algorithm::UInt16, signed::AbstractVector{UInt8}, key_pem::AbstractVector{UInt8})::Vector{UInt8}
+    pkey = _tls13_load_private_key_pem(key_pem)
     try
         return _tls12_openssl_sign_signature(pkey, signature_algorithm, signed)
     finally
