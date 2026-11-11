@@ -23,13 +23,13 @@ function with_connections(f, n=1)
     end
 end
 
-entries(state, pd) = lock(state.lock) do
+entries(state, pd) = lock(state.time_lock) do
     filter(e -> e.kind == IP.TimeEntryKind.DEADLINE && e.pollstate === pd, state.time_heap)
 end
 
 # Check both directions of the index map as well as the ordinary heap order.
 function valid_heap(state, descriptors)
-    return lock(state.lock) do
+    return lock(state.time_lock) do
         heap = state.time_heap
         for (i, entry) in enumerate(heap)
             i > 1 && IP._time_less(entry, heap[i >>> 1]) && return false
@@ -105,6 +105,8 @@ end
             for client in clients
                 TCP.set_deadline!(client, 0)
             end
+            # The poller drops a stale top entry once it comes due.
+            IP._drain_expired_time_entries!(state, FUTURE)
             @test IP._poll_delay_ns(state; now_ns=FUTURE) == -1
             @test isempty(state.time_heap)
             foreach(c -> TCP.set_deadline!(c, FUTURE), clients)
@@ -125,7 +127,7 @@ end
             @test only(entries(state, pd)) === current
             @test current.deadline_ns == FUTURE + 1
 
-            popped = lock(state.lock) do
+            popped = lock(state.time_lock) do
                 IP._time_remove_locked!(state, pd.read_timer_index)
             end
             captured = (popped.deadline_ns, popped.mode, popped.primary_seq, popped.secondary_seq)
@@ -138,7 +140,7 @@ end
             @test valid_heap(state, [pd])
 
             # An old combined callback may still expire an unchanged direction.
-            popped = lock(state.lock) do
+            popped = lock(state.time_lock) do
                 IP._time_remove_locked!(state, pd.read_timer_index)
             end
             TCP.set_read_deadline!(client, FUTURE + 3)
@@ -182,7 +184,7 @@ end
 @testset "closed timers behind a live earlier entry are dropped from the heap" begin
     IP.shutdown!()
     state = IP.init!()
-    heap_length() = (lock(state.lock); try length(state.time_heap) finally unlock(state.lock) end)
+    heap_length() = (lock(state.time_lock); try length(state.time_heap) finally unlock(state.time_lock) end)
     now_ns = Int64(time_ns())
     # The live timer stays at the top, so stale entries never reach it.
     live = IP.TimerState()
@@ -194,19 +196,80 @@ end
             IP._close_timer!(timer)
         end
         @test heap_length() <= 2 * IP._TIME_HEAP_MIN_COMPACT
-        lock(state.lock)
+        lock(state.time_lock)
         try
             # Compaction kept the heap order and the live entry.
             heap = state.time_heap
             @test any(entry -> entry.timer === live, heap)
             @test all(i -> !IP._time_less(heap[i], heap[i >>> 1]), 2:length(heap))
         finally
-            unlock(state.lock)
+            unlock(state.time_lock)
         end
     finally
         IP._close_timer!(live)
         IP.shutdown!()
     end
+end
+
+# The poller takes `state.lock` for every readiness event, so deadline and
+# timer updates must not wait for it: a contended update stalled every socket.
+@testset "deadline and timer updates do not take the poller lock" begin
+    with_connections() do clients, peers, state
+        client, pd = only(clients), only(clients).fd.pfd.pd
+        timer = IP.TimerState()
+        updater = nothing
+        lock(state.lock)
+        try
+            # Pinned to this thread, so it runs only while this task yields. It
+            # has no blocking point, so it finishes on its first run; the loop
+            # only bounds how long a regression keeps it parked on the lock.
+            updater = @async begin
+                TCP.set_read_deadline!(client, FUTURE)
+                TCP.set_read_deadline!(client, FUTURE - 1)
+                IP.schedule_timer!(timer, FUTURE)
+                TCP.set_read_deadline!(client, 0)
+                return true
+            end
+            for _ in 1:1000
+                istaskdone(updater) && break
+                yield()
+            end
+            @test istaskdone(updater)
+        finally
+            unlock(state.lock)
+        end
+        @test fetch(updater)
+        @test isempty(entries(state, pd))
+        IP._close_timer!(timer)
+    end
+
+    # The other side: the poller leaves `time_lock` alone while nothing is due.
+    state = IP.Poller()
+    timer = IP.TimerState()
+    seq = @atomic timer.seq += UInt64(1)
+    lock(state.time_lock) do
+        IP._time_push_locked!(state, IP._timer_entry(FUTURE, timer, seq))
+    end
+    poller = nothing
+    lock(state.time_lock)
+    try
+        poller = @async begin
+            delay = IP._poll_delay_ns(state; now_ns = FUTURE - 2)
+            IP._drain_expired_time_entries!(state, FUTURE - 1)
+            return delay
+        end
+        for _ in 1:1000
+            istaskdone(poller) && break
+            yield()
+        end
+        @test istaskdone(poller)
+    finally
+        unlock(state.time_lock)
+    end
+    @test fetch(poller) == 2
+    @test length(state.time_heap) == 1
+    @test (@atomic state.poll_until_ns) == FUTURE
+    IP._close_timer!(timer)
 end
 
 end # module
