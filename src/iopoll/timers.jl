@@ -71,12 +71,24 @@ function _time_sift_down!(heap::Vector{TimeEntry}, i::Int)
     return nothing
 end
 
+# The poller reads `time_min_ns` without `time_lock` to skip the heap while
+# nothing is due, as Go's `timers.check` reads `minWhenHeap`. Every heap
+# mutation republishes it; the top may be a stale entry, so it is never later
+# than the earliest live one. `0` means empty, so an entry at or before `0`
+# (always already due) publishes `1`.
+@inline function _publish_time_min_locked!(state::Poller)
+    heap = state.time_heap
+    @atomic state.time_min_ns = isempty(heap) ? Int64(0) : max(heap[1].deadline_ns, Int64(1))
+    return nothing
+end
+
 function _time_push_locked!(state::Poller, entry::TimeEntry)
     heap = state.time_heap
     length(heap) >= state.compact_at && _compact_time_heap_locked!(state)
     push!(heap, entry)
     _time_set_index!(entry, length(heap))
     _time_sift_up!(heap, length(heap))
+    _publish_time_min_locked!(state)
     return nothing
 end
 
@@ -94,6 +106,7 @@ function _time_remove_locked!(state::Poller, index::Int)::TimeEntry
             _time_sift_down!(heap, index)
         end
     end
+    _publish_time_min_locked!(state)
     return entry
 end
 
@@ -120,6 +133,7 @@ function _compact_time_heap_locked!(state::Poller)
         _time_set_index!(heap[i], i)
     end
     state.compact_at = max(_TIME_HEAP_MIN_COMPACT, 2 * n)
+    _publish_time_min_locked!(state)
     return nothing
 end
 
@@ -128,23 +142,31 @@ function _time_pop_locked!(state::Poller)::TimeEntry
     return _time_remove_locked!(state, 1)
 end
 
-function _remove_deadlines_locked!(state::Poller, pd::PollState)
-    pd.read_timer_index == 0 || _time_remove_locked!(state, pd.read_timer_index)
-    pd.write_timer_index == 0 || _time_remove_locked!(state, pd.write_timer_index)
+# Called with `state.lock` held, after clearing `pd.registration`.
+function _remove_deadlines!(state::Poller, pd::PollState)
+    lock(state.time_lock)
+    try
+        pd.read_timer_index == 0 || _time_remove_locked!(state, pd.read_timer_index)
+        pd.write_timer_index == 0 || _time_remove_locked!(state, pd.write_timer_index)
+    finally
+        unlock(state.time_lock)
+    end
     return nothing
 end
 
-@inline function _registration_active_locked(state::Poller, pd::PollState)::Bool
-    current = get(() -> nothing, state.registrations_by_token, pd.token)
-    return current !== nothing && current.fd == pd.sysfd && current.pollstate === pd
+# The poller publishes and clears `pd.registration` under `state.lock` together
+# with its registration maps, so this needs neither that lock nor a map lookup.
+# A `PollState` only ever points at its own registration, so a descriptor whose
+# fd number was reused cannot alias it. Removal clears the field before taking
+# `time_lock` to drop the descriptor's entries, so an entry pushed after a
+# stale read is still removed.
+@inline function _registration_active(pd::PollState)::Bool
+    return current_registration(pd) !== nothing
 end
 
 @inline function _entry_live_locked(state::Poller, entry::TimeEntry)::Bool
     if entry.kind == TimeEntryKind.DEADLINE
-        pd = entry.pollstate::PollState
-        # Descriptors are reused aggressively by the OS, so liveness must check
-        # both the fd and the monotonically increasing token.
-        return _registration_active_locked(state, pd)
+        return _registration_active(entry.pollstate::PollState)
     end
     timer = entry.timer::TimerState
     (@atomic :acquire timer.seq) == entry.primary_seq || return false
@@ -174,22 +196,25 @@ end
 # 1. A set latch implies the backend wake token is still undelivered (the
 #    eventfd / EVFILT_USER event / IOCP packet stays readable until consumed),
 #    so the poller cannot block again without first consuming it.
-# 2. Wakers publish the state they want the poller to observe under
-#    `state.lock` *before* attempting the wake (heap pushes here,
-#    `running = false` in `shutdown!`), and the poller re-acquires
-#    `state.lock` every cycle between consuming a wake and sleeping again
-#    (`_poll_delay_ns`, the expired-entry drain) — so state published before a
-#    failed CAS is always observed before the next sleep.
+# 2. Wakers publish the state they want the poller to observe *before*
+#    attempting the wake, and the poller observes it between consuming a wake
+#    and sleeping again: `shutdown!` publishes `running = false` under
+#    `state.lock`, which the poller re-acquires every cycle in
+#    `_poll_delay_ns`, and heap pushes publish `time_min_ns`, which
+#    `_poll_delay_ns` re-reads after committing its horizon (below). So state
+#    published before a failed CAS is always observed before the next sleep.
 #
-# The `poll_until_ns` read below is protected the same way: the poller stores
-# it under `state.lock` in `_poll_delay_ns`, so a waker whose heap push was
-# not seen by the poller's latest peek necessarily reads the sleep horizon
-# that peek committed, and wakes if its deadline is earlier. `0` doubles as
-# "no horizon committed" and "sleeping without a timeout"; both must wake
-# unconditionally.
+# Heap pushes run under `time_lock`, which the poller does not take unless an
+# entry is due, so the horizon handshake is lock-free: a waker stores
+# `time_min_ns` (in `_time_push_locked!`) and then reads `poll_until_ns`
+# below; the poller stores `poll_until_ns` and then re-reads `time_min_ns`.
+# All four accesses are sequentially consistent, so a waker whose entry the
+# poller's re-read missed necessarily reads the horizon the poller committed,
+# and wakes if its deadline is earlier. `0` doubles as "no horizon committed"
+# and "sleeping without a timeout"; both must wake unconditionally.
 @inline function _maybe_wake_for_earlier_time!(state::Poller, new_earliest::Int64)
     new_earliest > 0 || return nothing
-    poll_until_ns = @atomic :acquire state.poll_until_ns
+    poll_until_ns = @atomic state.poll_until_ns
     if poll_until_ns == 0 || new_earliest < poll_until_ns
         errno = _backend_wake!(state)
         errno == Int32(0) || _throw_errno("iopoll wake", errno)
@@ -250,9 +275,12 @@ function schedule_deadlines!(
     state = POLLER[]
     (@atomic :acquire state.running) || return nothing
     new_earliest = Int64(0)
-    lock(state.lock)
+    lock(state.time_lock)
     try
-        _registration_active_locked(state, pd) || return nothing
+        # `shutdown!` clears `running` under `time_lock`, so this keeps a setter
+        # that loaded a retired poller from waking its closed backend.
+        (@atomic :acquire state.running) || return nothing
+        _registration_active(pd) || return nothing
         (@atomic :acquire pd.rseq) == rseq && (@atomic :acquire pd.wseq) == wseq || return nothing
         first = pd.read_timer_index == 0 ? nothing : _time_remove_locked!(state, pd.read_timer_index)
         second = pd.write_timer_index == 0 ? nothing : _time_remove_locked!(state, pd.write_timer_index)
@@ -281,11 +309,12 @@ function schedule_deadlines!(
         end
         # Once the poller has committed to a sleep horizon, a newly earlier
         # wakeup must actively wake it so the blocking syscall can be retried
-        # with a shorter timeout. Waking under the lock, with the registration
-        # still live, keeps the wake ahead of `shutdown!` closing the backend.
+        # with a shorter timeout. Waking under `time_lock`, with the
+        # registration still live, keeps the wake ahead of `shutdown!`
+        # closing the backend.
         _maybe_wake_for_earlier_time!(state, new_earliest)
     finally
-        unlock(state.lock)
+        unlock(state.time_lock)
     end
     return nothing
 end
@@ -314,18 +343,18 @@ function schedule_timer!(timer::TimerState, deadline_ns::Int64)::Bool
     finally
         unlock(timer.lock)
     end
-    lock(state.lock)
+    lock(state.time_lock)
     try
         if @atomic :acquire state.running
             _time_push_locked!(state, entry::TimeEntry)
             new_earliest = entry.deadline_ns
             armed = true
-            # Under the lock with `running` set, `shutdown!` has not closed
+            # Under `time_lock` with `running` set, `shutdown!` has not closed
             # the backend yet.
             _maybe_wake_for_earlier_time!(state, new_earliest)
         end
     finally
-        unlock(state.lock)
+        unlock(state.time_lock)
     end
     if !armed
         lock(timer.lock)
@@ -351,14 +380,24 @@ Returns:
 - `0` when at least one time entry is already due and the backend should poll
   without blocking
 - a positive nanosecond timeout otherwise
+
+The heap is read through `time_min_ns`, without `time_lock`, so the poller
+never waits behind deadline updates (see the wake coalescing contract above).
+A stale top entry, such as a closed timer, is dropped by
+`_drain_expired_time_entries!` once it comes due, as Go's `timers.check`
+leaves zombie timers until they reach the top.
 """
 function _poll_delay_ns(state::Poller; now_ns::Int64=Int64(time_ns()))::Int64
     deadline_ns = Int64(0)
     lock(state.lock)
     try
-        entry = _time_peek_locked(state)
-        deadline_ns = entry === nothing ? Int64(0) : entry.deadline_ns
-        @atomic :release state.poll_until_ns = deadline_ns
+        deadline_ns = @atomic state.time_min_ns
+        while true
+            @atomic state.poll_until_ns = deadline_ns
+            current_ns = @atomic state.time_min_ns
+            current_ns == deadline_ns && break
+            deadline_ns = current_ns
+        end
     finally
         unlock(state.lock)
     end
@@ -442,14 +481,17 @@ sandbox.
 """
 function _drain_expired_time_entries!(state::Poller, now_ns::Int64)
     while true
+        # Nothing is due: leave `time_lock` to deadline updates.
+        head_ns = @atomic :acquire state.time_min_ns
+        (head_ns == 0 || head_ns > now_ns) && return nothing
         local entry::TimeEntry
-        lock(state.lock)
+        lock(state.time_lock)
         try
             head = _time_peek_locked(state)
             (head === nothing || head.deadline_ns > now_ns) && return nothing
             entry = _time_pop_locked!(state)
         finally
-            unlock(state.lock)
+            unlock(state.time_lock)
         end
         _fire_time_entry!(entry)
     end

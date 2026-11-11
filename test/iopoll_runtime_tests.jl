@@ -313,6 +313,7 @@ end
                 registration = NP.Registration(fd0, token, NP.PollMode.READWRITE, NP.PollWaiter(), NP.PollWaiter(), false)
                 state.registrations[fd0] = registration
                 state.registrations_by_token[token] = registration
+                @atomic :release registration.pollstate.registration = registration
                 @atomic :release state.poll_until_ns = _EL_FAR_FUTURE_NS
                 deadline_ns = _EL_FAR_FUTURE_NS - Int64(20_000_000)
                 @atomic :release registration.pollstate.rd_ns = deadline_ns
@@ -472,7 +473,7 @@ end
                 @atomic :release pd.wseq = UInt64(5)
                 NP.schedule_deadlines!(pd, _EL_FAR_FUTURE_NS, _EL_FAR_FUTURE_NS, UInt64(3), UInt64(5))
                 state = NP.POLLER[]
-                entry = lock(state.lock) do
+                entry = lock(state.time_lock) do
                     state.time_heap[pd.read_timer_index]
                 end
                 # Tokens can repeat after poller restart, so object identity
@@ -491,7 +492,7 @@ end
                     @test NP.current_registration(pd) === registration
                     @test (@atomic pd.rd_ns) == (@atomic pd.wd_ns) == _EL_FAR_FUTURE_NS
                     @test (@atomic stale_pd.rd_ns) == (@atomic stale_pd.wd_ns) == _EL_FAR_FUTURE_NS
-                    lock(state.lock) do
+                    lock(state.time_lock) do
                         @test pd.read_timer_index == pd.write_timer_index != 0
                         @test state.time_heap[pd.read_timer_index] === entry
                         @test count(e -> e.pollstate === pd, state.time_heap) == 1
@@ -618,11 +619,11 @@ end
                 @atomic :release timer.deadline_ns = now + offset
                 seq = @atomic timer.seq += UInt64(1)
                 entry = NP._timer_entry(now + offset, timer, seq)
-                lock(state.lock)
+                lock(state.time_lock)
                 try
                     NP._time_push_locked!(state, entry)
                 finally
-                    unlock(state.lock)
+                    unlock(state.time_lock)
                 end
             end
             NP._drain_expired_time_entries!(state, now)
@@ -640,7 +641,7 @@ end
                 @atomic :release timer.waiter.state = nothing
                 @atomic :release timer.deadline_ns = now - Int64(1)
                 seq = @atomic timer.seq += UInt64(1)
-                lock(state.lock) do
+                lock(state.time_lock) do
                     NP._time_push_locked!(state, NP._timer_entry(now - Int64(1), timer, seq))
                 end
             end

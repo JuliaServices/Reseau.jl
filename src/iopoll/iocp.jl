@@ -1120,7 +1120,7 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
         # `_backend_close_fd!` on Julia threads under `state.lock`; reading the
         # Dict here unlocked would race a rehash. Taking `state.lock` on the
         # poller thread cannot deadlock: every path that holds it (submit,
-        # finish, cancel, register/deregister, heap updates) only performs
+        # finish, cancel, register/deregister) only performs
         # bounded non-blocking work and never waits for poller progress while
         # holding the lock. The critical section below is brief and
         # allocation-free.

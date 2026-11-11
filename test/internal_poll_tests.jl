@@ -338,13 +338,13 @@ end
                 state = IP.POLLER[]
                 future_deadline = _IP_FAR_FUTURE_NS
                 IP.set_deadline!(ipfd, future_deadline)
-                lock(state.lock)
+                lock(state.time_lock)
                 try
                     entries = filter(x -> x.kind == IP.TimeEntryKind.DEADLINE && (x.pollstate::IP.PollState).token == ipfd.pd.token, state.time_heap)
                     @test length(entries) == 1
                     @test entries[1].mode == IP.PollMode.READWRITE
                 finally
-                    unlock(state.lock)
+                    unlock(state.time_lock)
                 end
                 IP.set_deadline!(ipfd, _IP_FAR_FUTURE_NS - Int64(1))
                 rseq = @atomic :acquire ipfd.pd.rseq
