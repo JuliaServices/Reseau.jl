@@ -876,6 +876,9 @@ function _openssl_error_message()::String
     end
     nul = findfirst(==(0x00), buf)
     msg_len = nul === nothing ? length(buf) : (nul - 1)
+    # A failure can queue several errors; drop the rest so the next failure on this
+    # thread reports its own reason.
+    ccall((:ERR_clear_error, _LIBCRYPTO_PATH), Cvoid, ())
     return String(buf[1:msg_len])
 end
 

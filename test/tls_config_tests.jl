@@ -432,6 +432,15 @@ end
             IP.shutdown!()
         end
         @test_throws TL.ConfigError TL.Config(TL.Config(); key_passphrase = "ab\0c")
+
+        # A failed load reports its own OpenSSL reason, not one an earlier failure left queued.
+        garbage = Vector{UInt8}("-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n")
+        garbage_error() = sprint(showerror, try TL._tls13_load_private_key_pem(garbage) catch err; err end)
+        garbage_error()
+        clean = garbage_error()
+        encrypted_pem = read(encrypted[1])
+        @test_throws TL.TLSError TL._tls13_load_private_key_pem(encrypted_pem, "wrong passphrase")
+        @test garbage_error() == clean
     end
 
     @testset "version helpers and connect config inference" begin
