@@ -290,9 +290,11 @@ Keyword arguments:
 - `client_auth`: server-side client certificate policy.
 - `cert_file` / `key_file`: PEM-encoded certificate chain and private key. Servers must
   provide both; clients may provide both for mutual TLS.
+- `key_passphrase`: An encrypted `key_file` needs its passphrase, without it reading the key file fails. The passphrase
+  cannot contain embedded null characters.
 - `ca_file`: CA bundle or CA directory used to verify remote servers.
 - `ca_dir`: additional CA directory used together with `ca_file`. Each explicit source
-  must contain usable PEM certificates. If both are omitted, client verification uses
+  must contain usable PEM certificates. If both are omitted, client verificatiosn uses
   `NetworkOptions.ca_roots_path()`. An explicit source replaces that default.
 - `client_ca_file` / `client_ca_dir`: CA bundle or directory, and optional additional
   directory, used by servers to verify client certificates. At least one is required
@@ -384,11 +386,13 @@ end
 @inline function _check_config_settings!(
         cert_file::Union{Nothing, String},
         key_file::Union{Nothing, String},
+        key_passphrase::Union{Nothing, String},
         handshake_timeout_ns::Int64,
         min_version::Union{Nothing, UInt16},
         max_version::Union{Nothing, UInt16},
     )
     (cert_file === nothing) == (key_file === nothing) || throw(ConfigError("both `cert_file` and `key_file` must be set together"))
+    key_passphrase !== nothing && findfirst('\0', key_passphrase) !== nothing && throw(ConfigError("`key_passphrase` cannot contain null characters"))
     handshake_timeout_ns < 0 && throw(ConfigError("handshake_timeout_ns must be >= 0"))
     min_version !== nothing && _require_supported_tls_version!("min_version", min_version::UInt16)
     max_version !== nothing && _require_supported_tls_version!("max_version", max_version::UInt16)
@@ -421,7 +425,7 @@ function Config(
     )
     server_name_s, cert_file_s, key_file_s, key_passphrase_s, ca_file_s, client_ca_file_s =
         _config_owned_paths(server_name, cert_file, key_file, key_passphrase, ca_file, client_ca_file)
-    _check_config_settings!(cert_file_s, key_file_s, Int64(handshake_timeout_ns), min_version, max_version)
+    _check_config_settings!(cert_file_s, key_file_s, key_passphrase_s, Int64(handshake_timeout_ns), min_version, max_version)
     return Config(
         server_name_s,
         verify_peer,
@@ -528,7 +532,7 @@ end
     same_identity = cert_file === cfg.cert_file && key_file === cfg.key_file
     cert_file_s = cert_file === nothing ? nothing : abspath(cert_file)
     key_file_s = key_file === nothing ? nothing : abspath(key_file)
-    _check_config_settings!(cert_file_s, key_file_s, handshake_timeout_ns, min_version, max_version)
+    _check_config_settings!(cert_file_s, key_file_s, key_passphrase, handshake_timeout_ns, min_version, max_version)
     client_identity = same_identity ? cfg._client_identity : _TLSLocalIdentityState()
     server_identity = same_identity ? cfg._server_identity : _TLSLocalIdentityState()
     return Config(
@@ -614,6 +618,25 @@ function Config(
         nothing,
         nothing,
     )
+end
+
+
+function Base.show(io::IO, config::Config)
+    print(io, "TLS.Config(")
+    fnames = fieldnames(typeof(config))
+    for fname in fnames
+        val = getfield(config, fname)
+        if fname == :key_passphrase && val != nothing
+            # Don't show passphrase
+            val = "***"
+        end
+        print(io, val)
+        if fname != fnames[end]
+            print(io, ", ")
+        end
+    end
+    print(io, ")")
+    return nothing
 end
 
 const _NATIVE_DEFAULT_CURVE_PREFERENCES = (

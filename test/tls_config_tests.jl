@@ -305,8 +305,10 @@ end
         @test TL._tls13_client_hello(disabled_ticket_cfg).scts
         @test !TL._tls_auto_client_hello(disabled_ticket_cfg).ocsp_stapling
         @test !TL._tls_auto_client_hello(disabled_ticket_cfg).scts
+        @test occursin("abc1234", sprint(show, TL.Config(key_passphrase="abc1234"))) == false
         @test_throws TL.ConfigError TL.Config(cert_file = _TLS_CERT_PATH)
         @test_throws TL.ConfigError TL.Config(key_file = _TLS_KEY_PATH)
+        @test_throws TL.ConfigError TL.Config(key_passphrase="ab\0c")
         @test_throws TL.ConfigError TL.Config(handshake_timeout_ns = -1)
         @test_throws TL.ConfigError TL.Config(server_name = "localhost", verify_peer = false, min_version = UInt16(0x0301))
         @test_throws TL.ConfigError TL.Config(server_name = "localhost", verify_peer = false, max_version = UInt16(0x0302))
