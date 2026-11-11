@@ -291,8 +291,11 @@ Keyword arguments:
 - `client_auth`: server-side client certificate policy.
 - `cert_file` / `key_file`: PEM-encoded certificate chain and private key. Servers must
   provide both; clients may provide both for mutual TLS.
-- `key_passphrase`: An encrypted `key_file` needs its passphrase, without it reading the key file fails. The passphrase
-  cannot contain embedded null characters.
+- `key_passphrase`: passphrase for an encrypted `key_file`. It cannot contain null
+  characters, and an unencrypted key ignores it. The key is loaded at the first handshake
+  that needs it, not by `Config` or `listen`, so a server with a wrong or missing
+  passphrase still listens and each handshake throws `TLSError`. A client loads its key
+  only when the server asks for a certificate.
 - `ca_file`: CA bundle or CA directory used to verify remote servers.
 - `ca_dir`: additional CA directory used together with `ca_file`. Each explicit source
   must contain usable PEM certificates. If both are omitted, client verification uses
@@ -525,6 +528,9 @@ end
         max_version::Union{Nothing, UInt16} = cfg.max_version,
         session_tickets_disabled::Bool = cfg.session_tickets_disabled,
     )
+    # Identity state loads lazily and does not record which cert, key and passphrase it
+    # came from, so a copy that changes any of them starts empty instead of using the
+    # other config's key. `===` compares String contents, so an equal value still shares.
     same_identity = cert_file === cfg.cert_file && key_file === cfg.key_file &&
         key_passphrase === cfg.key_passphrase
     cert_file_s = cert_file === nothing ? nothing : abspath(cert_file)
