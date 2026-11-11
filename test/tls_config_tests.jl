@@ -418,6 +418,16 @@ end
             right = TL.Config(wrong; key_passphrase = passphrase)
             @test server_handshake(right) == (server = :ok, client = :ok)
             @test server_handshake(wrong).server isa TL.TLSError
+
+            # After a handshake the config holds a session-ticket key; `show` prints neither it
+            # nor the passphrase.
+            served = server_config(uncached_copy(encrypted[1]), passphrase)
+            @test server_handshake(served) == (server = :ok, client = :ok)
+            ticket_keys = served._session_ticket_keys.keys
+            @test !isempty(ticket_keys)
+            shown = sprint(show, MIME"text/plain"(), served)
+            @test !occursin(passphrase, shown)
+            @test !occursin(join(repr.(ticket_keys[1].secret), ", "), shown)
         finally
             IP.shutdown!()
         end

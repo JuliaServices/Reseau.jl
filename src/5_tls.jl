@@ -617,20 +617,15 @@ function Config(
     )
 end
 
-
 function Base.show(io::IO, config::Config)
     print(io, "TLS.Config(")
-    fnames = fieldnames(typeof(config))
-    for fname in fnames
-        val = getfield(config, fname)
-        if fname == :key_passphrase && val != nothing
-            # Don't show passphrase
-            val = "***"
-        end
-        print(io, val)
-        if fname != fnames[end]
-            print(io, ", ")
-        end
+    sep = ""
+    for name in fieldnames(Config)
+        startswith(String(name), "_") && continue
+        value = getfield(config, name)
+        print(io, sep, name, " = ")
+        name === :key_passphrase && value !== nothing ? print(io, "\"***\"") : show(io, value)
+        sep = ", "
     end
     print(io, ")")
     return nothing
