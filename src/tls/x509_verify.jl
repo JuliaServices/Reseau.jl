@@ -807,6 +807,8 @@ function _tls13_load_x509_pem(cert_pem::AbstractVector{UInt8})::Ptr{Cvoid}
     bio = Ptr{Cvoid}(C_NULL)
     try
         return GC.@preserve cert_bytes begin
+            # Drop errors earlier code left on this thread, so a failure reports its own reason.
+            ccall((:ERR_clear_error, _LIBCRYPTO_PATH), Cvoid, ())
             bio = ccall(
                 (:BIO_new_mem_buf, _LIBCRYPTO_PATH),
                 Ptr{Cvoid},

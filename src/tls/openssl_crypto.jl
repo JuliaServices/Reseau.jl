@@ -456,12 +456,13 @@ function _tls13_rsa_pss_params(md_name::String)::_TLS13RSAPSSParams
     return _TLS13RSAPSSParams(pad_mode, mgf1_digest, saltlen, params)
 end
 
-
 function _tls13_load_private_key_pem(key_pem::AbstractVector{UInt8}, passphrase::Union{Nothing,AbstractString}=nothing)::Ptr{Cvoid}
     key_bytes = Vector{UInt8}(key_pem)
     bio = Ptr{Cvoid}(C_NULL)
     try
         return GC.@preserve key_bytes begin
+            # Drop errors earlier code left on this thread, so a failure reports its own reason.
+            ccall((:ERR_clear_error, _LIBCRYPTO_PATH), Cvoid, ())
             bio = ccall(
                 (:BIO_new_mem_buf, _LIBCRYPTO_PATH),
                 Ptr{Cvoid},

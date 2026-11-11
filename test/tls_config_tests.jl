@@ -441,6 +441,14 @@ end
         encrypted_pem = read(encrypted[1])
         @test_throws TL.TLSError TL._tls13_load_private_key_pem(encrypted_pem, "wrong passphrase")
         @test garbage_error() == clean
+
+        queued_error() = ccall((:ERR_peek_error, TL._LIBCRYPTO_PATH), Culong, ())
+        another_library_fails() = ccall((:BIO_new_file, TL._LIBCRYPTO_PATH), Ptr{Cvoid}, (Cstring, Cstring), joinpath(mktempdir(), "missing.pem"), "r")
+        @test another_library_fails() == C_NULL
+        @test queued_error() != 0
+        reported = try TL._tls13_load_private_key_pem(encrypted_pem, "wrong passphrase") catch err; err end
+        @test reported isa TL.TLSError
+        @test occursin("bad decrypt", reported.message)
     end
 
     @testset "version helpers and connect config inference" begin
