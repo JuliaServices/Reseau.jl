@@ -147,13 +147,14 @@ end
 struct _TLSLocalIdentityCacheKey
     cert_file::String
     key_file::String
+    key_passphrase::Union{Nothing, String}
 end
 
 @inline Base.:(==)(a::_TLSLocalIdentityCacheKey, b::_TLSLocalIdentityCacheKey) =
-    a.cert_file == b.cert_file && a.key_file == b.key_file
+    a.cert_file == b.cert_file && a.key_file == b.key_file && a.key_passphrase == b.key_passphrase
 
 @inline Base.hash(key::_TLSLocalIdentityCacheKey, h::UInt) =
-    hash(key.key_file, hash(key.cert_file, h))
+    hash(key.key_passphrase, hash(key.key_file, hash(key.cert_file, h)))
 
 struct _TLSLocalIdentityCacheEntry
     fingerprint::_TLSLocalIdentityFingerprint
@@ -189,8 +190,8 @@ end
     return _TLSLocalIdentityCacheEntry(entry.fingerprint, entry.certificate_chain, _up_ref_evp_pkey!(entry.private_key))
 end
 
-@inline function _tls_local_identity_cache_key(cert_file::String, key_file::String)::_TLSLocalIdentityCacheKey
-    return _TLSLocalIdentityCacheKey(cert_file, key_file)
+@inline function _tls_local_identity_cache_key(cert_file::String, key_file::String, key_passphrase::Union{Nothing, String})::_TLSLocalIdentityCacheKey
+    return _TLSLocalIdentityCacheKey(cert_file, key_file, key_passphrase)
 end
 
 function _tls_local_identity_fingerprint(cert_file::AbstractString, key_file::AbstractString)::_TLSLocalIdentityFingerprint
@@ -204,8 +205,8 @@ function _tls_local_identity_fingerprint(cert_file::AbstractString, key_file::Ab
     )
 end
 
-function _tls_cached_local_identity(cert_file::AbstractString, key_file::AbstractString, key_passphrase::Union{Nothing,AbstractString}=nothing)::_TLSLocalIdentityCacheEntry
-    cache_key = _tls_local_identity_cache_key(cert_file, key_file)
+function _tls_cached_local_identity(cert_file::AbstractString, key_file::AbstractString, key_passphrase::Union{Nothing, String} = nothing)::_TLSLocalIdentityCacheEntry
+    cache_key = _tls_local_identity_cache_key(cert_file, key_file, key_passphrase)
     fingerprint = _tls_local_identity_fingerprint(cert_file, key_file)
     lock(_TLS_LOCAL_IDENTITY_CACHE_LOCK)
     try
@@ -294,7 +295,7 @@ Keyword arguments:
   cannot contain embedded null characters.
 - `ca_file`: CA bundle or CA directory used to verify remote servers.
 - `ca_dir`: additional CA directory used together with `ca_file`. Each explicit source
-  must contain usable PEM certificates. If both are omitted, client verificatiosn uses
+  must contain usable PEM certificates. If both are omitted, client verification uses
   `NetworkOptions.ca_roots_path()`. An explicit source replaces that default.
 - `client_ca_file` / `client_ca_dir`: CA bundle or directory, and optional additional
   directory, used by servers to verify client certificates. At least one is required
@@ -312,11 +313,11 @@ Keyword arguments:
 Copy an existing config with `Config(cfg::Config; kwargs...)`, passing only the settings
 above that should change. The copy shares `cfg`'s session caches, session-ticket keys,
 and loaded local identity, so a per-connection copy that only sets `server_name` or
-`handshake_timeout_ns` keeps resuming sessions; changing `cert_file` or `key_file` gives
-the copy its own identity state. Use this instead of rebuilding a `Config` field by
-field: the private fields and their order are not part of the API. The copy keywords
-take exactly the field types (`String` rather than any `AbstractString`), which keeps a
-copy built from another config's fields resolvable under `--trim`.
+`handshake_timeout_ns` keeps resuming sessions; changing `cert_file`, `key_file`, or
+`key_passphrase` gives the copy its own identity state. Use this instead of rebuilding a
+`Config` field by field: the private fields and their order are not part of the API. The
+copy keywords take exactly the field types (`String` rather than any `AbstractString`),
+which keeps a copy built from another config's fields resolvable under `--trim`.
 
 Returns a reusable immutable `Config`.
 
@@ -524,12 +525,8 @@ end
         max_version::Union{Nothing, UInt16} = cfg.max_version,
         session_tickets_disabled::Bool = cfg.session_tickets_disabled,
     )
-    # An untouched credential keyword is the very object stored in `cfg`. The loaded
-    # identity is filled lazily from `cert_file`/`key_file` and does not record which
-    # files it came from, so only a copy with the same credential objects may share it;
-    # any other copy starts from empty identity state. Session caches and ticket keys
-    # are keyed by peer and stay shared, which keeps per-connection copies resuming.
-    same_identity = cert_file === cfg.cert_file && key_file === cfg.key_file
+    same_identity = cert_file === cfg.cert_file && key_file === cfg.key_file &&
+        key_passphrase === cfg.key_passphrase
     cert_file_s = cert_file === nothing ? nothing : abspath(cert_file)
     key_file_s = key_file === nothing ? nothing : abspath(key_file)
     _check_config_settings!(cert_file_s, key_file_s, key_passphrase, handshake_timeout_ns, min_version, max_version)

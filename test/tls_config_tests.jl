@@ -409,6 +409,15 @@ end
             end
             @test server_handshake(server_config(uncached_copy(_TLS_NATIVE_SERVER_KEY_PATH), passphrase)) == (server = :ok, client = :ok)
 
+            # A loaded identity never answers for a different passphrase.
+            key_file = uncached_copy(encrypted[1])
+            @test server_handshake(server_config(key_file, passphrase)) == (server = :ok, client = :ok)
+            @test server_handshake(server_config(key_file, "wrong passphrase")).server isa TL.TLSError
+            @test server_handshake(server_config(key_file, nothing)).server isa TL.TLSError
+            wrong = server_config(uncached_copy(encrypted[1]), "wrong passphrase")
+            right = TL.Config(wrong; key_passphrase = passphrase)
+            @test server_handshake(right) == (server = :ok, client = :ok)
+            @test server_handshake(wrong).server isa TL.TLSError
         finally
             IP.shutdown!()
         end
