@@ -422,6 +422,75 @@ end
 end
 end
 
+@testset "resolver helpers preserve caller scheduling" begin
+    spawn_default(f) = Threads.@spawn f()
+    spawn_interactive(f) = Threads.@spawn :interactive f()
+    for spawn in (spawn_default, spawn_interactive)
+        for sticky in (false, true)
+            result = fetch(spawn(() -> begin
+                current_task().sticky = sticky
+                helper = ND._spawn_task_body(() -> (current_task().sticky, Threads.threadpool()))
+                (current_task().sticky, Threads.threadpool(), fetch(helper))
+            end))
+            @test result[1] === sticky
+            @test result[3] == (false, result[2])
+        end
+
+        listener = NC.listen(NC.loopback_addr(0))
+        port = Int((NC.addr(listener)::NC.SocketAddrV4).port)
+        accept_task = Threads.@spawn begin
+            for _ in 1:2
+                close(NC.accept(listener))
+            end
+        end
+        try
+            for host in ("127.0.0.1", "localhost")
+                @test fetch(spawn(() -> begin
+                    close(NC.connect("tcp", "$host:$port"; timeout_ns = 10_000_000_000))
+                    current_task().sticky
+                end)) === false
+            end
+            wait(accept_task)
+        finally
+            close(listener)
+        end
+
+        for cause in (ND.LookupError("lookup failed", "failure.test"), InterruptException())
+            err, sticky = fetch(spawn(() -> begin
+                err = try
+                    NC.connect("tcp", "failure.test:80";
+                        timeout_ns = 10_000_000_000, resolver = _ErrorResolver(cause))
+                catch ex
+                    ex
+                end
+                (err, current_task().sticky)
+            end))
+            @test cause isa InterruptException ? err === cause : err isa ND.OpError && err.err === cause
+            @test sticky === false
+        end
+
+        started = Channel{Nothing}(1)
+        release = Channel{Nothing}(1)
+        resolver = _BlockingResolver(started, release, NC.SocketEndpoint[NC.loopback_addr(1)])
+        dialer = spawn(() -> begin
+            err = try
+                NC.connect("tcp", "blocked.test:80"; resolver, timeout_ns = 50_000_000)
+            catch ex
+                ex
+            end
+            (err, current_task().sticky)
+        end)
+        try
+            take!(started)
+            err, sticky = fetch(dialer)
+            @test err isa ND.OpError && err.err isa ND.DialTimeoutError
+            @test sticky === false
+        finally
+            put!(release, nothing)
+        end
+    end
+end
+
 @testset "HostResolvers phase 5" begin
         @testset "host-port parser and joiner" begin
             host, port = ND.split_host_port("127.0.0.1:8080")
@@ -1438,41 +1507,26 @@ end
         end
     end
 
-@static if !Sys.iswindows()
-@testset "an interrupt stops a dial instead of moving to the next address" begin
-    SO = Reseau.SocketOps
-    # A listener whose accept queue is full leaves later connects pending.
-    blocked = NC.listen(NC.loopback_addr(0); backlog = 1)
-    port = Int((NC.addr(blocked)::NC.SocketAddrV4).port)
-    fillers = [SO.open_socket(SO.AF_INET, SO.SOCK_STREAM) for _ in 1:8]
-    try
-        for fd in fillers
-            SO.set_nonblocking!(fd, true)
-            SO.connect_socket(fd, SO.sockaddr_in_loopback(port))
+@testset "serial dialing retries address failures but stops on interruption" begin
+    addrs = NC.SocketAddrV4[NC.loopback_addr(10001), NC.loopback_addr(10002)]
+    dialer = ND.HostResolver(fallback_delay_ns = -1)
+    for cause in (SystemError("connect", Int(Base.Libc.ECONNREFUSED)), InterruptException())
+        attempts = NC.SocketAddrV4[]
+        dial_once = function (remote_addr, local_addr, deadline_ns, state, network)
+            push!(attempts, remote_addr)
+            throw(cause)
         end
-        # Two candidates, both pending: an interrupt during the first dial
-        # must end the dial rather than start the second.
-        resolver = ND.StaticResolver(hosts = Dict("pending.test" => NC.SocketEndpoint[NC.loopback_addr(0), NC.loopback_addr(0)]))
-        d = ND.HostResolver(resolver = resolver, timeout_ns = 20_000_000_000, fallback_delay_ns = -1)
-        registrations() = length(IP.POLLER[].registrations)
-        before = registrations()
-        dialer = @async try
-            NC.connect(d, "tcp", "pending.test:$(port)")
+        result = try
+            ND._resolve_serial(dialer, "tcp", "test:10001", :tcp, addrs, Int64(0), ND.DNSRaceState(), dial_once)
         catch err
             err
         end
-        # The dialer runs on this thread, so once its socket is registered it
-        # has parked waiting for the connect to complete.
-        while registrations() == before && !istaskdone(dialer)
-            yield()
+        if cause isa InterruptException
+            @test result === cause
+            @test attempts == addrs[1:1]
+        else
+            @test result === (nothing, cause)
+            @test attempts == addrs
         end
-        istaskdone(dialer) || schedule(dialer, InterruptException(); error = true)
-        result = fetch(dialer)
-        result isa NC.Conn && close(result)
-        @test result isa InterruptException
-    finally
-        foreach(SO.close_socket_nothrow, fillers)
-        close(blocked)
     end
-end
 end

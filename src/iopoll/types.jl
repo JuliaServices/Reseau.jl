@@ -91,12 +91,9 @@ mutable struct PollWaiter
     end
 end
 
-# Tear-down for a waiter that is leaving `pollwait!` exceptionally
-# (`schedule(task, exc; error=true)`); reclaims the slot so the waiter stays
-# reusable. If a notifier committed a wake token concurrently with the
-# interrupt, the token is consumed here: the interrupting error-schedule either
-# stole that notifier's queue slot or the notifier's `schedule` was absorbed by
-# `_pollwake_schedule!`'s not-runnable guard.
+# Exception cleanup reclaims the slot so the waiter stays reusable. This does
+# not cancel a notifier's in-flight `schedule`: externally error-scheduling a
+# task must not race a notifier that owns its wake.
 function _abort_pollwait!(waiter::PollWaiter, task::Task)
     while true
         state = @atomic :acquire waiter.state
@@ -118,10 +115,9 @@ function _pollwake_schedule!(task::Task)::Bool
         return true
     catch err
         err isa ErrorException || rethrow()
-        # The parked task was interrupted (`schedule(task, exc; error=true)`)
-        # between our token commit and this wake, and the interrupt owns the
-        # task's queue slot. The interrupt wake subsumes ours;
-        # `_abort_pollwait!` consumes the committed token.
+        # An interrupted task may already be queued or finished. A task still
+        # running after an interrupt is also "runnable", so this guard cannot
+        # make an arbitrary concurrent error-schedule safe.
         return false
     end
 end
