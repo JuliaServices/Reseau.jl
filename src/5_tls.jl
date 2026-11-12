@@ -147,13 +147,14 @@ end
 struct _TLSLocalIdentityCacheKey
     cert_file::String
     key_file::String
+    key_passphrase::Union{Nothing, String}
 end
 
 @inline Base.:(==)(a::_TLSLocalIdentityCacheKey, b::_TLSLocalIdentityCacheKey) =
-    a.cert_file == b.cert_file && a.key_file == b.key_file
+    a.cert_file == b.cert_file && a.key_file == b.key_file && a.key_passphrase == b.key_passphrase
 
 @inline Base.hash(key::_TLSLocalIdentityCacheKey, h::UInt) =
-    hash(key.key_file, hash(key.cert_file, h))
+    hash(key.key_passphrase, hash(key.key_file, hash(key.cert_file, h)))
 
 struct _TLSLocalIdentityCacheEntry
     fingerprint::_TLSLocalIdentityFingerprint
@@ -189,8 +190,8 @@ end
     return _TLSLocalIdentityCacheEntry(entry.fingerprint, entry.certificate_chain, _up_ref_evp_pkey!(entry.private_key))
 end
 
-@inline function _tls_local_identity_cache_key(cert_file::String, key_file::String)::_TLSLocalIdentityCacheKey
-    return _TLSLocalIdentityCacheKey(cert_file, key_file)
+@inline function _tls_local_identity_cache_key(cert_file::String, key_file::String, key_passphrase::Union{Nothing, String})::_TLSLocalIdentityCacheKey
+    return _TLSLocalIdentityCacheKey(cert_file, key_file, key_passphrase)
 end
 
 function _tls_local_identity_fingerprint(cert_file::AbstractString, key_file::AbstractString)::_TLSLocalIdentityFingerprint
@@ -204,8 +205,8 @@ function _tls_local_identity_fingerprint(cert_file::AbstractString, key_file::Ab
     )
 end
 
-function _tls_cached_local_identity(cert_file::AbstractString, key_file::AbstractString, key_passphrase::Union{Nothing,AbstractString}=nothing)::_TLSLocalIdentityCacheEntry
-    cache_key = _tls_local_identity_cache_key(cert_file, key_file)
+function _tls_cached_local_identity(cert_file::AbstractString, key_file::AbstractString, key_passphrase::Union{Nothing, String} = nothing)::_TLSLocalIdentityCacheEntry
+    cache_key = _tls_local_identity_cache_key(cert_file, key_file, key_passphrase)
     fingerprint = _tls_local_identity_fingerprint(cert_file, key_file)
     lock(_TLS_LOCAL_IDENTITY_CACHE_LOCK)
     try
@@ -290,11 +291,14 @@ Keyword arguments:
 - `client_auth`: server-side client certificate policy.
 - `cert_file` / `key_file`: PEM-encoded certificate chain and private key. Servers must
   provide both; clients may provide both for mutual TLS.
-- `key_passphrase`: An encrypted `key_file` needs its passphrase, without it reading the key file fails. The passphrase
-  cannot contain embedded null characters.
+- `key_passphrase`: passphrase for an encrypted `key_file`. It cannot contain null
+  characters, and an unencrypted key ignores it. The key is loaded at the first handshake
+  that needs it, not by `Config` or `listen`, so a server with a wrong or missing
+  passphrase still listens and each handshake throws `TLSError`. A client loads its key
+  only when the server asks for a certificate.
 - `ca_file`: CA bundle or CA directory used to verify remote servers.
 - `ca_dir`: additional CA directory used together with `ca_file`. Each explicit source
-  must contain usable PEM certificates. If both are omitted, client verificatiosn uses
+  must contain usable PEM certificates. If both are omitted, client verification uses
   `NetworkOptions.ca_roots_path()`. An explicit source replaces that default.
 - `client_ca_file` / `client_ca_dir`: CA bundle or directory, and optional additional
   directory, used by servers to verify client certificates. At least one is required
@@ -312,11 +316,11 @@ Keyword arguments:
 Copy an existing config with `Config(cfg::Config; kwargs...)`, passing only the settings
 above that should change. The copy shares `cfg`'s session caches, session-ticket keys,
 and loaded local identity, so a per-connection copy that only sets `server_name` or
-`handshake_timeout_ns` keeps resuming sessions; changing `cert_file` or `key_file` gives
-the copy its own identity state. Use this instead of rebuilding a `Config` field by
-field: the private fields and their order are not part of the API. The copy keywords
-take exactly the field types (`String` rather than any `AbstractString`), which keeps a
-copy built from another config's fields resolvable under `--trim`.
+`handshake_timeout_ns` keeps resuming sessions; changing `cert_file`, `key_file`, or
+`key_passphrase` gives the copy its own identity state. Use this instead of rebuilding a
+`Config` field by field: the private fields and their order are not part of the API. The
+copy keywords take exactly the field types (`String` rather than any `AbstractString`),
+which keeps a copy built from another config's fields resolvable under `--trim`.
 
 Returns a reusable immutable `Config`.
 
@@ -524,12 +528,11 @@ end
         max_version::Union{Nothing, UInt16} = cfg.max_version,
         session_tickets_disabled::Bool = cfg.session_tickets_disabled,
     )
-    # An untouched credential keyword is the very object stored in `cfg`. The loaded
-    # identity is filled lazily from `cert_file`/`key_file` and does not record which
-    # files it came from, so only a copy with the same credential objects may share it;
-    # any other copy starts from empty identity state. Session caches and ticket keys
-    # are keyed by peer and stay shared, which keeps per-connection copies resuming.
-    same_identity = cert_file === cfg.cert_file && key_file === cfg.key_file
+    # Identity state loads lazily and does not record which cert, key and passphrase it
+    # came from, so a copy that changes any of them starts empty instead of using the
+    # other config's key. `===` compares String contents, so an equal value still shares.
+    same_identity = cert_file === cfg.cert_file && key_file === cfg.key_file &&
+        key_passphrase === cfg.key_passphrase
     cert_file_s = cert_file === nothing ? nothing : abspath(cert_file)
     key_file_s = key_file === nothing ? nothing : abspath(key_file)
     _check_config_settings!(cert_file_s, key_file_s, key_passphrase, handshake_timeout_ns, min_version, max_version)
@@ -620,20 +623,15 @@ function Config(
     )
 end
 
-
 function Base.show(io::IO, config::Config)
     print(io, "TLS.Config(")
-    fnames = fieldnames(typeof(config))
-    for fname in fnames
-        val = getfield(config, fname)
-        if fname == :key_passphrase && val != nothing
-            # Don't show passphrase
-            val = "***"
-        end
-        print(io, val)
-        if fname != fnames[end]
-            print(io, ", ")
-        end
+    sep = ""
+    for name in fieldnames(Config)
+        startswith(String(name), "_") && continue
+        value = getfield(config, name)
+        print(io, sep, name, " = ")
+        name === :key_passphrase && value !== nothing ? print(io, "\"***\"") : show(io, value)
+        sep = ", "
     end
     print(io, ")")
     return nothing
@@ -884,6 +882,9 @@ function _openssl_error_message()::String
     end
     nul = findfirst(==(0x00), buf)
     msg_len = nul === nothing ? length(buf) : (nul - 1)
+    # A failure can queue several errors; drop the rest so the next failure on this
+    # thread reports its own reason.
+    ccall((:ERR_clear_error, _LIBCRYPTO_PATH), Cvoid, ())
     return String(buf[1:msg_len])
 end
 

@@ -361,6 +361,101 @@ end
         end
     end
 
+    @testset "encrypted key_file and key_passphrase" begin
+        passphrase = "reseau-test-passphrase"
+        encrypted = [joinpath(@__DIR__, "resources", "encrypted_server_key", name) for name in ("pkcs8.key", "legacy.key")]
+        uncached_copy(path) = (copied = joinpath(mktempdir(), basename(path)); cp(path, copied); copied)
+        server_config(key_file, key_passphrase) = TL.Config(
+            verify_peer = false,
+            cert_file = _TLS_NATIVE_SERVER_CERT_PATH,
+            key_file = key_file,
+            key_passphrase = key_passphrase,
+        )
+        function server_handshake(config::TL.Config)
+            listener = TL.listen("tcp", "127.0.0.1:0", config; backlog = 1)
+            client = nothing
+            try
+                port = Int((TL.addr(listener)::NC.SocketAddrV4).port)
+                server = errormonitor(Threads.@spawn begin
+                    conn = TL.accept(listener)
+                    try
+                        TL.handshake!(conn)
+                        :ok
+                    catch err
+                        err
+                    finally
+                        close(conn)
+                    end
+                end)
+                client = try
+                    _tls_connect("tcp", "127.0.0.1:$port", TL.Config(verify_peer = false, server_name = "localhost"))
+                catch err
+                    err
+                end
+                return (server = fetch(server), client = client isa TL.Conn ? :ok : client)
+            finally
+                _tls_close_quiet!(client)
+                _tls_close_quiet!(listener)
+            end
+        end
+
+        IP.shutdown!()
+        try
+            for key_file in encrypted
+                @test server_handshake(server_config(uncached_copy(key_file), passphrase)) == (server = :ok, client = :ok)
+                @test server_handshake(server_config(uncached_copy(key_file), "wrong passphrase")).server isa TL.TLSError
+                # With no passphrase the load fails; OpenSSL must not prompt on the terminal.
+                missing_passphrase = server_handshake(server_config(uncached_copy(key_file), nothing)).server
+                @test missing_passphrase isa TL.TLSError
+                @test occursin("key_passphrase", missing_passphrase.message)
+            end
+            @test server_handshake(server_config(uncached_copy(_TLS_NATIVE_SERVER_KEY_PATH), passphrase)) == (server = :ok, client = :ok)
+
+            # A loaded identity never answers for a different passphrase.
+            key_file = uncached_copy(encrypted[1])
+            @test server_handshake(server_config(key_file, passphrase)) == (server = :ok, client = :ok)
+            @test server_handshake(server_config(key_file, "wrong passphrase")).server isa TL.TLSError
+            @test server_handshake(server_config(key_file, nothing)).server isa TL.TLSError
+            wrong = server_config(uncached_copy(encrypted[1]), "wrong passphrase")
+            right = TL.Config(wrong; key_passphrase = passphrase)
+            @test server_handshake(right) == (server = :ok, client = :ok)
+            @test server_handshake(wrong).server isa TL.TLSError
+
+            # After a handshake the config holds a session-ticket key; `show` prints neither it
+            # nor the passphrase.
+            served = server_config(uncached_copy(encrypted[1]), passphrase)
+            @test server_handshake(served) == (server = :ok, client = :ok)
+            ticket_keys = served._session_ticket_keys.keys
+            @test !isempty(ticket_keys)
+            shown = sprint(show, MIME"text/plain"(), served)
+            @test !occursin(passphrase, shown)
+            @test !occursin(join(repr.(ticket_keys[1].secret), ", "), shown)
+        finally
+            IP.shutdown!()
+        end
+        @test_throws TL.ConfigError TL.Config(TL.Config(); key_passphrase = "ab\0c")
+
+        # A failed load reports its own OpenSSL reason, not one an earlier failure left queued.
+        garbage = Vector{UInt8}("-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n")
+        garbage_error() = sprint(showerror, try TL._tls13_load_private_key_pem(garbage) catch err; err end)
+        garbage_error()
+        clean = garbage_error()
+        encrypted_pem = read(encrypted[1])
+        @test_throws TL.TLSError TL._tls13_load_private_key_pem(encrypted_pem, "wrong passphrase")
+        @test garbage_error() == clean
+
+        queued_error() = ccall((:ERR_peek_error, TL._LIBCRYPTO_PATH), Culong, ())
+        another_library_fails() = ccall((:BIO_new_file, TL._LIBCRYPTO_PATH), Ptr{Cvoid}, (Cstring, Cstring), joinpath(mktempdir(), "missing.pem"), "r")
+        @test another_library_fails() == C_NULL
+        @test queued_error() != 0
+        reported = try TL._tls13_load_private_key_pem(encrypted_pem, "wrong passphrase") catch err; err end
+        @test reported isa TL.TLSError
+        @test occursin("bad decrypt", reported.message)
+
+        @test_throws TL.TLSError TL._tls13_load_private_key_pem(encrypted_pem)
+        @test queued_error() == 0
+    end
+
     @testset "version helpers and connect config inference" begin
         payload = UInt8[0x61, 0x62, 0x63]
         copied = TL._write_buffer(@view(payload[1:2:3]), 2)
