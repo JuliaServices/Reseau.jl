@@ -53,6 +53,14 @@ const SO_KEEPALIVE = @static Sys.islinux() ? Cint(0x0009) : Cint(0x0008)
 const TCP_NODELAY = Cint(0x01)
 const IPPROTO_IP = Cint(0)
 const IPPROTO_UDP = Cint(17)
+# Linux UDP generic segmentation offload (linux/udp.h): a `sendmsg` control
+# message of level SOL_UDP and type UDP_SEGMENT carries the segment size.
+const SOL_UDP = Cint(17)
+const UDP_SEGMENT = Cint(103)
+# Linux UDP generic receive offload: with this socket option set, `recvmsg`
+# may return a run of datagrams from one peer as one buffer, with a SOL_UDP
+# control message of this type carrying their size.
+const UDP_GRO = Cint(104)
 const SO_BROADCAST = @static Sys.islinux() ? Cint(0x0006) : Cint(0x0020)
 # No SO_REUSEPORT exists on Windows; the UDP layer rejects the option there.
 const SO_REUSEPORT = @static Sys.islinux() ? Cint(15) : Cint(0x0200)

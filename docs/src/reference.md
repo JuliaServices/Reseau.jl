@@ -21,6 +21,7 @@ Reseau.TCP
 Reseau.Unix
 Reseau.UDP
 Reseau.TLS
+Reseau.QUIC
 ```
 
 ## TCP
@@ -190,6 +191,57 @@ remote_addr
 net_conn
 connection_state
 addr
+```
+
+### QUIC
+
+```@docs
+QUICConn
+QUICEncryptionLevel
+QUICEventKind
+QUICEvent
+quic_client
+quic_server
+start!
+next_event!
+handle_data!
+set_transport_parameters!
+send_session_ticket!
+alert_code
+Base.close(::QUICConn)
+```
+
+## QUIC
+
+```@meta
+CurrentModule = Reseau.QUIC
+```
+
+```@docs
+connect
+listen
+accept
+Base.close(::Listener)
+local_addr
+remote_addr
+Connection
+Listener
+alpn_protocol
+open_stream
+accept_stream
+Base.close(::Connection)
+Stream
+stream_id
+isbidi
+Base.readbytes!(::Stream, ::AbstractVector{UInt8}, ::Integer)
+Base.closewrite(::Stream)
+reset_stream!
+stop_sending!
+set_read_deadline!
+set_write_deadline!
+ConnectionError
+StreamResetError
+StreamStoppedError
 ```
 
 ## Internal Support Layers

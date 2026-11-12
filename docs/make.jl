@@ -18,6 +18,7 @@ makedocs(
         "Unix Socket Clients" => "unix.md",
         "UDP" => "udp.md",
         "TLS" => "tls.md",
+        "QUIC" => "quic.md",
         "Name Resolution" => "resolution.md",
         "Sockets Migration Guide" => "migrate-sockets.md",
         "API Reference" => "reference.md",
