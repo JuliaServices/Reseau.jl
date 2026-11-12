@@ -29,6 +29,13 @@ struct _TLSKeyShareSecret
     secret::Vector{UInt8}
 end
 
+_no_passphrase(buf::Ptr{Cchar}, size::Cint, rwflag::Cint, u::Ptr{Cvoid})::Cint = Cint(-1)
+_no_passphrase_callback() = @cfunction(_no_passphrase, Cint, (Ptr{Cchar}, Cint, Cint, Ptr{Cvoid}))
+
+_pem_passphrase(::Nothing) = (_no_passphrase_callback(), Cstring(C_NULL))
+_pem_passphrase(passphrase::AbstractString) = (C_NULL, String(passphrase))
+
+
 function _init_x25519_pkey_id!()::Cint
     nid = _X25519_PKEY_ID[]
     nid > 0 && return nid
@@ -449,7 +456,8 @@ function _tls13_rsa_pss_params(md_name::String)::_TLS13RSAPSSParams
     return _TLS13RSAPSSParams(pad_mode, mgf1_digest, saltlen, params)
 end
 
-function _tls13_load_private_key_pem(key_pem::AbstractVector{UInt8})::Ptr{Cvoid}
+
+function _tls13_load_private_key_pem(key_pem::AbstractVector{UInt8}, passphrase::Union{Nothing,AbstractString}=nothing)::Ptr{Cvoid}
     key_bytes = Vector{UInt8}(key_pem)
     bio = Ptr{Cvoid}(C_NULL)
     try
@@ -462,14 +470,16 @@ function _tls13_load_private_key_pem(key_pem::AbstractVector{UInt8})::Ptr{Cvoid}
                 Cint(length(key_bytes)),
             )
             _openssl_require_nonnull(bio, "BIO_new_mem_buf")
+
+            callback, arg = _pem_passphrase(passphrase)
             pkey = ccall(
                 (:PEM_read_bio_PrivateKey, _LIBCRYPTO_PATH),
                 Ptr{Cvoid},
-                (Ptr{Cvoid}, Ptr{Ptr{Cvoid}}, Ptr{Cvoid}, Ptr{Cvoid}),
+                (Ptr{Cvoid}, Ptr{Ptr{Cvoid}}, Ptr{Cvoid}, Cstring),
                 bio,
                 C_NULL,
-                C_NULL,
-                C_NULL,
+                callback,
+                arg,
             )
             return _openssl_require_nonnull(pkey, "PEM_read_bio_PrivateKey")
         end

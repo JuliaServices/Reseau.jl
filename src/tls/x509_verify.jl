@@ -821,7 +821,7 @@ function _tls13_load_x509_pem(cert_pem::AbstractVector{UInt8})::Ptr{Cvoid}
                 (Ptr{Cvoid}, Ptr{Ptr{Cvoid}}, Ptr{Cvoid}, Ptr{Cvoid}),
                 bio,
                 C_NULL,
-                C_NULL,
+                _no_passphrase_callback(),
                 C_NULL,
             )
             return _openssl_require_nonnull(x509, "PEM_read_bio_X509")

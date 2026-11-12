@@ -204,7 +204,7 @@ function _tls_local_identity_fingerprint(cert_file::AbstractString, key_file::Ab
     )
 end
 
-function _tls_cached_local_identity(cert_file::AbstractString, key_file::AbstractString)::_TLSLocalIdentityCacheEntry
+function _tls_cached_local_identity(cert_file::AbstractString, key_file::AbstractString, key_passphrase::Union{Nothing,AbstractString}=nothing)::_TLSLocalIdentityCacheEntry
     cache_key = _tls_local_identity_cache_key(cert_file, key_file)
     fingerprint = _tls_local_identity_fingerprint(cert_file, key_file)
     lock(_TLS_LOCAL_IDENTITY_CACHE_LOCK)
@@ -225,7 +225,7 @@ function _tls_cached_local_identity(cert_file::AbstractString, key_file::Abstrac
     private_key = Ptr{Cvoid}(C_NULL)
     try
         certificate_chain = _tls13_load_x509_pem_chain(cert_pem)
-        private_key = _tls13_load_private_key_pem(key_pem)
+        private_key = _tls13_load_private_key_pem(key_pem, key_passphrase)
     finally
         _securezero!(key_pem)
     end
@@ -290,9 +290,11 @@ Keyword arguments:
 - `client_auth`: server-side client certificate policy.
 - `cert_file` / `key_file`: PEM-encoded certificate chain and private key. Servers must
   provide both; clients may provide both for mutual TLS.
+- `key_passphrase`: An encrypted `key_file` needs its passphrase, without it reading the key file fails. The passphrase
+  cannot contain embedded null characters.
 - `ca_file`: CA bundle or CA directory used to verify remote servers.
 - `ca_dir`: additional CA directory used together with `ca_file`. Each explicit source
-  must contain usable PEM certificates. If both are omitted, client verification uses
+  must contain usable PEM certificates. If both are omitted, client verificatiosn uses
   `NetworkOptions.ca_roots_path()`. An explicit source replaces that default.
 - `client_ca_file` / `client_ca_dir`: CA bundle or directory, and optional additional
   directory, used by servers to verify client certificates. At least one is required
@@ -327,6 +329,7 @@ struct Config
     client_auth::ClientAuthMode.T
     cert_file::Union{Nothing, String}
     key_file::Union{Nothing, String}
+    key_passphrase::Union{Nothing,String}
     ca_file::Union{Nothing, String}
     client_ca_file::Union{Nothing, String}
     alpn_protocols::Vector{String}
@@ -366,6 +369,7 @@ const _TLS_POLICY_AUTO = UInt8(3)
         server_name::Union{Nothing, AbstractString},
         cert_file::Union{Nothing, AbstractString},
         key_file::Union{Nothing, AbstractString},
+        key_passphrase::Union{Nothing, AbstractString},
         ca_file::Union{Nothing, AbstractString},
         client_ca_file::Union{Nothing, AbstractString},
     )
@@ -373,6 +377,7 @@ const _TLS_POLICY_AUTO = UInt8(3)
         server_name === nothing ? nothing : String(server_name),
         cert_file === nothing ? nothing : abspath(String(cert_file)),
         key_file === nothing ? nothing : abspath(String(key_file)),
+        key_passphrase === nothing ? nothing : String(key_passphrase),
         ca_file === nothing ? nothing : String(ca_file),
         client_ca_file === nothing ? nothing : String(client_ca_file),
     )
@@ -381,11 +386,13 @@ end
 @inline function _check_config_settings!(
         cert_file::Union{Nothing, String},
         key_file::Union{Nothing, String},
+        key_passphrase::Union{Nothing, String},
         handshake_timeout_ns::Int64,
         min_version::Union{Nothing, UInt16},
         max_version::Union{Nothing, UInt16},
     )
     (cert_file === nothing) == (key_file === nothing) || throw(ConfigError("both `cert_file` and `key_file` must be set together"))
+    key_passphrase !== nothing && findfirst('\0', key_passphrase) !== nothing && throw(ConfigError("`key_passphrase` cannot contain null characters"))
     handshake_timeout_ns < 0 && throw(ConfigError("handshake_timeout_ns must be >= 0"))
     min_version !== nothing && _require_supported_tls_version!("min_version", min_version::UInt16)
     max_version !== nothing && _require_supported_tls_version!("max_version", max_version::UInt16)
@@ -414,10 +421,11 @@ function Config(
         _verification_time_s::Union{Nothing, Int64} = nothing,
         ca_dir::Union{Nothing, AbstractString} = nothing,
         client_ca_dir::Union{Nothing, AbstractString} = nothing,
+        key_passphrase::Union{Nothing, AbstractString} = nothing,
     )
-    server_name_s, cert_file_s, key_file_s, ca_file_s, client_ca_file_s =
-        _config_owned_paths(server_name, cert_file, key_file, ca_file, client_ca_file)
-    _check_config_settings!(cert_file_s, key_file_s, Int64(handshake_timeout_ns), min_version, max_version)
+    server_name_s, cert_file_s, key_file_s, key_passphrase_s, ca_file_s, client_ca_file_s =
+        _config_owned_paths(server_name, cert_file, key_file, key_passphrase, ca_file, client_ca_file)
+    _check_config_settings!(cert_file_s, key_file_s, key_passphrase_s, Int64(handshake_timeout_ns), min_version, max_version)
     return Config(
         server_name_s,
         verify_peer,
@@ -425,6 +433,7 @@ function Config(
         client_auth,
         cert_file_s,
         key_file_s,
+        key_passphrase_s,
         ca_file_s,
         client_ca_file_s,
         copy(alpn_protocols),
@@ -453,6 +462,7 @@ function Config(;
         client_auth::ClientAuthMode.T = ClientAuthMode.NoClientCert,
         cert_file::Union{Nothing, AbstractString} = nothing,
         key_file::Union{Nothing, AbstractString} = nothing,
+        key_passphrase::Union{Nothing, AbstractString} = nothing,
         ca_file::Union{Nothing, AbstractString} = nothing,
         client_ca_file::Union{Nothing, AbstractString} = nothing,
         alpn_protocols::Vector{String} = String[],
@@ -485,6 +495,7 @@ function Config(;
         _verification_time_s,
         ca_dir === nothing ? nothing : String(ca_dir),
         client_ca_dir === nothing ? nothing : String(client_ca_dir),
+        key_passphrase === nothing ? nothing : String(key_passphrase),
     )
 end
 
@@ -501,6 +512,7 @@ end
         client_auth::ClientAuthMode.T = cfg.client_auth,
         cert_file::Union{Nothing, String} = cfg.cert_file,
         key_file::Union{Nothing, String} = cfg.key_file,
+        key_passphrase::Union{Nothing, String} = cfg.key_passphrase,
         ca_file::Union{Nothing, String} = cfg.ca_file,
         client_ca_file::Union{Nothing, String} = cfg.client_ca_file,
         ca_dir::Union{Nothing, String} = cfg.ca_dir,
@@ -520,7 +532,7 @@ end
     same_identity = cert_file === cfg.cert_file && key_file === cfg.key_file
     cert_file_s = cert_file === nothing ? nothing : abspath(cert_file)
     key_file_s = key_file === nothing ? nothing : abspath(key_file)
-    _check_config_settings!(cert_file_s, key_file_s, handshake_timeout_ns, min_version, max_version)
+    _check_config_settings!(cert_file_s, key_file_s, key_passphrase, handshake_timeout_ns, min_version, max_version)
     client_identity = same_identity ? cfg._client_identity : _TLSLocalIdentityState()
     server_identity = same_identity ? cfg._server_identity : _TLSLocalIdentityState()
     return Config(
@@ -530,6 +542,7 @@ end
         client_auth,
         cert_file_s,
         key_file_s,
+        key_passphrase,
         ca_file,
         client_ca_file,
         copy(alpn_protocols),
@@ -585,6 +598,7 @@ function Config(
         client_auth,
         cert_file,
         key_file,
+        nothing,
         ca_file,
         client_ca_file,
         alpn_protocols,
@@ -604,6 +618,25 @@ function Config(
         nothing,
         nothing,
     )
+end
+
+
+function Base.show(io::IO, config::Config)
+    print(io, "TLS.Config(")
+    fnames = fieldnames(typeof(config))
+    for fname in fnames
+        val = getfield(config, fname)
+        if fname == :key_passphrase && val != nothing
+            # Don't show passphrase
+            val = "***"
+        end
+        print(io, val)
+        if fname != fnames[end]
+            print(io, ", ")
+        end
+    end
+    print(io, ")")
+    return nothing
 end
 
 const _NATIVE_DEFAULT_CURVE_PREFERENCES = (
@@ -824,7 +857,7 @@ function _tls_local_identity(config::Config; is_server::Bool)::Union{Nothing, _T
     lock(state.lock)
     try
         if state.private_key == C_NULL
-            entry = _tls_cached_local_identity(cert_file::String, key_file)
+            entry = _tls_cached_local_identity(cert_file::String, key_file, config.key_passphrase)
             state.certificate_chain = entry.certificate_chain
             state.private_key = entry.private_key
             state.shared_cache = false
