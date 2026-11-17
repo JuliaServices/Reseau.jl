@@ -2035,6 +2035,9 @@ const _TRIM_TASK_CALL_EDGE = Ref(false)
 function _spawn_task_body(body::F)::Task where {F}
     _TRIM_TASK_CALL_EDGE[] && body()
     task = Task(body)
+    # Helpers synchronize through locks, conditions, and channels. Keeping them
+    # migratable also prevents scheduling one from permanently pinning its caller.
+    task.sticky = false
     schedule(task)
     return task
 end
@@ -2341,7 +2344,8 @@ function _resolve_serial(
         addrs::AbstractVector{A},
         deadline_ns::Int64,
         state::DNSRaceState,
-    )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}} where {A<:TCP.SocketEndpoint}
+        dial_once::F = TCP._dial_socketaddr_impl,
+    )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}} where {A<:TCP.SocketEndpoint, F}
     first_err::Union{Nothing, Exception} = nothing
     for (i, remote_addr) in pairs(addrs)
         if @atomic :acquire state.done
@@ -2359,7 +2363,7 @@ function _resolve_serial(
         end
         try
             conn = try
-                TCP._dial_socketaddr_impl(remote_addr, d.local_addr, attempt_deadline, state, kind)
+                dial_once(remote_addr, d.local_addr, attempt_deadline, state, kind)
             catch err
                 ex = _as_exception(err)
                 # An interrupt stops the dial; it is not one address's failure.
