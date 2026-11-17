@@ -1660,6 +1660,9 @@ function _native_tls_auto_client_handshake!(conn::Conn)::Nothing
         raw_server_hello = copy(state13.server_hello_raw)
         client_hello12 = _unmarshal_client_hello(raw_client_hello)
         client_hello12 === nothing && throw(ArgumentError("tls: malformed native mixed-version ClientHello"))
+        # SNI never carries an IP literal, so the parsed hello has lost that name;
+        # certificate verification needs it, as on the exact TLS 1.2 path.
+        client_hello12.server_name = client_hello.server_name
         state12 = _TLS12ClientHandshakeState(client_hello12, session12)
         state12_native = _activate_native_tls12_state!(conn, native_state13)
         io12 = _TLS12HandshakeRecordIO(conn.tcp, state12_native)
