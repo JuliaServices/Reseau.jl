@@ -85,6 +85,32 @@ Base.showerror(io::IO, err::_TLSHandshakeDeadlineError) = showerror(io, err.caus
 # hook to record the selected protocol version.
 @inline _tls_set_negotiated_record_version!(io, ::UInt16)::Nothing = nothing
 
+# QUIC hooks (RFC 9001), the counterpart of Go's `c.quic != nil` branches. The
+# QUIC adapter in `quic.jl` specializes them; every other handshake io is a
+# record-layer transport, so the defaults describe plain TLS.
+@inline _tls_is_quic(io)::Bool = false
+@inline _quic_set_peer_transport_parameters!(io, ::Vector{UInt8})::Nothing = nothing
+@inline _quic_transport_parameters_to_send!(io)::Union{Nothing, Vector{UInt8}} = nothing
+
+# Go's readHandshake caps a message body by type before buffering all of it.
+# Returns one complete handshake message starting at `pos`, or `nothing` when
+# the buffer does not hold all of it yet.
+function _tls_peek_handshake_message(buf::Vector{UInt8}, pos::Int)::Union{Nothing, Vector{UInt8}}
+    available = _tls_buffer_available(buf, pos)
+    available >= 4 || return nothing
+    msg_len = 4 +
+        (Int(buf[pos + 1]) << 16) +
+        (Int(buf[pos + 2]) << 8) +
+        Int(buf[pos + 3])
+    # The cap is on the body, as in Go's readHandshake; `msg_len` includes the header.
+    msg_len - 4 <= _tls_max_handshake_frame_size(buf[pos]) ||
+        _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received oversized handshake message")
+    available >= msg_len || return nothing
+    raw = Vector{UInt8}(undef, msg_len)
+    copyto!(raw, 1, buf, pos, msg_len)
+    return raw
+end
+
 @inline function _tls_buffer_available(buf::Vector{UInt8}, pos::Int)::Int
     return max(0, length(buf) - pos + 1)
 end
