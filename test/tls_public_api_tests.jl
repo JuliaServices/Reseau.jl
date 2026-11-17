@@ -1352,6 +1352,57 @@ _vector_alloc_bytes(n) = @allocated Vector{UInt8}(undef, n)
                 end
             end
         end
+        @testset "mixed-version client verifies an IP-address name when TLS 1.2 is negotiated" begin
+            server_cfg = _tls_server_config(;
+                handshake_timeout_ns = 10_000_000_000,
+                cert_file = _TLS_NATIVE_SERVER_CERT_PATH,
+                key_file = _TLS_NATIVE_SERVER_KEY_PATH,
+                min_version = TL.TLS1_2_VERSION,
+                max_version = TL.TLS1_2_VERSION,
+            )
+            # The server certificate lists IP address 127.0.0.1, not 127.0.0.2. Without
+            # `server_name`, connect derives 127.0.0.1 from the dial address.
+            for (name, verifies) in (("127.0.0.1", true), (nothing, true), ("127.0.0.2", false))
+                client_cfg = TL.Config(
+                    verify_peer = true,
+                    verify_hostname = true,
+                    server_name = name,
+                    ca_file = _TLS_NATIVE_CA_PATH,
+                    handshake_timeout_ns = 10_000_000_000,
+                )
+                listener = nothing
+                client = nothing
+                accept_task = nothing
+                try
+                    listener = TL.listen("tcp", "127.0.0.1:0", server_cfg; backlog = 16)
+                    laddr = TL.addr(listener)::NC.SocketAddrV4
+                    accept_task = errormonitor(Threads.@spawn begin
+                        conn = TL.accept(listener)
+                        try
+                            TL.handshake!(conn)
+                        catch
+                        finally
+                            _tls_close_quiet!(conn)
+                        end
+                    end)
+                    result = try
+                        client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                        TL.connection_state(client).version
+                    catch ex
+                        sprint(showerror, ex)
+                    end
+                    if verifies
+                        @test result == "TLSv1.2"
+                    else
+                        @test occursin("127.0.0.2", result)
+                    end
+                finally
+                    _tls_close_quiet!(client)
+                    _tls_close_quiet!(listener)
+                    accept_task === nothing || _tls_wait_task_done(accept_task)
+                end
+            end
+        end
         @testset "mixed-version native server supports TLS 1.2 mTLS and resumption against an exact TLS 1.2 client" begin
             function run_once(server_cfg::TL.Config, client_cfg::TL.Config)
                 listener = nothing
