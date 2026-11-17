@@ -381,7 +381,7 @@ function _tls13_illegal_client_hello_change(client_hello::_ClientHelloMsg, first
             filter(_tls13_hrr_fixed_extension, first_hello.extensions)
 end
 
-function _tls13_set_client_hello!(state::_TLS13ServerHandshakeState, raw::Vector{UInt8})::Nothing
+function _tls13_set_client_hello!(state::_TLS13ServerHandshakeState, raw::Vector{UInt8}; quic::Bool = false)::Nothing
     parsed = _unmarshal_handshake_message_or_fail(raw)
     parsed isa _ClientHelloMsg ||
         _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 server handshake expected ClientHello")
@@ -395,8 +395,17 @@ function _tls13_set_client_hello!(state::_TLS13ServerHandshakeState, raw::Vector
         _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: initial handshake had non-empty renegotiation extension")
     client_hello.early_data &&
         _tls_fail(_TLS_ALERT_UNSUPPORTED_EXTENSION, "tls: client sent unexpected early data")
-    client_hello.quic_transport_parameters === nothing ||
-        _tls_fail(_TLS_ALERT_UNSUPPORTED_EXTENSION, "tls: client sent an unexpected quic_transport_parameters extension")
+    if quic
+        # RFC 9001 Section 4.2: Clients MUST NOT offer TLS versions older than 1.3.
+        all(>=(TLS1_3_VERSION), client_hello.supported_versions) ||
+            _tls_fail(_TLS_ALERT_PROTOCOL_VERSION, "tls: client offered TLS version older than TLS 1.3")
+        # RFC 9001 Section 8.2.
+        client_hello.quic_transport_parameters === nothing &&
+            _tls_fail(_TLS_ALERT_MISSING_EXTENSION, "tls: client did not send a quic_transport_parameters extension")
+    else
+        client_hello.quic_transport_parameters === nothing ||
+            _tls_fail(_TLS_ALERT_UNSUPPORTED_EXTENSION, "tls: client sent an unexpected quic_transport_parameters extension")
+    end
     state.client_hello = client_hello
     state.client_hello_raw = raw
     return nothing
@@ -404,7 +413,9 @@ end
 
 function _read_client_hello!(state::_TLS13ServerHandshakeState, io)::Nothing
     raw = _read_handshake_bytes!(io)
-    _tls13_set_client_hello!(state, raw)
+    _tls13_set_client_hello!(state, raw; quic = _tls_is_quic(io))
+    params = state.client_hello.quic_transport_parameters
+    params === nothing || _quic_set_peer_transport_parameters!(io, params::Vector{UInt8})
     return nothing
 end
 
@@ -453,7 +464,7 @@ function _prepare_server_negotiation!(state::_TLS13ServerHandshakeState, io, con
     state.cipher_suite = selection.cipher_suite
     state.cipher_spec = selection.cipher_spec
     state.selected_signature_algorithm = _tls13_select_server_signature_algorithm(state.private_key, state.client_hello)
-    state.selected_alpn = _tls_select_server_alpn(config, state.client_hello)
+    state.selected_alpn = _tls_select_server_alpn(config, state.client_hello; quic = _tls_is_quic(io))
     state.transcript = _new_tls13_handshake_transcript(state.cipher_spec.hash_kind)
     state.selected_group = _tls13_server_preferred_group(state.client_hello, config)
     if _tls13_find_client_key_share(state.client_hello, state.selected_group) === nothing
@@ -590,6 +601,7 @@ end
 function _send_encrypted_extensions!(state::_TLS13ServerHandshakeState, io)::Nothing
     msg = _EncryptedExtensionsMsg()
     msg.alpn_protocol = state.selected_alpn
+    msg.quic_transport_parameters = _quic_transport_parameters_to_send!(io)
     msg.server_name_ack = !isempty(state.client_hello.server_name)
     raw = _marshal_encrypted_extensions(msg)
     _transcript_update!(state.transcript, raw)
@@ -718,8 +730,27 @@ end
 
 function _send_new_session_ticket!(state::_TLS13ServerHandshakeState, io, config)::Nothing
     _tls13_should_send_session_tickets(state, config) || return nothing
-    hash_kind = state.cipher_spec.hash_kind
-    resumption_secret = _tls13_derive_secret(hash_kind, state.master_secret, "res master", state.transcript)
+    resumption_secret = _tls13_derive_secret(state.cipher_spec.hash_kind, state.master_secret, "res master", state.transcript)
+    try
+        _tls13_write_new_session_ticket!(io, config, state.cipher_suite, resumption_secret, state.peer_certificates, state.selected_alpn)
+    finally
+        _securezero!(resumption_secret)
+    end
+    return nothing
+end
+
+# Split from `_send_new_session_ticket!` so QUIC can issue the ticket after the
+# handshake state is gone, from the resumption secret it kept (Go's
+# `Conn.sendSessionTicket`).
+function _tls13_write_new_session_ticket!(
+        io,
+        config,
+        cipher_suite::UInt16,
+        resumption_secret::Vector{UInt8},
+        peer_certificates::Vector{Vector{UInt8}},
+        alpn::String,
+    )::Nothing
+    hash_kind = (_tls13_cipher_spec(cipher_suite)::_TLS13CipherSpec).hash_kind
     # We only issue one ticket per connection today, so a zero ticket nonce mirrors
     # Go's current TLS 1.3 server behavior.
     nonce = UInt8[]
@@ -738,14 +769,14 @@ function _send_new_session_ticket!(state::_TLS13ServerHandshakeState, io, config
             UInt32(age_add_bytes[4])
         session = _owned_tls13_server_session(
             TLS1_3_VERSION,
-            state.cipher_suite,
+            cipher_suite,
             now_s,
             now_s + UInt64(_TLS13_MAX_SESSION_TICKET_LIFETIME),
             age_add,
             UInt8[],
             psk,
-            state.peer_certificates,
-            state.selected_alpn,
+            peer_certificates,
+            alpn,
         )
         plaintext = _serialize_tls13_server_session(session::_TLS13ServerSession)
         label = _tls_encrypt_server_session_ticket(keys[1], plaintext)
@@ -761,9 +792,24 @@ function _send_new_session_ticket!(state::_TLS13ServerHandshakeState, io, config
         _securezero!(plaintext)
         _securezero!(psk)
         _securezero!(label)
-        _securezero!(resumption_secret)
         _securezero_tls_session_ticket_keys!(keys)
     end
+    return nothing
+end
+
+function _tls13_on_handshake_keys!(io::_TLS13HandshakeRecordIO, state::_TLS13ServerHandshakeState)::Nothing
+    _tls13_set_read_cipher!(io.state, state.cipher_spec, state.client_handshake_traffic_secret)
+    _tls13_set_write_cipher!(io.state, state.cipher_spec, state.server_handshake_traffic_secret)
+    return nothing
+end
+
+function _tls13_on_server_finished!(io::_TLS13HandshakeRecordIO, state::_TLS13ServerHandshakeState)::Nothing
+    _tls13_set_write_cipher!(io.state, state.cipher_spec, state.server_application_traffic_secret)
+    return nothing
+end
+
+function _tls13_on_client_finished!(io::_TLS13HandshakeRecordIO, state::_TLS13ServerHandshakeState)::Nothing
+    _tls13_set_read_cipher!(io.state, state.cipher_spec, state.client_application_traffic_secret)
     return nothing
 end
 
@@ -774,8 +820,7 @@ function _server_handshake_tls13_after_client_hello!(state::_TLS13ServerHandshak
     _send_server_hello!(state, io)
     _tls13_send_dummy_change_cipher_spec!(io)
     _establish_server_handshake_keys!(state)
-    _tls13_set_read_cipher!(io.state, state.cipher_spec, state.client_handshake_traffic_secret)
-    _tls13_set_write_cipher!(io.state, state.cipher_spec, state.server_handshake_traffic_secret)
+    _tls13_on_handshake_keys!(io, state)
     _send_encrypted_extensions!(state, io)
     if !state.using_psk
         _tls_should_request_client_certificate(config) && _send_certificate_request!(state, io)
@@ -783,12 +828,13 @@ function _server_handshake_tls13_after_client_hello!(state::_TLS13ServerHandshak
         _send_server_certificate_verify!(state, io)
     end
     _send_server_finished!(state, io)
-    _tls13_set_write_cipher!(io.state, state.cipher_spec, state.server_application_traffic_secret)
+    _tls13_on_server_finished!(io, state)
     _read_client_certificate!(state, io, config)
     _read_client_finished!(state, io)
-    _tls13_set_read_cipher!(io.state, state.cipher_spec, state.client_application_traffic_secret)
+    _tls13_on_client_finished!(io, state)
     state.complete = true
-    _send_new_session_ticket!(state, io, config)
+    # QUIC tickets are sent by `send_session_ticket!`, not automatically.
+    _tls_is_quic(io) || _send_new_session_ticket!(state, io, config)
     return nothing
 end
 
