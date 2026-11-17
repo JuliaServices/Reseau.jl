@@ -1394,7 +1394,7 @@ _vector_alloc_bytes(n) = @allocated Vector{UInt8}(undef, n)
                     if verifies
                         @test result == "TLSv1.2"
                     else
-                        @test occursin("127.0.0.2", result)
+                        @test occursin("certificate is not valid for IP address 127.0.0.2", result)
                     end
                 finally
                     _tls_close_quiet!(client)
